@@ -27,7 +27,7 @@ libc = { family = "glibc", version = "2.35" } # vllm cu130 wheels require manyli
 astral = "*"
 attrs = "*"
 av = "==17.0.0"  # conda dep so it pulls conda-forge FFmpeg (LGPL, full codec suite) instead of PyPI's bundled build; pin: 17.0.1 deadlocks in CodecContext.__dealloc__ during multi-threaded decode when a Python log callback is installed (TODO: unpin once PyAV releases a fix)
-ffmpeg = { version = "*", build = "lgpl_*" }  # pin LGPL variant (not GPL)
+ffmpeg = { version = ">=8.1", build = "lgpl_*" }  # pin LGPL variant (not GPL)
 azure-identity = "*"
 azure-storage-blob = "*"
 cattrs = "*"
