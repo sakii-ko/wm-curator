@@ -87,7 +87,7 @@ class ClipWriterStage(CuratorStage):
         generate_previews: bool,
         caption_models: list[str] | None = None,
         enhanced_caption_models: list[str] | None = None,
-        generate_cosmos_predict_dataset: str | None = None,
+        generate_cosmos_predict_dataset: bool = False,
         verbose: bool = False,
         log_stats: bool = False,
     ) -> None:
@@ -1019,7 +1019,7 @@ class ClipWriterStage(CuratorStage):
         self._write_json_data(error_data, error_dest, "video errors", input_video_path)
 
     def _write_per_window_data(self, clip: Clip) -> None:
-        if self._generate_cosmos_predict_dataset == "disable":
+        if not self._generate_cosmos_predict_dataset:
             return
         for window in clip.windows:
             mp4_data = window.mp4_bytes.resolve()

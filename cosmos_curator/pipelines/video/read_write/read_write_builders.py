@@ -51,7 +51,7 @@ class OutputConfig:
     generate_previews: bool = False
     caption_models: list[str] = attrs.Factory(list)
     enhanced_caption_models: list[str] = attrs.Factory(list)
-    generate_cosmos_predict_dataset: str = "disable"
+    generate_cosmos_predict_dataset: bool = False
     num_workers_per_node: int = 8
     num_run_attempts: int = 5
     verbose: bool = False

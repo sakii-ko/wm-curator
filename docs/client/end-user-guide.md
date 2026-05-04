@@ -356,7 +356,7 @@ The [Split-Annotate Pipeline](../curator/reference/video-pipelines.md#split-anno
 for [Cosmos-Predict2 Video2World post-training](https://github.com/nvidia-cosmos/cosmos-predict2/blob/main/documentations/post-training_video2world.md).
 
 The following arguments are needed for `split-annotate` pipeline to generate the datasets for Cosmos-Predict2:
-- add `--generate-cosmos-predict-dataset predict2` to enable the dataset creation.
+- add `--generate-cosmos-predict-dataset` to enable the dataset creation.
 - add ` --transnetv2-min-length-frames 120` to specify a minimum clip length of (e.g.) 120 frames, as Cosmos-Predict2 post-training requires 93 frames by default.
 
 This will generate a `cosmos_predict2_video2world_dataset/` sub-directory under the output path specified by `output_clip_path`.

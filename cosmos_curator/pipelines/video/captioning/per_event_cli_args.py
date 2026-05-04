@@ -35,19 +35,19 @@ def add_event_caption_args(
 
     Args:
         parser: Argparse parser to register the arguments on.
-        include_enable_flag: If True, register ``--enable-event-captioning``.
-            Both pipelines currently use this flag; included for symmetry with
-            ``add_sam3_args``.
+        include_enable_flag: If True, register ``--event-captioning`` /
+            ``--no-event-captioning``. Both pipelines currently use this flag;
+            included for symmetry with ``add_sam3_args``.
 
     """
     if include_enable_flag:
         parser.add_argument(
-            "--enable-event-captioning",
-            action="store_true",
+            "--event-captioning",
+            action=argparse.BooleanOptionalAction,
             default=False,
             help=(
                 "Enable per-event VLM captioning stage after SAM3. Produces per-clip "
-                "sam3_events JSON. Requires --enable-sam3 when used in the splitting pipeline."
+                "sam3_events JSON. Requires --sam3 when used in the splitting pipeline."
             ),
         )
 

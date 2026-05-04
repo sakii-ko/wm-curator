@@ -34,8 +34,8 @@ def add_sam3_args(
 
     Args:
         parser: Argparse parser to register the arguments on.
-        include_enable_flag: If True, register ``--enable-sam3``. The example
-            pipeline always runs SAM3 and does not need it.
+        include_enable_flag: If True, register ``--sam3`` / ``--no-sam3``. The
+            example pipeline always runs SAM3 and does not need it.
         include_write_annotated_flag: If True, register
             ``--sam3-write-annotated-video``. The example pipeline always
             writes the annotated mp4 and does not need it.
@@ -47,8 +47,8 @@ def add_sam3_args(
     """
     if include_enable_flag:
         parser.add_argument(
-            "--enable-sam3",
-            action="store_true",
+            "--sam3",
+            action=argparse.BooleanOptionalAction,
             default=False,
             help=(
                 "Enable SAM3 object tracking stage after the default captioning stage. "
@@ -179,7 +179,7 @@ def add_sam3_args(
             default=False,
             help=(
                 "Emit a per-clip tracked.mp4 with boxes/masks/ids drawn on top. "
-                "Automatically enabled when --enable-event-captioning is set "
+                "Automatically enabled when --event-captioning is set "
                 "(the captioner needs it as VLM input)."
             ),
         )

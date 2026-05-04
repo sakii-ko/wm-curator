@@ -494,7 +494,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
         )
 
     # --- Artificial text filter (optional) ---
-    if getattr(args, "artificial_text_filter", "disable") != "disable":
+    if args.artificial_text_filter:
         stages.extend(
             build_artificial_text_filter_stages(
                 ArtificialTextFilterConfig(
@@ -580,7 +580,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             gemini_max_caption_retries=args.video_classifier_gemini_retries,
             gemini_retry_delay_seconds=args.video_classifier_gemini_retry_delay_seconds,
         )
-        if args.video_classifier != "disable"
+        if args.video_classifier
         else None
     )
     if vlm_filter_cfg is not None or video_classifier_cfg is not None:
@@ -621,11 +621,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
 
     # --- Captioning (optional) ---
     caption_algo = args.captioning_algorithm.lower()
-    keep_mp4 = (
-        args.generate_previews
-        or (args.generate_cosmos_predict_dataset != "disable")
-        or caption_algo in {"gemini", "openai"}
-    )
+    keep_mp4 = args.generate_previews or args.generate_cosmos_predict_dataset or caption_algo in {"gemini", "openai"}
 
     if args.generate_captions:
         if caption_algo not in ALL_CAPTION_ALGOS:
@@ -784,19 +780,19 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
     # so it requires SAM3 to be explicitly enabled. We don't auto-enable
     # it here — the user should opt into the SAM3 stage knowingly because
     # of its GPU/disk cost.
-    if args.enable_event_captioning and not args.enable_sam3:
-        msg = "--enable-event-captioning requires --enable-sam3 to also be set"
+    if args.event_captioning and not args.sam3:
+        msg = "--event-captioning requires --sam3 to also be set"
         raise ValueError(msg)
 
     # --- SAM3 tracking (optional) ---
-    if args.enable_sam3:
+    if args.sam3:
         if not args.sam3_prompts:
-            msg = "--sam3-prompts must be non-empty when --enable-sam3 is set"
+            msg = "--sam3-prompts must be non-empty when --sam3 is set"
             raise ValueError(msg)
         # Event captioning needs the annotated tracked.mp4 (``#id`` overlay is
         # the VLM's only spatial grounding for object ids), so force-enable
         # annotation when it's on.
-        write_annotated_video = args.sam3_write_annotated_video or args.enable_event_captioning
+        write_annotated_video = args.sam3_write_annotated_video or args.event_captioning
         stages.extend(
             build_sam3_tracking_stages(
                 SAM3TrackingConfig(
@@ -822,7 +818,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
         )
 
     # --- Per-event VLM captioning (optional) ---
-    if args.enable_event_captioning:
+    if args.event_captioning:
         stages.append(
             PerEventCaptionStage(
                 backend=args.event_caption_backend,
@@ -844,7 +840,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
         )
 
     # --- T5 encoding (optional) ---
-    if args.generate_cosmos_predict_dataset != "disable":
+    if args.generate_cosmos_predict_dataset:
         stages.extend(
             build_t5_stages(
                 T5Config(
@@ -1125,7 +1121,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         ),
     )
     parser.add_argument(
-        "--upload-cvds-parquet",
         "--upload-cds-parquet",
         dest="upload_cds_parquet",
         action="store_true",
@@ -1134,9 +1129,9 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--generate-cosmos-predict-dataset",
-        choices=["disable", "predict2"],
-        default="disable",
-        help="Whether and how to generate Cosmos-PredictX post-training dataset.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Generate Cosmos-Predict2 post-training dataset.",
     )
     parser.add_argument(
         "--no-write-all-caption-json",
@@ -1433,25 +1428,21 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--artificial-text-filter",
-        choices=["disable", "enable"],
-        default="disable",
-        help=(
-            "Whether to enable artificial text filtering for video clips.\n"
-            "  - disable: Disable artificial text filtering (default).\n"
-            "  - enable: Filter clips that contain overlay/artificial text (e.g. captions, logos)."
-        ),
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Filter clips that contain overlay/artificial text (e.g. captions, logos).",
     )
     parser.add_argument(
         "--artificial-text-frame-interval",
         type=int,
         default=3,
-        help="Sample every N frames for artificial text detection (with --artificial-text-filter enable).",
+        help="Sample every N frames for artificial text detection (with --artificial-text-filter).",
     )
     parser.add_argument(
         "--artificial-text-gpus-per-worker",
         type=float,
         default=0.25,
-        help="GPUs per worker for artificial text filter (with --artificial-text-filter enable).",
+        help="GPUs per worker for artificial text filter (with --artificial-text-filter).",
     )
     parser.add_argument(
         "--no-artificial-text-corner-detection",
@@ -1509,7 +1500,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter",
-        "--qwen-filter",
         dest="vlm_filter",
         choices=["enable", "disable", "score-only"],
         default="disable",
@@ -1522,7 +1512,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-prompt-variant",
-        "--qwen-filter-prompt-variant",
         dest="vlm_filter_prompt_variant",
         type=str,
         default="default",
@@ -1533,7 +1522,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-categories",
-        "--qwen-filter-categories",
         dest="vlm_filter_categories",
         type=str,
         default=None,
@@ -1544,7 +1532,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-rejection-threshold",
-        "--qwen-filter-rejection-threshold",
         dest="vlm_filter_rejection_threshold",
         type=float,
         default=0.5,
@@ -1552,7 +1539,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-batch-size",
-        "--qwen-filter-batch-size",
         dest="vlm_filter_batch_size",
         type=int,
         default=16,
@@ -1560,7 +1546,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-model-variant",
-        "--qwen-filter-model-variant",
         dest="vlm_filter_model_variant",
         type=str,
         default="qwen",
@@ -1568,7 +1553,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-fp8-enable",
-        "--qwen-filter-fp8-enable",
         dest="vlm_filter_fp8_enable",
         action="store_true",
         default=False,
@@ -1576,7 +1560,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-max-output-tokens",
-        "--qwen-filter-max-output-tokens",
         dest="vlm_filter_max_output_tokens",
         type=int,
         default=8192,
@@ -1584,7 +1567,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-num-gpus",
-        "--qwen-filter-num-gpus",
         dest="vlm_filter_num_gpus",
         type=int,
         default=1,
@@ -1592,7 +1574,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-endpoint",
-        "--qwen-filter-endpoint",
         dest="vlm_filter_endpoint",
         choices=["local", "openai", "gemini"],
         default="local",
@@ -1602,7 +1583,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-openai-model-name",
-        "--qwen-filter-openai-model-name",
         dest="vlm_filter_openai_model_name",
         type=str,
         default="auto",
@@ -1610,7 +1590,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-openai-retries",
-        "--qwen-filter-openai-retries",
         dest="vlm_filter_openai_retries",
         type=int,
         default=3,
@@ -1618,7 +1597,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-openai-retry-delay-seconds",
-        "--qwen-filter-openai-retry-delay-seconds",
         dest="vlm_filter_openai_retry_delay_seconds",
         type=float,
         default=1.0,
@@ -1626,7 +1604,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-gemini-model-name",
-        "--qwen-filter-gemini-model-name",
         dest="vlm_filter_gemini_model_name",
         type=str,
         default="models/gemini-2.5-pro",
@@ -1634,7 +1611,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-gemini-retries",
-        "--qwen-filter-gemini-retries",
         dest="vlm_filter_gemini_retries",
         type=int,
         default=3,
@@ -1642,7 +1618,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--vlm-filter-gemini-retry-delay-seconds",
-        "--qwen-filter-gemini-retry-delay-seconds",
         dest="vlm_filter_gemini_retry_delay_seconds",
         type=float,
         default=1.0,
@@ -1650,20 +1625,17 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier",
-        "--qwen-video-classifier",
         dest="video_classifier",
-        choices=["enable", "disable"],
-        default="disable",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help=(
-            "Whether to enable VLM-based video classifier. "
-            "enable: filter by type allow/block lists; disable: do not run. "
+            "Enable VLM-based video classifier; filter by type allow/block lists. "
             "Set --video-classifier-allow and/or --video-classifier-block. "
             "With --video-classifier-use-custom-categories, allow/block define the full category set."
         ),
     )
     parser.add_argument(
         "--video-classifier-rejection-threshold",
-        "--qwen-video-classifier-rejection-threshold",
         dest="video_classifier_rejection_threshold",
         type=float,
         default=0.5,
@@ -1671,7 +1643,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-use-custom-categories",
-        "--qwen-video-classifier-use-custom-categories",
         dest="video_classifier_use_custom_categories",
         action="store_true",
         default=False,
@@ -1682,7 +1653,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-allow",
-        "--qwen-video-classifier-allow",
         dest="video_classifier_allow",
         type=str,
         action="append",
@@ -1696,7 +1666,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-block",
-        "--qwen-video-classifier-block",
         dest="video_classifier_block",
         type=str,
         action="append",
@@ -1709,7 +1678,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-allow-file",
-        "--qwen-video-classifier-allow-file",
         dest="video_classifier_allow_file",
         type=str,
         default=None,
@@ -1720,7 +1688,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-block-file",
-        "--qwen-video-classifier-block-file",
         dest="video_classifier_block_file",
         type=str,
         default=None,
@@ -1731,7 +1698,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-batch-size",
-        "--qwen-video-classifier-batch-size",
         dest="video_classifier_batch_size",
         type=int,
         default=16,
@@ -1739,7 +1705,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-model-variant",
-        "--qwen-video-classifier-model-variant",
         dest="video_classifier_model_variant",
         type=str,
         default="qwen",
@@ -1747,7 +1712,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-fp8-enable",
-        "--qwen-video-classifier-fp8-enable",
         dest="video_classifier_fp8_enable",
         action="store_true",
         default=False,
@@ -1755,7 +1719,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-max-output-tokens",
-        "--qwen-video-classifier-max-output-tokens",
         dest="video_classifier_max_output_tokens",
         type=int,
         default=8192,
@@ -1763,7 +1726,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-num-gpus",
-        "--qwen-video-classifier-num-gpus",
         dest="video_classifier_num_gpus",
         type=int,
         default=1,
@@ -1771,7 +1733,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-endpoint",
-        "--qwen-video-classifier-endpoint",
         dest="video_classifier_endpoint",
         choices=["local", "openai", "gemini"],
         default="local",
@@ -1781,7 +1742,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-openai-model-name",
-        "--qwen-video-classifier-openai-model-name",
         dest="video_classifier_openai_model_name",
         type=str,
         default="auto",
@@ -1789,7 +1749,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-openai-retries",
-        "--qwen-video-classifier-openai-retries",
         dest="video_classifier_openai_retries",
         type=int,
         default=3,
@@ -1797,7 +1756,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-openai-retry-delay-seconds",
-        "--qwen-video-classifier-openai-retry-delay-seconds",
         dest="video_classifier_openai_retry_delay_seconds",
         type=float,
         default=1.0,
@@ -1805,7 +1763,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-gemini-model-name",
-        "--qwen-video-classifier-gemini-model-name",
         dest="video_classifier_gemini_model_name",
         type=str,
         default="models/gemini-2.5-pro",
@@ -1813,7 +1770,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-gemini-retries",
-        "--qwen-video-classifier-gemini-retries",
         dest="video_classifier_gemini_retries",
         type=int,
         default=3,
@@ -1821,7 +1777,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--video-classifier-gemini-retry-delay-seconds",
-        "--qwen-video-classifier-gemini-retry-delay-seconds",
         dest="video_classifier_gemini_retry_delay_seconds",
         type=float,
         default=1.0,
@@ -2010,12 +1965,6 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         action="store_true",
         default=False,
         help="Whether to use fp8 weights for Qwen VL model or not.",
-    )
-    parser.add_argument(
-        "--qwen-use-async-engine",
-        action="store_true",
-        default=False,
-        help="Whether to use async engine for Qwen VL model or not (no longer supported).",
     )
     parser.add_argument(
         "--qwen-num-gpus-per-worker",

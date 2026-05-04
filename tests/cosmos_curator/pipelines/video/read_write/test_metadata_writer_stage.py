@@ -54,7 +54,7 @@ def _create_stage(output_dir: Path, input_dir: Path, **overrides: object) -> Cli
         "generate_previews": False,
         "caption_models": ["qwen"],
         "enhanced_caption_models": ["qwen_plus"],
-        "generate_cosmos_predict_dataset": "disable",
+        "generate_cosmos_predict_dataset": False,
         "verbose": False,
         "log_stats": False,
     }
@@ -678,7 +678,7 @@ def test_per_window_dataset_assets_written(tmp_path: Path) -> None:
         upload_clips=False,
         upload_cds_parquet=False,
         generate_embeddings=False,
-        generate_cosmos_predict_dataset="enable",
+        generate_cosmos_predict_dataset=True,
     )
 
     window = Window(
@@ -942,7 +942,7 @@ def test_write_per_window_data_export_gate(
     stage = _create_stage(
         output_dir,
         tmp_path / "in",
-        generate_cosmos_predict_dataset="enable",
+        generate_cosmos_predict_dataset=True,
     )
 
     caption = {"qwen": caption_value} if caption_value is not None else {}

@@ -34,7 +34,7 @@ Outputs written per input ``<name>.mp4``:
 
 - ``<output-dir>/<name>/instances.json``
 - ``<output-dir>/<name>/objects.json``
-- ``<output-dir>/<name>/events.json`` (if ``--enable-event-captioning``)
+- ``<output-dir>/<name>/events.json`` (if ``--event-captioning``)
 - ``<output-dir>/<name>/tracked.mp4`` (annotated video; always on for this example)
 """
 
@@ -210,7 +210,7 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
             )
         )
     )
-    if args.enable_event_captioning:
+    if args.event_captioning:
         caption_stage = PerEventCaptionStage(
             backend=args.event_caption_backend,
             prompt_text=resolve_event_caption_prompt(args),
