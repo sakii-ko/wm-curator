@@ -114,6 +114,7 @@ class CaptioningConfig:
     preview_target_height: int = 240
     inflight_batching: bool = True
     enhance_config: EnhanceCaptionConfig | None = None
+    caption_quality_flags_enabled: bool = True
     verbose: bool = False
     perf_profile: bool = False
 
@@ -222,6 +223,7 @@ def _build_captioning_caption_stage(config: CaptioningConfig) -> CuratorStage | 
                     keep_mp4=config.keep_mp4,
                     log_stats=config.perf_profile,
                     inflight_batching=config.inflight_batching,
+                    caption_quality_flags_enabled=config.caption_quality_flags_enabled,
                 ),
                 num_setup_attempts_python=None,
             )

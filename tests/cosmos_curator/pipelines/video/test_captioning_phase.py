@@ -17,6 +17,7 @@
 
 import pytest
 
+from cosmos_curator.core.interfaces.stage_interface import CuratorStageSpec
 from cosmos_curator.pipelines.video.captioning.captioning_builders import (
     CaptioningConfig,
     OpenAIConfig,
@@ -26,7 +27,8 @@ from cosmos_curator.pipelines.video.captioning.captioning_builders import (
 )
 from cosmos_curator.pipelines.video.captioning.gemini_caption_stage import ApiPrepStage
 from cosmos_curator.pipelines.video.captioning.openai_caption_stage import OpenAICaptionStage
-from cosmos_curator.pipelines.video.utils.data_model import WindowConfig
+from cosmos_curator.pipelines.video.captioning.vllm_caption_stage import VllmCaptionStage
+from cosmos_curator.pipelines.video.utils.data_model import VllmConfig, WindowConfig
 
 
 def _default_openai_config() -> CaptioningConfig:
@@ -99,6 +101,21 @@ def test_build_caption_stage_unsupported_backend_raises() -> None:
     )
     with pytest.raises(NotImplementedError, match="Unsupported caption backend type"):
         _build_captioning_caption_stage(cfg)
+
+
+def test_build_caption_stage_vllm_forwards_caption_quality_flag() -> None:
+    """VllmCaptionStage should receive caption quality flag config."""
+    cfg = CaptioningConfig(
+        backend=VllmConfig(model_variant="qwen"),
+        window_config=WindowConfig(),
+        caption_quality_flags_enabled=False,
+    )
+
+    stage_spec = _build_captioning_caption_stage(cfg)
+
+    assert isinstance(stage_spec, CuratorStageSpec)
+    assert isinstance(stage_spec.stage, VllmCaptionStage)
+    assert stage_spec.stage._caption_quality_flags_enabled is False
 
 
 # ---------------------------------------------------------------------------

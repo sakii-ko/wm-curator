@@ -15,7 +15,13 @@
 """Tests for ingest stage builder topology."""
 
 from cosmos_curator.core.interfaces.stage_interface import CuratorStageSpec
-from cosmos_curator.pipelines.video.read_write.read_write_builders import IngestConfig, build_ingest_stages
+from cosmos_curator.pipelines.video.read_write.metadata_writer_stage import ClipWriterStage
+from cosmos_curator.pipelines.video.read_write.read_write_builders import (
+    IngestConfig,
+    OutputConfig,
+    build_ingest_stages,
+    build_output_stages,
+)
 from cosmos_curator.pipelines.video.read_write.remux_stages import RemuxStage
 
 
@@ -32,3 +38,20 @@ def test_remux_stage_absent_from_ingest_stages() -> None:
     # Unwrap CuratorStageSpec to catch RemuxStage whether bare or wrapped
     inner_stages = [s.stage if isinstance(s, CuratorStageSpec) else s for s in stages]
     assert not any(isinstance(s, RemuxStage) for s in inner_stages), "RemuxStage must not be in ingest stages"
+
+
+def test_output_stage_forwards_caption_quality_flag() -> None:
+    """ClipWriterStage should receive caption quality flag config."""
+    config = OutputConfig(
+        output_path="/fake/output",
+        input_path="/fake/input",
+        caption_quality_flags_enabled=False,
+    )
+
+    stages = build_output_stages(config)
+
+    assert len(stages) == 1
+    stage_spec = stages[0]
+    assert isinstance(stage_spec, CuratorStageSpec)
+    assert isinstance(stage_spec.stage, ClipWriterStage)
+    assert stage_spec.stage._caption_quality_flags_enabled is False

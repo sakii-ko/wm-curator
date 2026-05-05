@@ -224,6 +224,11 @@ def _assert_payloads_cleared(clip: Clip, window: Window) -> None:
     assert window.webp_bytes.resolve() is None
     assert window.caption == {}
     assert window.enhanced_caption == {}
+    assert window.caption_status is None
+    assert window.caption_failure_reason is None
+    assert window.flag_length_outlier is None
+    assert window.flag_repetition is None
+    assert window.flag_near_duplicate is None
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -308,12 +313,18 @@ def test_process_data_writes_expected_local_outputs(tmp_path: Path) -> None:
         {
             "start_frame": 0,
             "end_frame": 30,
+            "caption_status": "success",
+            "caption_failure_reason": None,
+            "flag_length_outlier": None,
+            "flag_repetition": None,
+            "flag_near_duplicate": None,
             "qwen_caption": "main caption",
             "qwen_plus_enhanced_caption": "enhanced view",
         }
     ]
     assert clip_metadata["valid"] is True
     assert clip_metadata["has_caption"] is True
+    assert clip_metadata["caption_quality_flags_enabled"] is True
 
     video_uuid = ClipWriterStage.get_video_uuid(video.input_path)
     video_meta = _read_json(output_dir / "processed_videos" / "video.mp4.json")
@@ -341,6 +352,20 @@ def test_process_data_writes_expected_local_outputs(tmp_path: Path) -> None:
     assert cds_meta["model_version"] == "v1"
     assert cds_meta["caption"] == "main caption"
     assert cds_meta["clip_location"].endswith(f"clips/{clip.uuid}.mp4")
+
+
+def test_process_data_cleanup_resets_caption_quality_flags(tmp_path: Path) -> None:
+    """Writer cleanup clears transient caption quality flags."""
+    stage, task, _, main_window, _ = _stage_with_main_clip(tmp_path)
+    main_window.flag_length_outlier = True
+    main_window.flag_repetition = False
+    main_window.flag_near_duplicate = True
+
+    stage.process_data([task])
+
+    assert main_window.flag_length_outlier is None
+    assert main_window.flag_repetition is None
+    assert main_window.flag_near_duplicate is None
 
 
 def test_process_data_writes_filter_window_errors(tmp_path: Path) -> None:
@@ -513,7 +538,18 @@ def test_chunked_metadata_writes_group_jsonl(tmp_path: Path) -> None:
     chunk_record = json.loads(lines[0])
     assert chunk_record["span_uuid"] == str(clip.uuid)
     assert chunk_record["has_caption"] is True
-    assert chunk_record["windows"] == [{"start_frame": 0, "end_frame": 15, "qwen_caption": "chunk caption"}]
+    assert chunk_record["windows"] == [
+        {
+            "start_frame": 0,
+            "end_frame": 15,
+            "caption_status": "success",
+            "caption_failure_reason": None,
+            "flag_length_outlier": None,
+            "flag_repetition": None,
+            "flag_near_duplicate": None,
+            "qwen_caption": "chunk caption",
+        }
+    ]
     assert chunk_record["clip_location"].endswith(f"clips/{clip.uuid}.mp4")
 
     chunk_stats = _read_json(output_dir / "processed_clip_chunks" / "video.mp4_0.json")
@@ -566,6 +602,12 @@ def test_chunked_metadata_writes_lance_dataset(tmp_path: Path) -> None:
     assert row["span_uuid"] == str(clip.uuid)
     assert row["video_uuid"] == str(video_uuid)
     assert row["clip_chunk_index"] == 0
+    assert row["caption_quality_flags_enabled"] is True
+    assert row["windows"][0]["caption_status"] == "success"
+    assert row["windows"][0]["caption_failure_reason"] is None
+    assert row["windows"][0]["flag_length_outlier"] is None
+    assert row["windows"][0]["flag_repetition"] is None
+    assert row["windows"][0]["flag_near_duplicate"] is None
     assert row["windows"][0]["qwen_caption"] == "lance caption"
 
 
@@ -848,6 +890,84 @@ def test_video_errors_written_to_error_path(tmp_path: Path) -> None:
     # Verify that video-level metadata is also NOT written (since errors exist)
     video_meta_path = output_dir / "processed_videos" / "video.mp4.json"
     assert not video_meta_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# caption quality metadata shape
+# ---------------------------------------------------------------------------
+
+
+def test_make_clip_metadata_caption_quality_flags_enabled_shape(tmp_path: Path) -> None:
+    """Enabled metadata includes status, failure reason, and unprefixed quality flags."""
+    stage = _create_stage(tmp_path / "out", tmp_path / "in")
+    window = Window(
+        start_frame=0,
+        end_frame=10,
+        caption={"qwen": "A useful caption."},
+        caption_status="success",
+        caption_failure_reason=None,
+        flag_length_outlier=False,
+        flag_repetition=True,
+        flag_near_duplicate=False,
+    )
+    clip = Clip(uuid=uuid.uuid4(), source_video="v.mp4", span=(0.0, 1.0), windows=[window])
+    video_meta = VideoMetadata(height=1080, width=1920, framerate=30.0, num_frames=30, duration=1.0, video_codec="h264")
+
+    data = stage._make_clip_metadata(clip, video_meta)
+    row = data["windows"][0]
+
+    assert data["caption_quality_flags_enabled"] is True
+    assert row["caption_status"] == "success"
+    assert row["caption_failure_reason"] is None
+    assert row["flag_length_outlier"] is False
+    assert row["flag_repetition"] is True
+    assert row["flag_near_duplicate"] is False
+    assert row["qwen_caption"] == "A useful caption."
+
+
+def test_make_clip_metadata_caption_quality_flags_disabled_shape(tmp_path: Path) -> None:
+    """Disabled metadata omits only quality flags from each window row."""
+    stage = _create_stage(tmp_path / "out", tmp_path / "in", caption_quality_flags_enabled=False)
+    window = Window(
+        start_frame=0,
+        end_frame=10,
+        caption={"qwen": "A useful caption."},
+        caption_status="error",
+        caption_failure_reason="exception",
+        flag_length_outlier=True,
+        flag_repetition=True,
+        flag_near_duplicate=True,
+    )
+    clip = Clip(uuid=uuid.uuid4(), source_video="v.mp4", span=(0.0, 1.0), windows=[window])
+    video_meta = VideoMetadata(height=1080, width=1920, framerate=30.0, num_frames=30, duration=1.0, video_codec="h264")
+
+    data = stage._make_clip_metadata(clip, video_meta)
+    row = data["windows"][0]
+
+    assert data["caption_quality_flags_enabled"] is False
+    assert row["caption_status"] == "error"
+    assert row["caption_failure_reason"] == "exception"
+    assert row["qwen_caption"] == "A useful caption."
+    assert "flag_length_outlier" not in row
+    assert "flag_repetition" not in row
+    assert "flag_near_duplicate" not in row
+
+
+def test_make_clip_metadata_emits_none_status_for_unprocessed_window(tmp_path: Path) -> None:
+    """Windows no caption stage processed flow through with caption_status=None."""
+    stage = _create_stage(tmp_path / "out", tmp_path / "in")
+    window = Window(start_frame=0, end_frame=10)
+    clip = Clip(uuid=uuid.uuid4(), source_video="v.mp4", span=(0.0, 1.0), windows=[window])
+    video_meta = VideoMetadata(height=1080, width=1920, framerate=30.0, num_frames=30, duration=1.0, video_codec="h264")
+
+    data = stage._make_clip_metadata(clip, video_meta)
+    row = data["windows"][0]
+
+    assert row["caption_status"] is None
+    assert row["caption_failure_reason"] is None
+    assert row["flag_length_outlier"] is None
+    assert row["flag_repetition"] is None
+    assert row["flag_near_duplicate"] is None
 
 
 # ---------------------------------------------------------------------------

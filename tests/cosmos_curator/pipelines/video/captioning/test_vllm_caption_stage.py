@@ -26,6 +26,7 @@ import pytest
 from cosmos_curator.core.utils.model import conda_utils
 from cosmos_curator.models.vllm_model_ids import _VLLM_MODELS
 from cosmos_curator.models.vllm_sentinels import VLLM_UNKNOWN_CAPTION
+from cosmos_curator.pipelines.video.captioning import vllm_caption_stage
 from cosmos_curator.pipelines.video.captioning.vllm_caption_stage import _scatter_captions
 from cosmos_curator.pipelines.video.utils.data_model import (
     Clip,
@@ -401,6 +402,75 @@ def test_scatter_captions_sets_status(
         assert "qwen" not in window.caption
     assert window.caption_status == expected_status
     assert window.caption_failure_reason == expected_reason
+
+
+def _make_caption_stage_task(*, use_filter_windows: bool = False) -> SplitPipeTask:
+    """Create a minimal task whose selected windows have vLLM model input."""
+    window = Window(start_frame=0, end_frame=10, model_input={"qwen": {"prompt": "input"}})
+    clip = Clip(uuid=UUID_1, source_video="test.mp4", span=(0.0, 1.0))
+    if use_filter_windows:
+        clip.filter_windows = [window]
+    else:
+        clip.windows = [window]
+    video = Video(input_video=Path("test.mp4"), clips=[clip])
+    return SplitPipeTask(session_id="test-session", video=video)
+
+
+def _process_caption_stage_with_quality_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caption_quality_flags_enabled: bool = True,
+    use_filter_windows: bool = False,
+) -> tuple[MagicMock, SplitPipeTask]:
+    """Run VllmCaptionStage.process_data with mocked inference and return the quality mock."""
+    task = _make_caption_stage_task(use_filter_windows=use_filter_windows)
+    stage = vllm_caption_stage.VllmCaptionStage(
+        vllm_config=VllmConfig(model_variant="qwen"),
+        caption_quality_flags_enabled=caption_quality_flags_enabled,
+        use_filter_windows=use_filter_windows,
+    )
+    stage._llm = object()  # type: ignore[attr-defined]
+    stage._sampling_params = object()  # type: ignore[attr-defined]
+    stage._processor = object()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        vllm_caption_stage,
+        "vllm_caption",
+        lambda *_args, **_kwargs: [VllmWindowResult("a useful caption text", "stop", TokenCounts())],
+        raising=False,
+    )
+    quality_mock = MagicMock()
+    monkeypatch.setattr(vllm_caption_stage, "apply_caption_quality_flags", quality_mock)
+
+    stage.process_data([task])
+    return quality_mock, task
+
+
+def test_process_data_applies_caption_quality_flags_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enabled subject-caption runs should invoke caption quality flagging."""
+    quality_mock, task = _process_caption_stage_with_quality_patch(monkeypatch)
+
+    quality_mock.assert_called_once()
+    window_groups, model_variant = quality_mock.call_args.args
+    assert model_variant == "qwen"
+    assert len(window_groups) == 1
+    assert len(window_groups[0]) == 1
+    # Object identity: quality flagging mutates the actual Window, not a copy.
+    assert window_groups[0][0] is task.video.clips[0].windows[0]
+
+
+def test_process_data_skips_caption_quality_flags_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disabled caption quality runs should skip flagging."""
+    quality_mock, _ = _process_caption_stage_with_quality_patch(monkeypatch, caption_quality_flags_enabled=False)
+
+    quality_mock.assert_not_called()
+
+
+def test_process_data_skips_caption_quality_flags_for_filter_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filter-window vLLM runs should skip subject-caption quality flagging."""
+    quality_mock, _ = _process_caption_stage_with_quality_patch(monkeypatch, use_filter_windows=True)
+
+    quality_mock.assert_not_called()
 
 
 @pytest.mark.env("unified")

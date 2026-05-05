@@ -46,6 +46,7 @@ from cosmos_curator.models.all_models import get_all_models_by_id
 from cosmos_curator.models.prompts import get_prompt, get_stage2_prompt
 from cosmos_curator.models.vllm_model_ids import get_vllm_model_id
 from cosmos_curator.models.vllm_sentinels import VLLM_UNKNOWN_CAPTION
+from cosmos_curator.pipelines.video.captioning.caption_quality_flags import apply_caption_quality_flags
 from cosmos_curator.pipelines.video.utils import windowing_utils
 from cosmos_curator.pipelines.video.utils.data_model import (
     CaptionOutcome,
@@ -426,6 +427,7 @@ class VllmCaptionStage(CuratorStage):
         verbose: bool = False,
         log_stats: bool = False,
         use_filter_windows: bool = False,
+        caption_quality_flags_enabled: bool = True,
     ) -> None:
         """Initialize the vLLM caption stage.
 
@@ -440,6 +442,8 @@ class VllmCaptionStage(CuratorStage):
             log_stats: Whether to log performance statistics.
             use_filter_windows: If True, read windows from clip.filter_windows instead
                 of clip.windows. Use this when paired with VllmPrepStage(use_filter_windows=True).
+            caption_quality_flags_enabled: Whether to annotate subject-caption windows
+                with heuristic caption quality flags.
 
         """
         super().__init__()
@@ -457,6 +461,7 @@ class VllmCaptionStage(CuratorStage):
         self._max_inflight_requests = max_inflight_requests
         self._inflight_batching = inflight_batching
         self._use_filter_windows = use_filter_windows
+        self._caption_quality_flags_enabled = caption_quality_flags_enabled
 
     def stage_setup_on_node(self) -> None:
         """Set up on a node by copying model weights if configured.
@@ -554,6 +559,13 @@ class VllmCaptionStage(CuratorStage):
         """
         return self._model
 
+    def _apply_caption_quality_flags(self, tasks: list[T]) -> None:
+        if not self._caption_quality_flags_enabled or self._use_filter_windows:
+            return
+
+        window_groups = [clip.windows for task in tasks for clip in get_video_from_task(task).clips if clip.windows]
+        apply_caption_quality_flags(window_groups, self._vllm_config.model_variant)
+
     @nvtx.annotate("VllmCaptionStage")  # type: ignore[untyped-decorator]
     def process_data(self, tasks: list[T]) -> list[T]:  # noqa: C901
         """Process the data for the vLLM caption stage.
@@ -639,6 +651,7 @@ class VllmCaptionStage(CuratorStage):
 
             # Scatter captions back to windows
             _scatter_captions(windows, results, clip_uuids, self._vllm_config.model_variant, verbose=self._verbose)
+            self._apply_caption_quality_flags(tasks)
 
             logger.info(f"Generated {len(results)} captions for {len(tasks)} tasks")
 

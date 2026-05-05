@@ -51,6 +51,7 @@ class OutputConfig:
     generate_previews: bool = False
     caption_models: list[str] = attrs.Factory(list)
     enhanced_caption_models: list[str] = attrs.Factory(list)
+    caption_quality_flags_enabled: bool = True
     generate_cosmos_predict_dataset: bool = False
     num_workers_per_node: int = 8
     num_run_attempts: int = 5
@@ -93,6 +94,7 @@ def build_output_stages(config: OutputConfig) -> list[CuratorStage | CuratorStag
                 generate_previews=config.generate_previews,
                 caption_models=config.caption_models,
                 enhanced_caption_models=config.enhanced_caption_models,
+                caption_quality_flags_enabled=config.caption_quality_flags_enabled,
                 generate_cosmos_predict_dataset=config.generate_cosmos_predict_dataset,
                 verbose=config.verbose,
                 log_stats=config.perf_profile,

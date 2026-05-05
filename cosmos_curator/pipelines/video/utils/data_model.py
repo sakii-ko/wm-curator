@@ -178,6 +178,9 @@ class Window:
     caption_status: Literal["success", "truncated", "blocked", "error", "skipped"] | None = None
     # set only when caption_status == "error"
     caption_failure_reason: CaptionFailureReason | None = None
+    flag_length_outlier: bool | None = None
+    flag_repetition: bool | None = None
+    flag_near_duplicate: bool | None = None
     # for debugging
     errors: dict[str, str] = attrs.Factory(dict)
 

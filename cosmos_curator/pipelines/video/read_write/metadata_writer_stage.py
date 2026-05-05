@@ -87,6 +87,7 @@ class ClipWriterStage(CuratorStage):
         generate_previews: bool,
         caption_models: list[str] | None = None,
         enhanced_caption_models: list[str] | None = None,
+        caption_quality_flags_enabled: bool = True,
         generate_cosmos_predict_dataset: bool = False,
         verbose: bool = False,
         log_stats: bool = False,
@@ -114,6 +115,7 @@ class ClipWriterStage(CuratorStage):
         self._generate_previews = generate_previews
         self._caption_models = caption_models
         self._enhanced_caption_models = enhanced_caption_models
+        self._caption_quality_flags_enabled = caption_quality_flags_enabled
         self._generate_cosmos_predict_dataset = generate_cosmos_predict_dataset
         self._verbose = verbose
         self._log_stats = log_stats
@@ -448,6 +450,9 @@ class ClipWriterStage(CuratorStage):
                     window.enhanced_caption.clear()
                     window.caption_status = None
                     window.caption_failure_reason = None
+                    window.flag_length_outlier = None
+                    window.flag_repetition = None
+                    window.flag_near_duplicate = None
                     window.webp_bytes.drop()
 
     def process_data(self, tasks: list[SplitPipeTask]) -> list[SplitPipeTask] | None:  # type: ignore[override]
@@ -854,7 +859,15 @@ class ClipWriterStage(CuratorStage):
             curr_window: dict[str, Any] = {
                 "start_frame": window.start_frame,
                 "end_frame": window.end_frame,
+                "caption_status": window.caption_status,
+                "caption_failure_reason": window.caption_failure_reason,
             }
+            # Enabled metadata emits flag keys for every window. None means no evaluated flag value,
+            # including caption paths that do not populate them.
+            if self._caption_quality_flags_enabled:
+                curr_window["flag_length_outlier"] = window.flag_length_outlier
+                curr_window["flag_repetition"] = window.flag_repetition
+                curr_window["flag_near_duplicate"] = window.flag_near_duplicate
             for model in self._caption_models:
                 if model in window.caption:
                     curr_window[f"{model}_caption"] = window.caption[model]
@@ -872,6 +885,8 @@ class ClipWriterStage(CuratorStage):
             data["windows"].append(curr_window)
         data["valid"] = bool(clip.encoded_data and len(clip.windows) > 0)
         data["has_caption"] = has_caption
+        # Per-clip marker only; _write_video_metadata() intentionally does not emit it.
+        data["caption_quality_flags_enabled"] = self._caption_quality_flags_enabled
         data["total_prompt_tokens"] = total_prompt_tokens
         data["total_output_tokens"] = total_output_tokens
         embedding = self._get_clip_embedding(clip)

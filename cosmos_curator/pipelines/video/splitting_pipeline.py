@@ -346,6 +346,8 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
 
     """
     stages: list[CuratorStage | CuratorStageSpec] = []
+    # Single CLI source: captioning and writer must observe the same enabled value.
+    caption_quality_flags_enabled = args.caption_quality_flags_enabled
 
     # --- Ingest (always) ---
     stages.extend(
@@ -770,6 +772,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
                     preview_target_height=args.preview_target_height,
                     inflight_batching=args.vllm_use_inflight_batching,
                     enhance_config=enhance_config,
+                    caption_quality_flags_enabled=caption_quality_flags_enabled,
                     verbose=args.verbose,
                     perf_profile=args.perf_profile,
                 )
@@ -869,6 +872,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
                 generate_previews=args.generate_previews,
                 caption_models=[args.captioning_algorithm],
                 enhanced_caption_models=[args.enhance_captions_lm_variant],
+                caption_quality_flags_enabled=caption_quality_flags_enabled,
                 generate_cosmos_predict_dataset=args.generate_cosmos_predict_dataset,
                 num_workers_per_node=args.num_clip_writer_workers_per_node,
                 verbose=args.verbose,
@@ -1096,6 +1100,13 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         action="store_false",
         default=True,
         help="Whether to generate captions for clip windows.",
+    )
+    parser.add_argument(
+        "--no-caption-quality-flags",
+        dest="caption_quality_flags_enabled",
+        action="store_false",
+        default=True,
+        help="Disable heuristic caption quality flag annotations for supported caption paths.",
     )
     parser.add_argument(
         "--no-upload-clips",
