@@ -20,8 +20,6 @@ rss_delta_mb) and Phase 1.2 (wall_start, wall_end), as well as the
 original aggregation, reset, and serialization behavior.
 """
 
-from __future__ import annotations
-
 import time
 from unittest.mock import MagicMock
 
