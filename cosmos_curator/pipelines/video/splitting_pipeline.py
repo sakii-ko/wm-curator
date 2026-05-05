@@ -35,7 +35,7 @@ from cosmos_curator.core.interfaces.stage_interface import CuratorStage, Curator
 from cosmos_curator.core.utils.config import args_utils
 from cosmos_curator.core.utils.infra.hardware_info import get_gpu_infos
 from cosmos_curator.core.utils.infra.profiling import profiling_scope
-from cosmos_curator.core.utils.misc.stage_compare import run_stage_compare
+from cosmos_curator.core.utils.misc.stage_compare import get_stage_name_after, get_stages_to_compare, run_stage_compare
 from cosmos_curator.core.utils.misc.stage_replay import (
     StageSaveConfig,
     add_stage_replay_args,
@@ -940,19 +940,25 @@ def _split(args: argparse.Namespace) -> None:
             )
         else:
             start_stage_name = args.stage_compare[0]
-            end_stage_name = args.stage_compare[-1] if len(args.stage_compare) > 1 else start_stage_name
-            stage_to_compare = get_stages_to_replay(stages, start_stage_name, end_stage_name)
-            next_stage_name = _get_stage_name_after(stages, end_stage_name)
+            end_stage_name = (
+                args.stage_compare[-1]
+                if len(args.stage_compare) > 1
+                else get_stage_name_after(stages, start_stage_name)
+            )
+            stage_to_compare = get_stages_to_compare(stages, start_stage_name, end_stage_name)
             golden_base = args.stage_compare_path if args.stage_compare_path is not None else args.output_clip_path
             compare_result = run_stage_compare(
                 stage_to_compare,
                 get_full_path(args.output_clip_path, "tasks", start_stage_name),
-                get_full_path(golden_base, "tasks", next_stage_name),
+                get_full_path(golden_base, "tasks", end_stage_name),
                 args.stage_compare_atol,
                 args.limit,
                 args.stage_compare_pass_threshold,
                 report_path=get_full_path(args.output_clip_path, "compare", start_stage_name, "report.json"),
                 profile_name=args.output_s3_profile_name,
+                backend=getattr(args, "stage_compare_backend", "xenna"),
+                args=args,
+                model_weights_prefix=args.model_weights_path,
             )
             if not compare_result.passed:
                 msg = (
@@ -1001,25 +1007,6 @@ def _split(args: argparse.Namespace) -> None:
         f"{pipeline_run_time=:.2f} / {summary_run_time=:.2f} mins processing "
         f"time for {total_video_length=:.3f} hours of raw videos",
     )
-
-
-def _get_stage_name_after(stages: list[CuratorStage | CuratorStageSpec], stage_name: str) -> str:
-    """Return the stage name immediately after the requested stage.
-
-    Matches by class name and returns the successor of the first matching stage.
-    """
-    normalized_stages = [
-        cast("CuratorStage", stage.stage) if isinstance(stage, CuratorStageSpec) else stage for stage in stages
-    ]
-    for index, stage in enumerate(normalized_stages):
-        if stage.__class__.__name__ != stage_name:
-            continue
-        if index + 1 >= len(normalized_stages):
-            msg = f"--stage-compare cannot infer golden for last stage {stage_name}"
-            raise ValueError(msg)
-        return normalized_stages[index + 1].__class__.__name__
-    msg = f"Stage {stage_name} not found in pipeline"
-    raise ValueError(msg)
 
 
 def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915

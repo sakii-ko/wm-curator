@@ -96,16 +96,19 @@ cosmos-curator local launch --curator-path . -- \
 ```
 
 **Parameters:**
-- `--stage-compare`: Stage class name, or comma-separated start/end stage names for a range
+- `--stage-compare`: Stage class name, or comma-separated `start,end` stage names. A single stage compares
+  that stage against saved input tasks for its immediate successor. A range is half-open: `start,end`
+  runs `[start, end)` and compares against saved input tasks for `end`.
 - `--stage-compare-path`: Optional alternate base path for golden outputs
 - `--stage-compare-atol`: Optional numeric tolerance for numpy comparisons
 - `--stage-compare-pass-threshold`: Minimum pass rate required for exit code 0
+- `--stage-compare-backend`: Execution backend, either `xenna` (default, parallel) or `serial`
 - `--limit`: Optional, maximum number of task batches to compare (0 = unlimited)
 
 **What happens:**
 1. Loads replay inputs from `{output-clip-path}/tasks/{StartStageName}/*.pkl`
-2. Executes the stage or stage range directly
-3. Loads golden outputs from `{base}/tasks/{NextStageName}/*.pkl`
+2. Executes the stage or half-open stage range using `--stage-compare-backend`
+3. Loads golden outputs from `{base}/tasks/{EndStageName}/*.pkl`
 4. Compares candidate vs golden outputs
 5. Writes `report.json` to `{output-clip-path}/compare/{StartStageName}/report.json`
 6. Exits nonzero if the pass rate is below the configured threshold
@@ -358,14 +361,14 @@ Save tasks from multiple stages in one run:
 
 ### Compare a Stage Range
 
-You can compare a whole stage range and validate the final output against the stage after the range:
+You can compare a half-open stage range and validate the final output against saved inputs for the end stage:
 
 ```bash
---stage-compare Stage0,Stage1
+--stage-compare Stage0,Stage2
 ```
 
-This replays `Stage0` through `Stage1`, then compares the resulting output against the saved golden
-tasks from the stage immediately after `Stage1` in the pipeline.
+This replays `Stage0` and `Stage1`, then compares the resulting output against the saved golden
+tasks from `Stage2`.
 
 ### Override the Golden Base Path
 

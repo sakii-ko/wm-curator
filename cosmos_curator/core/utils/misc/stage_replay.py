@@ -555,6 +555,12 @@ def add_stage_replay_args(parser: argparse.ArgumentParser) -> None:
         default=1.0,
         help="Minimum pass rate required for --stage-compare to exit successfully. Default: 1.0",
     )
+    parser.add_argument(
+        "--stage-compare-backend",
+        choices=("xenna", "serial"),
+        default="xenna",
+        help="Execution backend for --stage-compare. Default: xenna",
+    )
 
 
 def validate_stage_replay_args(args: argparse.Namespace) -> None:
