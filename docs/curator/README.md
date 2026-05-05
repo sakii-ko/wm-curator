@@ -23,6 +23,7 @@ This directory collects documentation for the curator pipeline layer. It is orga
 - [Artifact Transport Guide](reference/artifact-transport.md) - local and remote artifact delivery.
 - [Distributed Tracing Guide](reference/distributed-tracing.md) - tracing API, configuration, and output.
 - [Reference Video Pipelines](reference/video-pipelines.md) - video pipeline behavior, options, and outputs.
+- [Split Pipeline Stage Overview](reference/split-pipeline-stages.md) - stage-by-stage split-annotate pipeline catalog.
 - [Reference AV Pipelines](reference/av-pipelines.md) - AV pipeline behavior, options, and outputs.
 - [Reference Image Pipeline](reference/image-pipeline.md) - image pipeline behavior, options, and outputs.
 

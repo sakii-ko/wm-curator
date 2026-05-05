@@ -42,6 +42,10 @@ The split-annotate pipeline includes the following logical stages:
 - **Captioning**: Generates a text caption of the clip using a vision-language model (VLM).
 - **Clip Writer**: Uploads the clips and their metadata back to cloud storage or writes them to local disk.
 
+For a more detailed block-by-block catalog, including optional semantic filtering,
+video classification, SAM3 tracking, event captioning, and Cosmos-Predict dataset
+stages, see the [Split Pipeline Stage Overview](split-pipeline-stages.md).
+
 Note above lists the "logical" stages from a functionality perspective,
 "physically" we would break certain logical stage into multiple stages to optimize GPU utilization and system throughput.
 For example, VLM captioning requires non-trivial preprocessing of the video, which is typically done on CPU and can hurt GPU utilization.
@@ -75,14 +79,14 @@ Today the split-annotate pipeline produces the following artifacts under the pat
 │   ├── {video-uuid}_{chunk_index}.jsonl
 ├── cds_parquet/                    # metadata parquets for Milvus indexing; enabled by `--upload-cds-parquet`
 │   ├── {clip-chunk-uuid}.parquet
-├── cosmos_video2world_dataset/     # dataset for Cosmos-Predict2 Video2World model post-training
+├── cosmos_predict2_video2world_dataset/  # dataset for Cosmos-Predict2 Video2World model post-training
 │   ├── metas/
 │       ├── {clip-uuid}_{frame_range}.txt
 │   ├── t5_xxl/
 │       ├── {clip-uuid}_{frame_range}.pickle
 │   ├── videos/
 │       ├── {clip-uuid}_{frame_range}.mp4
-├── previews/                       # web previews for each caption window; enabled by `--generate-previews`
+├── previews/                       # web previews for each caption window; requires captioning plus `--generate-previews`
 │   ├── {clip-uuid}_{frame_range}.webp
 ├── processed_videos/               # record for each processed input videos
 │   ├── {input-video-relpath}.json
@@ -142,7 +146,7 @@ In case you want the output to be in a different S3 bucket than the input, you c
 - `--no-generate-embeddings`: disables InterVideo2/Cosmos-Embed1 embedding generation; use `"generate_embeddings": false` in API endpoint.
 - `--embedding-algorithm`: specifies embedding model, available options are `cosmos-embed1-224p`, `cosmos-embed1-336p`, `cosmos-embed1-448p`, `internvideo2` (default), and `openai` (requires an OpenAI-compatible endpoint; see [Use an OpenAI-Compatible Endpoint for Embedding](../../client/end-user-guide.md#use-an-openai-compatible-endpoint-for-embedding)). The `cosmos-embed1-*` suffix selects the input resolution; 224p is faster with 256-dim vectors, while 336p/448p are slower but score higher on retrieval/classification benchmarks and produce 768-dim vectors.
 - `--no-generate-captions`: disables VLM captioning; use `"generate_captions": false` in API endpoint.
-- `--generate-previews`: enables web preview generation.
+- `--generate-previews`: enables web preview generation when captioning is enabled.
 - `--upload-clip-info-in-chunks`: enables metadata jsonl for a group of clips and disables per-clip embedding & metadata writes.
 - `--upload-cds-parquet`: enables generating parquet files for Milvus indexing.
 - `--generate-cosmos-predict-dataset`: enable generating dataset that is ready for [Cosmos-Predict2 Video2World model post-training](https://github.com/nvidia-cosmos/cosmos-predict2/blob/main/documentations/post-training_video2world.md).
