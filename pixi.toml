@@ -73,8 +73,8 @@ pyasn1 = ">=0.6.3" # CVE remediation: require 0.6.3+ (fixes vs vulnerable 0.6.2 
 pylance = ">=0.39.0" # conda-forge package is too old
 pulp = "*" # conda-forge package is too old
 timm = "*" # conda-forge package pulls in torchvision, which is behind
-torch = { version = "==2.10+cu130", index = "https://download.pytorch.org/whl/cu130" }
-torchvision = { version = "==0.25.0", index = "https://download.pytorch.org/whl/cu130" }
+torch = "==2.11.0"
+torchvision = "==0.26.0"
 uvicorn = "*"
 webdataset = "*" # conda-forge package pulls in pytorch
 
@@ -176,9 +176,8 @@ rotary-embedding-torch = "*"
 [feature.unified.pypi-dependencies]
 cbor2 = ">=5.9" # CVE remediation: cbor2 5.9+ (unified env; fixes vs vulnerable 5.8.x)
 cvcuda-cu13 = "*" # not available on conda-forge
-flashinfer-python = "==0.6.6" # not available on conda-forge; pinned to match vllm 0.19.0
 PyNvVideoCodec = "*" # not available on conda-forge
-vllm = { version = "==0.19.0", index = "https://wheels.vllm.ai/0.19.0/cu130" } # not available on conda-forge
+vllm = "==0.20.1" # not available on conda-forge
 paddlepaddle = { version = "==3.2.*", index = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"} # CPU-only; no CUDA runtime conflict with torch (unlike paddlepaddle-gpu)
 paddleocr = "==2.10.*"
 
@@ -220,8 +219,9 @@ memray = ">=1.14"
 
 [feature.sam3.pypi-dependencies]
 # SAM3 (Segment Anything 3) requires transformers>=5.0.0, which conflicts with
-# vLLM's hard cap of transformers<5.  This dedicated environment isolates
-# SAM3 from vLLM so both can coexist on the same node via separate Ray workers.
+# the main transformers feature's <5 runtime contract for chat-template behavior.
+# This dedicated environment isolates SAM3 so it can coexist on the same node via
+# separate Ray workers.
 kernels = "*"
 transformers = ">=5.0.0"
 

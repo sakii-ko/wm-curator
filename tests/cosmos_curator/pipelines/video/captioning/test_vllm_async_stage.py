@@ -1342,10 +1342,11 @@ class TestConfigureVllmEnvironment:
         """Stale env vars inherited from the Dockerfile should be removed."""
         stage = self._make_stage()
 
-        with patch.dict(os.environ, {"VLLM_USE_V1": "1", "VLLM_ATTENTION_BACKEND": "FLASHINFER"}, clear=False):
+        stale_env = {"VLLM_ATTENTION_BACKEND": "FLASHINFER", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
+        with patch.dict(os.environ, stale_env, clear=False):
             stage._configure_vllm_environment()
-            assert "VLLM_USE_V1" not in os.environ
             assert "VLLM_ATTENTION_BACKEND" not in os.environ
+            assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
 
 
 class TestEnvInfoEnvVars:
@@ -1473,8 +1474,8 @@ class TestEnvInfoProperty:
         stage = self._make_stage()
         env = stage.env_info
         assert env is not None
-        assert env.extra_env_vars.get("VLLM_USE_V1") == ""
         assert env.extra_env_vars.get("VLLM_ATTENTION_BACKEND") == ""
+        assert env.extra_env_vars.get("VLLM_WORKER_MULTIPROC_METHOD") == ""
 
 
 class TestVllmAsyncPrepConfig:

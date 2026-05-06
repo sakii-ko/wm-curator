@@ -126,7 +126,7 @@ class VllmAsyncConfig:
                 f"async_scheduling=True requires distributed_executor_backend "
                 f"in {sorted(_ASYNC_SCHED_BACKENDS)}, got "
                 f"{self.distributed_executor_backend!r}. The 'ray' backend does "
-                f"not support async scheduling in vLLM v0.17. Either set "
+                f"not support async scheduling in the vLLM Ray executor. Either set "
                 f"async_scheduling=False or change the backend."
             )
             raise ValueError(msg)

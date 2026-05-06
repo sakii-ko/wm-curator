@@ -715,11 +715,10 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
 
     # Env vars to unset in the worker process.
     #
-    #   VLLM_USE_V1                  - removed in v0.17.0
-    #   VLLM_ATTENTION_BACKEND       - removed; use AsyncEngineArgs
-    #   VLLM_WORKER_MULTIPROC_METHOD - irrelevant with "ray" executor
+    #   VLLM_ATTENTION_BACKEND       - use AsyncEngineArgs instead
+    #   VLLM_WORKER_MULTIPROC_METHOD - Docker default is for sync vLLM; let
+    #                                  async vLLM use its executor default
     _UNSET_VLLM_ENV_VARS: tuple[str, ...] = (
-        "VLLM_USE_V1",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_WORKER_MULTIPROC_METHOD",
     )

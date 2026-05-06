@@ -15,10 +15,10 @@
 
 """SAM3 (Segment Anything 3) video segmentation model.
 
-SAM3 requires transformers>=5.0.0, which conflicts with vLLM's hard cap of
-transformers<5.  This model therefore runs in the dedicated `sam3` pixi
-environment (isolated from vLLM) so both can coexist on the same node via
-separate Ray workers.
+SAM3 requires transformers>=5.0.0, which conflicts with the main transformers
+feature's <5 runtime contract for chat-template behavior. This model therefore
+runs in the dedicated `sam3` pixi environment so it can coexist on the same node
+via separate Ray workers.
 """
 
 from typing import TYPE_CHECKING, Any
