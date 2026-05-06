@@ -186,6 +186,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorStageSpec]:
     stages: list[CuratorStage | CuratorStageSpec] = []
+    if args.event_captioning and args.sam3_annotated_video_label_style != "id":
+        logger.warning(
+            "--sam3-annotated-video-label-style={} is incompatible with the "
+            "bundled per-event captioning prompt, which OCRs '#<id>' overlays "
+            "for spatial grounding. The VLM may hallucinate object ids; pass "
+            "--sam3-annotated-video-label-style id (the default) when "
+            "--event-captioning is set.",
+            args.sam3_annotated_video_label_style,
+        )
     stages.extend(
         build_sam3_tracking_stages(
             SAM3TrackingConfig(
@@ -206,6 +215,8 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
                 # Annotation is always on for this example — visual output is the point.
                 write_annotated_video=True,
                 draw_trails=args.sam3_annotated_video_trails,
+                annotated_video_label_style=args.sam3_annotated_video_label_style,
+                annotated_video_mask_opacity=args.sam3_annotated_video_mask_opacity,
                 verbose=args.verbose,
             )
         )

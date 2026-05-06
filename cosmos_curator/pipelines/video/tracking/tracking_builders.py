@@ -15,6 +15,8 @@
 
 """Stage builders for SAM3-based object tracking."""
 
+from typing import Literal
+
 import attrs
 
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageSpec
@@ -32,6 +34,8 @@ class SAM3TrackingConfig:
     quality: SAM3QualityConfig = attrs.Factory(SAM3QualityConfig)
     write_annotated_video: bool = False
     draw_trails: bool = False
+    annotated_video_label_style: Literal["id", "name", "none"] = "id"
+    annotated_video_mask_opacity: int = 0
     gpus_per_worker: float = 1.0
     num_workers_per_node: int = 0
     verbose: bool = False
@@ -52,6 +56,8 @@ def build_sam3_tracking_stages(config: SAM3TrackingConfig) -> list[CuratorStage 
         quality_config=config.quality,
         write_annotated_video=config.write_annotated_video,
         draw_trails=config.draw_trails,
+        annotated_video_label_style=config.annotated_video_label_style,
+        annotated_video_mask_opacity=config.annotated_video_mask_opacity,
         gpus_per_worker=config.gpus_per_worker,
         verbose=config.verbose,
     )

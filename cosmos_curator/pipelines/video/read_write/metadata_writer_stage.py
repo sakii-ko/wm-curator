@@ -607,11 +607,13 @@ class ClipWriterStage(CuratorStage):
         path_prefix: str,
         file_type: str,
         relative_path: str | None = None,
+        filename_suffix: str | None = None,
     ) -> storage_client.StoragePrefix | pathlib.Path:
+        suffix = filename_suffix or ""
         if relative_path:
-            output_clip_file = f"{video_span_uuid}/{relative_path}.{file_type}"
+            output_clip_file = f"{video_span_uuid}/{relative_path}{suffix}.{file_type}"
         else:
-            output_clip_file = f"{video_span_uuid}.{file_type}"
+            output_clip_file = f"{video_span_uuid}{suffix}.{file_type}"
         return get_full_path(path_prefix, output_clip_file)
 
     def _get_video_uri(self, input_video_path: str) -> storage_client.StoragePrefix | pathlib.Path:
@@ -702,6 +704,7 @@ class ClipWriterStage(CuratorStage):
                 clip.uuid,
                 self.get_output_path_sam3_instances(self._output_path),
                 "json",
+                filename_suffix="_instances",
             )
             self._write_json_data(
                 sam3_instances_envelope(clip.sam3_instances),
@@ -715,6 +718,7 @@ class ClipWriterStage(CuratorStage):
                 clip.uuid,
                 self.get_output_path_sam3_objects(self._output_path),
                 "json",
+                filename_suffix="_objects",
             )
             self._write_json_data(
                 sam3_objects_envelope(clip.sam3_objects_by_frame),
@@ -728,6 +732,7 @@ class ClipWriterStage(CuratorStage):
                 clip.uuid,
                 self.get_output_path_sam3_events(self._output_path),
                 "json",
+                filename_suffix="_events",
             )
             self._write_json_data(
                 sam3_events_envelope(clip.sam3_events),

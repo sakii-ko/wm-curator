@@ -23,6 +23,19 @@ lock-step so help text and defaults can't drift.
 import argparse
 
 
+def _opacity_int(value: str) -> int:
+    """Parse and clamp ``--sam3-annotated-video-mask-opacity`` to ``[0, 100]``."""
+    try:
+        ivalue = int(value)
+    except ValueError as exc:
+        msg = f"opacity must be an integer in [0, 100], got {value!r}"
+        raise argparse.ArgumentTypeError(msg) from exc
+    if ivalue < 0 or ivalue > 100:  # noqa: PLR2004
+        msg = f"opacity must be in [0, 100], got {ivalue}"
+        raise argparse.ArgumentTypeError(msg)
+    return ivalue
+
+
 def add_sam3_args(
     parser: argparse.ArgumentParser,
     *,
@@ -191,5 +204,27 @@ def add_sam3_args(
             "Draw trajectory trails for each tracked object in the annotated video. "
             "Off by default — trails clutter the frame and confuse the per-event VLM; "
             "only enable for offline visual inspection."
+        ),
+    )
+    parser.add_argument(
+        "--sam3-annotated-video-label-style",
+        choices=("id", "name", "none"),
+        default="id",
+        help=(
+            "What to render next to each tracked object in the annotated video. "
+            "'id' draws '#<object_id>' (default; required by the bundled per-event "
+            "captioning prompt). 'name' draws the SAM3 prompt/class string. 'none' "
+            "draws only the mask contour with no text label."
+        ),
+    )
+    parser.add_argument(
+        "--sam3-annotated-video-mask-opacity",
+        type=_opacity_int,
+        default=0,
+        help=(
+            "Opacity (0-100) of a coloured fill drawn inside each object's mask "
+            "silhouette in the annotated video. 0 = outline only (default, preserves "
+            "original pixels for VLM input); 100 = fully opaque fill. Useful for "
+            "offline visual inspection."
         ),
     )

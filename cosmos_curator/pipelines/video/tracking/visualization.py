@@ -20,6 +20,7 @@ that any styling change is picked up in both places.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -138,13 +139,17 @@ def draw_frame(  # noqa: PLR0913 — each arg controls an orthogonal overlay asp
     *,
     draw_trails: bool = False,
     current_time_s: float | None = None,
+    label_style: Literal["id", "name", "none"] = "id",
+    mask_opacity: int = 0,
 ) -> npt.NDArray[np.uint8]:
-    """Draw mask outlines, object IDs, and optional trajectory trails.
+    """Draw mask outlines, object labels, and optional trajectory trails.
 
-    Style: mask contour (outline only, no fill) + short ``#id`` label with a
-    dark outline. Mask pixels are NOT re-coloured — this preserves the object's
-    original appearance for a VLM fed the annotated video. No bbox is drawn;
-    the contour already localises more precisely.
+    Style: mask contour (outline) + optional translucent silhouette fill +
+    optional short label with a dark outline. By default mask pixels are NOT
+    re-coloured (``mask_opacity=0``) so the object's original appearance is
+    preserved for a VLM fed the annotated video; raise ``mask_opacity`` for
+    offline visual inspection. No bbox is drawn; the contour already localises
+    more precisely.
 
     Args:
         frame: ``H x W x 3`` BGR uint8. Not mutated; a copy is returned.
@@ -155,13 +160,25 @@ def draw_frame(  # noqa: PLR0913 — each arg controls an orthogonal overlay asp
         draw_trails: if ``True``, draw polyline trails for each object.
         current_time_s: if provided, burn a ``t=X.XXs`` timestamp so downstream
             VLMs can anchor event times to the clip timeline.
+        label_style: ``"id"`` → ``#<object_id>`` (default; required by the
+            bundled per-event captioning prompt). ``"name"`` → SAM3
+            prompt/class string; ``"none"`` → no text label.
+        mask_opacity: Opacity (0-100) of a coloured fill drawn inside each
+            object's mask silhouette. ``0`` (default) = outline only;
+            ``100`` = fully opaque fill. The contour outline is always drawn
+            on top so silhouettes stay crisp.
 
     Returns:
         Annotated BGR frame.
 
     """
+    if mask_opacity < 0 or mask_opacity > 100:  # noqa: PLR2004
+        msg = f"mask_opacity must be in [0, 100], got {mask_opacity}"
+        raise ValueError(msg)
+
     prompt_colour = {p: COLOURS[i % len(COLOURS)] for i, p in enumerate(prompts)}
     out = frame.copy()
+    fill_alpha = mask_opacity / 100.0
 
     for det in detections:
         colour = prompt_colour.get(det.prompt, (200, 200, 200))
@@ -171,44 +188,60 @@ def draw_frame(  # noqa: PLR0913 — each arg controls an orthogonal overlay asp
 
         x1, y1, _, _ = (int(v) for v in det.box_xyxy)
 
-        # Two-pass text: thick black stroke, then thinner white fill — the
-        # standard video-caption technique for legibility over arbitrary
-        # backgrounds without a filled label box occluding the scene.
-        label = f"#{det.object_id}"
+        # Translucent silhouette fill: blend a per-detection coloured overlay
+        # only over the mask pixels so untouched regions are byte-identical to
+        # the source. Composing per-detection (instead of accumulating one
+        # global overlay) keeps individual object colours from washing out
+        # when masks overlap.
+        if fill_alpha > 0.0 and contours:
+            overlay = out.copy()
+            cv2.drawContours(overlay, contours, -1, colour, thickness=cv2.FILLED)
+            mask_bool = det.mask.astype(bool)
+            blended = cv2.addWeighted(overlay, fill_alpha, out, 1.0 - fill_alpha, 0.0)
+            out[mask_bool] = blended[mask_bool]
+
+        # Outline drawn after the fill so the silhouette edge stays crisp.
+        if contours:
+            cv2.drawContours(out, contours, -1, colour, thickness=MASK_CONTOUR_THICKNESS)
+
         # Anchor to the top of the mask silhouette rather than the bbox corner;
         # for large/diagonal objects the bbox corner often sits in empty space
         # and makes the label look detached. Falls back to the bbox corner on
         # the rare empty-contour case.
-        if contours:
-            cv2.drawContours(out, contours, -1, colour, thickness=MASK_CONTOUR_THICKNESS)
-            all_pts = np.vstack([c.reshape(-1, 2) for c in contours])
-            anchor_y = int(all_pts[:, 1].min())
-            anchor_x = int(np.median(all_pts[all_pts[:, 1] == anchor_y, 0]))
-        else:
-            anchor_x, anchor_y = x1, y1
-        (tw, th), _ = cv2.getTextSize(label, FONT, LABEL_SCALE, LABEL_THICKNESS)
-        # Clamp inside the frame on the top/left edges.
-        text_origin = (max(0, anchor_x - tw // 2), max(th + 2, anchor_y - 6))
-        cv2.putText(
-            out,
-            label,
-            text_origin,
-            FONT,
-            LABEL_SCALE,
-            LABEL_OUTLINE_COLOUR,
-            LABEL_OUTLINE_THICKNESS,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            out,
-            label,
-            text_origin,
-            FONT,
-            LABEL_SCALE,
-            LABEL_TEXT_COLOUR,
-            LABEL_THICKNESS,
-            cv2.LINE_AA,
-        )
+        if label_style != "none":
+            label = f"#{det.object_id}" if label_style == "id" else det.prompt
+            if contours:
+                all_pts = np.vstack([c.reshape(-1, 2) for c in contours])
+                anchor_y = int(all_pts[:, 1].min())
+                anchor_x = int(np.median(all_pts[all_pts[:, 1] == anchor_y, 0]))
+            else:
+                anchor_x, anchor_y = x1, y1
+            (tw, th), _ = cv2.getTextSize(label, FONT, LABEL_SCALE, LABEL_THICKNESS)
+            # Clamp inside the frame on the top/left edges.
+            text_origin = (max(0, anchor_x - tw // 2), max(th + 2, anchor_y - 6))
+            # Two-pass text: thick black stroke, then thinner white fill — the
+            # standard video-caption technique for legibility over arbitrary
+            # backgrounds without a filled label box occluding the scene.
+            cv2.putText(
+                out,
+                label,
+                text_origin,
+                FONT,
+                LABEL_SCALE,
+                LABEL_OUTLINE_COLOUR,
+                LABEL_OUTLINE_THICKNESS,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                out,
+                label,
+                text_origin,
+                FONT,
+                LABEL_SCALE,
+                LABEL_TEXT_COLOUR,
+                LABEL_THICKNESS,
+                cv2.LINE_AA,
+            )
 
         if draw_trails:
             trail = trails.get(det.object_id, [])

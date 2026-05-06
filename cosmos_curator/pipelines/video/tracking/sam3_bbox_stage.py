@@ -32,7 +32,7 @@ Ray task boundary (roughly ``frames * objects * H * W`` boolean bytes per clip).
 import collections
 import pathlib
 import tempfile
-from typing import Any
+from typing import Any, Literal
 
 import attrs
 import cv2
@@ -188,6 +188,8 @@ def _run_sam3_on_clip(  # noqa: PLR0913  # inference helper, parameters mirror S
     *,
     write_annotated: bool,
     draw_trails: bool,
+    label_style: Literal["id", "name", "none"] = "id",
+    mask_opacity: int = 0,
 ) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]], bytes | None]:
     """Run SAM3 pre-loaded chunked inference on a single clip.
 
@@ -278,6 +280,8 @@ def _run_sam3_on_clip(  # noqa: PLR0913  # inference helper, parameters mirror S
                             trails,
                             draw_trails=draw_trails,
                             current_time_s=src_time_s,
+                            label_style=label_style,
+                            mask_opacity=mask_opacity,
                         )
                     )
 
@@ -308,6 +312,8 @@ class SAM3BBoxStage(CuratorStage):
         quality_config: SAM3QualityConfig | None = None,
         write_annotated_video: bool = False,
         draw_trails: bool = False,
+        annotated_video_label_style: Literal["id", "name", "none"] = "id",
+        annotated_video_mask_opacity: int = 0,
         gpus_per_worker: float = 1.0,
         verbose: bool = False,
     ) -> None:
@@ -326,12 +332,21 @@ class SAM3BBoxStage(CuratorStage):
                 (boxes + masks + ids + optional trails) into ``clip.sam3_annotated_video``.
             draw_trails: If ``True`` and ``write_annotated_video`` is on, draw
                 trajectory trails.
+            annotated_video_label_style: ``"id"`` (default), ``"name"`` or
+                ``"none"`` — what text label to render next to each detection
+                in the annotated video.
+            annotated_video_mask_opacity: 0-100 opacity of the translucent mask
+                fill drawn inside each detection's silhouette. ``0`` (default)
+                = outline only.
             gpus_per_worker: GPU fraction (default: one full GPU).
             verbose: Extra per-clip logging.
 
         """
         if not prompts:
             msg = "SAM3BBoxStage requires at least one prompt"
+            raise ValueError(msg)
+        if annotated_video_mask_opacity < 0 or annotated_video_mask_opacity > 100:  # noqa: PLR2004
+            msg = f"annotated_video_mask_opacity must be in [0, 100], got {annotated_video_mask_opacity}"
             raise ValueError(msg)
         self._prompts = prompts
         self._target_fps = target_fps
@@ -340,6 +355,8 @@ class SAM3BBoxStage(CuratorStage):
         self._quality_config = quality_config or SAM3QualityConfig()
         self._write_annotated_video = write_annotated_video
         self._draw_trails = draw_trails
+        self._annotated_video_label_style = annotated_video_label_style
+        self._annotated_video_mask_opacity = annotated_video_mask_opacity
         self._gpus_per_worker = gpus_per_worker
         self._verbose = verbose
         # Eager construct so ``self.model`` resolves when the pipeline builder
@@ -398,6 +415,8 @@ class SAM3BBoxStage(CuratorStage):
                 session_reset_s=self._session_reset_s,
                 write_annotated=self._write_annotated_video,
                 draw_trails=self._draw_trails,
+                label_style=self._annotated_video_label_style,
+                mask_opacity=self._annotated_video_mask_opacity,
             )
         except Exception:  # noqa: BLE001
             clip.errors["sam3_bbox"] = "inference_error"

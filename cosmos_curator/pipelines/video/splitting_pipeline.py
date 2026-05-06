@@ -796,6 +796,15 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
         # the VLM's only spatial grounding for object ids), so force-enable
         # annotation when it's on.
         write_annotated_video = args.sam3_write_annotated_video or args.event_captioning
+        if args.event_captioning and args.sam3_annotated_video_label_style != "id":
+            logger.warning(
+                "--sam3-annotated-video-label-style={} is incompatible with the "
+                "bundled per-event captioning prompt, which OCRs '#<id>' overlays "
+                "for spatial grounding. The VLM may hallucinate object ids; pass "
+                "--sam3-annotated-video-label-style id (the default) when "
+                "--event-captioning is set.",
+                args.sam3_annotated_video_label_style,
+            )
         stages.extend(
             build_sam3_tracking_stages(
                 SAM3TrackingConfig(
@@ -815,6 +824,8 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
                     ),
                     write_annotated_video=write_annotated_video,
                     draw_trails=args.sam3_annotated_video_trails,
+                    annotated_video_label_style=args.sam3_annotated_video_label_style,
+                    annotated_video_mask_opacity=args.sam3_annotated_video_mask_opacity,
                     verbose=args.verbose,
                 )
             )
