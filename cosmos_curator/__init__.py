@@ -20,6 +20,14 @@ import warnings
 # Suppress repetitive pkg_resources deprecation warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="pkg_resources is deprecated as an API")
 
+# Lance emits this warning whenever a process forks after importing lance.
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    message=r"lance is not fork-safe\.",
+    module=r"^lance$",
+)
+
 # Third-party packages (ngcsdk's vendored `registry`, vllm, etc.) contain
 # invalid escape sequences that trigger SyntaxWarning on Python 3.12+.
 # The module pattern needs `.*` because re.match() is used internally and
