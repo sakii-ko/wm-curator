@@ -34,6 +34,7 @@ This directory collects documentation for the curator pipeline layer. It is orga
 - [Ray Data Design](design/ray-data.md) - Ray Data direction and implementation notes.
 - [Sensor Library Design](design/sensor-library.md) - sensor data model and API direction.
 - [Efficient Sparse Video Decode](design/sensor-library-efficient-video-decode.md) - efficient decode strategy for sampled video.
+- [Orca Agentic Curation](design/orca.md) - agentic orchestration direction for large-scale curation.
 - [Slim Image Design](design/slim-image.md) - slim container image design and rollout plan.
 - [Speed-of-Light Design](design/speed-of-light.md) - captioning throughput measurement and optimization direction.
 - [vLLM Interface Design](design/vllm-interface.md) - vLLM interface architecture and API design.
