@@ -160,6 +160,7 @@ def _write_split_result_summary(  # noqa: PLR0913, C901
         "num_clips_transcoded",
         "num_clips_with_embeddings",
         "num_clips_with_caption",
+        "num_caption_windows",
         "num_clips_with_webp",
     ]
     summary_data: dict[str, Any] = {
@@ -220,26 +221,26 @@ def _write_split_result_summary(  # noqa: PLR0913, C901
     # Compute and log captioning throughput metrics
     total_output = summary_data["total_output_tokens"]
     total_prompt = summary_data["total_prompt_tokens"]
-    num_captions = summary_data.get("total_num_clips_with_caption", 0)
+    num_caption_windows = summary_data.get("total_num_caption_windows", 0)
     if total_output > 0 and pipeline_run_time > 0:
         tokens_per_s = round(total_output / (pipeline_run_time * 60), 1)
         summary_data["output_tokens_per_s"] = tokens_per_s
-        avg_prompt = total_prompt // num_captions if num_captions else 0
-        avg_output = total_output // num_captions if num_captions else 0
+        avg_prompt = total_prompt // num_caption_windows if num_caption_windows else 0
+        avg_output = total_output // num_caption_windows if num_caption_windows else 0
         logger.info(
             "\n"
             "  Captioning throughput\n"
-            "  ─────────────────────────────────────\n"
+            "  -------------------------------------\n"
             "  total prompt tokens:      {:>10,}\n"
             "  total output tokens:      {:>10,}\n"
-            "  total windows:            {:>10,}\n"
+            "  total caption windows:    {:>10,}\n"
             "  avg prompt tokens/window: {:>10,}\n"
             "  avg output tokens/window: {:>10,}\n"
             "  output tokens/s:          {:>10,.1f}\n"
-            "  ─────────────────────────────────────",
+            "  -------------------------------------",
             total_prompt,
             total_output,
-            num_captions,
+            num_caption_windows,
             avg_prompt,
             avg_output,
             tokens_per_s,

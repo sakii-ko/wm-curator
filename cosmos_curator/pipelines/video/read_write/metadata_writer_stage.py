@@ -55,6 +55,7 @@ from cosmos_curator.pipelines.video.tracking.serialization import (
     sam3_objects_envelope,
 )
 from cosmos_curator.pipelines.video.utils.data_model import (
+    CAPTION_OK_STATUSES,
     Clip,
     ClipStats,
     SplitPipeTask,
@@ -860,6 +861,7 @@ class ClipWriterStage(CuratorStage):
             data["filtered_windows"].append(curr_filter_window)
         total_prompt_tokens = 0
         total_output_tokens = 0
+        num_caption_windows = 0
         for window in clip.windows:
             curr_window: dict[str, Any] = {
                 "start_frame": window.start_frame,
@@ -873,11 +875,12 @@ class ClipWriterStage(CuratorStage):
                 curr_window["flag_length_outlier"] = window.flag_length_outlier
                 curr_window["flag_repetition"] = window.flag_repetition
                 curr_window["flag_near_duplicate"] = window.flag_near_duplicate
+            window_has_caption = False
             for model in self._caption_models:
                 if model in window.caption:
                     curr_window[f"{model}_caption"] = window.caption[model]
-                    if window.caption_status in {"success", "truncated"}:
-                        has_caption = True
+                    if window.caption_status in CAPTION_OK_STATUSES:
+                        window_has_caption = True
                 if model in window.token_counts:
                     counts = window.token_counts[model]
                     curr_window[f"{model}_prompt_tokens"] = counts.prompt_tokens
@@ -887,6 +890,9 @@ class ClipWriterStage(CuratorStage):
             for model in self._enhanced_caption_models:
                 if model in window.enhanced_caption:
                     curr_window[f"{model}_enhanced_caption"] = window.enhanced_caption[model]
+            if window_has_caption:
+                has_caption = True
+                num_caption_windows += 1
             data["windows"].append(curr_window)
         data["valid"] = bool(clip.encoded_data and len(clip.windows) > 0)
         data["has_caption"] = has_caption
@@ -894,6 +900,7 @@ class ClipWriterStage(CuratorStage):
         data["caption_quality_flags_enabled"] = self._caption_quality_flags_enabled
         data["total_prompt_tokens"] = total_prompt_tokens
         data["total_output_tokens"] = total_output_tokens
+        data["num_caption_windows"] = num_caption_windows
         embedding = self._get_clip_embedding(clip)
         if embedding is not None:
             data["embedding"] = embedding.reshape(-1).tolist()
@@ -922,6 +929,7 @@ class ClipWriterStage(CuratorStage):
             }
             self._write_json_data(data_to_write, dest, f"metadata {clip.uuid}", clip.source_video)
         clip_stats.num_with_caption += 1 if data.get("has_caption", False) else 0
+        clip_stats.num_caption_windows += data.get("num_caption_windows", 0)
         clip_stats.total_prompt_tokens += data.get("total_prompt_tokens", 0)
         clip_stats.total_output_tokens += data.get("total_output_tokens", 0)
         clip_duration = clip.span[1] - clip.span[0]
@@ -998,6 +1006,7 @@ class ClipWriterStage(CuratorStage):
             "num_clips_transcoded": video.clip_stats.num_transcoded,
             "num_clips_with_embeddings": video.clip_stats.num_with_embeddings,
             "num_clips_with_caption": video.clip_stats.num_with_caption,
+            "num_caption_windows": video.clip_stats.num_caption_windows,
             "num_clips_with_webp": video.clip_stats.num_with_webp,
             "total_clip_duration": video.clip_stats.total_clip_duration,
             "max_clip_duration": video.clip_stats.max_clip_duration,
@@ -1049,7 +1058,7 @@ class ClipWriterStage(CuratorStage):
                     f"from {clip.source_video} has no mp4 bytes, skip uploading to dataset",
                 )
                 continue
-            caption_ok = window.caption_status in {"success", "truncated"}
+            caption_ok = window.caption_status in CAPTION_OK_STATUSES
             if not caption_ok:
                 logger.error(
                     f"Clip {clip.uuid} window [{window.start_frame}, {window.end_frame}] "

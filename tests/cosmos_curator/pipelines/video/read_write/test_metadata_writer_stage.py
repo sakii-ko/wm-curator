@@ -34,7 +34,14 @@ from cosmos_curator.pipelines.video.read_write.metadata_writer_stage import (
     _archive_processed_sidecars,
     consolidate_lance_fragments,
 )
-from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask, Video, VideoMetadata, Window
+from cosmos_curator.pipelines.video.utils.data_model import (
+    Clip,
+    SplitPipeTask,
+    TokenCounts,
+    Video,
+    VideoMetadata,
+    Window,
+)
 
 
 def _create_stage(output_dir: Path, input_dir: Path, **overrides: object) -> ClipWriterStage:
@@ -324,6 +331,7 @@ def test_process_data_writes_expected_local_outputs(tmp_path: Path) -> None:
     ]
     assert clip_metadata["valid"] is True
     assert clip_metadata["has_caption"] is True
+    assert clip_metadata["num_caption_windows"] == 1
     assert clip_metadata["caption_quality_flags_enabled"] is True
 
     video_uuid = ClipWriterStage.get_video_uuid(video.input_path)
@@ -335,6 +343,7 @@ def test_process_data_writes_expected_local_outputs(tmp_path: Path) -> None:
     assert clip_chunk_meta["num_clips_transcoded"] == 1
     assert clip_chunk_meta["num_clips_with_embeddings"] == 1
     assert clip_chunk_meta["num_clips_with_caption"] == 1
+    assert clip_chunk_meta["num_caption_windows"] == 1
     assert clip_chunk_meta["num_clips_with_webp"] == 1
     assert clip_chunk_meta["max_clip_duration"] == pytest.approx(2.0)
     assert clip_chunk_meta["all_windows"][str(clip.uuid)] == {"0_30": "main caption"}
@@ -538,6 +547,7 @@ def test_chunked_metadata_writes_group_jsonl(tmp_path: Path) -> None:
     chunk_record = json.loads(lines[0])
     assert chunk_record["span_uuid"] == str(clip.uuid)
     assert chunk_record["has_caption"] is True
+    assert chunk_record["num_caption_windows"] == 1
     assert chunk_record["windows"] == [
         {
             "start_frame": 0,
@@ -555,6 +565,7 @@ def test_chunked_metadata_writes_group_jsonl(tmp_path: Path) -> None:
     chunk_stats = _read_json(output_dir / "processed_clip_chunks" / "video.mp4_0.json")
     assert chunk_stats["num_clips_with_embeddings"] == 0
     assert chunk_stats["num_clips_with_caption"] == 1
+    assert chunk_stats["num_caption_windows"] == 1
 
 
 def test_chunked_metadata_writes_lance_dataset(tmp_path: Path) -> None:
@@ -1032,6 +1043,50 @@ def test_write_clip_metadata_num_with_caption(
 
     clip_stats = stage._write_clip_metadata(clip, video_meta)
     assert clip_stats.num_with_caption == expected_count
+    assert clip_stats.num_caption_windows == expected_count
+
+
+def test_write_clip_metadata_counts_caption_windows_separately_from_clips(tmp_path: Path) -> None:
+    """A single clip with multiple captioned windows should report one clip and multiple windows."""
+    stage = _create_stage(tmp_path / "out", tmp_path / "in")
+
+    windows = [
+        Window(
+            start_frame=0,
+            end_frame=10,
+            caption={"qwen": "first caption"},
+            caption_status="success",
+            token_counts={"qwen": TokenCounts(prompt_tokens=10, output_tokens=5)},
+        ),
+        Window(
+            start_frame=10,
+            end_frame=20,
+            caption={"qwen": "second caption"},
+            caption_status="truncated",
+            token_counts={"qwen": TokenCounts(prompt_tokens=8, output_tokens=4)},
+        ),
+        Window(
+            start_frame=20,
+            end_frame=30,
+            caption={"qwen": "blocked text"},
+            caption_status="blocked",
+            token_counts={"qwen": TokenCounts(prompt_tokens=7, output_tokens=3)},
+        ),
+    ]
+    clip = Clip(uuid=uuid.uuid4(), source_video="v.mp4", span=(0.0, 1.0), windows=windows)
+    video_meta = VideoMetadata(height=1080, width=1920, framerate=30.0, num_frames=30, duration=1.0, video_codec="h264")
+
+    data = stage._make_clip_metadata(clip, video_meta)
+    assert data["has_caption"] is True
+    assert data["num_caption_windows"] == 2
+    assert data["total_prompt_tokens"] == 25
+    assert data["total_output_tokens"] == 12
+
+    clip_stats = stage._write_clip_metadata(clip, video_meta)
+    assert clip_stats.num_with_caption == 1
+    assert clip_stats.num_caption_windows == 2
+    assert clip_stats.total_prompt_tokens == 25
+    assert clip_stats.total_output_tokens == 12
 
 
 # ---------------------------------------------------------------------------

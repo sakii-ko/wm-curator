@@ -139,6 +139,9 @@ class CaptionOutcome(enum.StrEnum):
     SKIPPED = "skipped"
 
 
+CAPTION_OK_STATUSES = {CaptionOutcome.SUCCESS, CaptionOutcome.TRUNCATED}
+
+
 type CaptionFailureReason = Literal["exception", "timeout"]
 
 
@@ -363,6 +366,7 @@ class ClipStats:
     num_transcoded: int = 0
     num_with_embeddings: int = 0
     num_with_caption: int = 0
+    num_caption_windows: int = 0
     num_with_webp: int = 0
     total_clip_duration: float = 0.0
     max_clip_duration: float = 0.0
@@ -385,6 +389,7 @@ class ClipStats:
         self.num_transcoded += other.num_transcoded
         self.num_with_embeddings += other.num_with_embeddings
         self.num_with_caption += other.num_with_caption
+        self.num_caption_windows += other.num_caption_windows
         self.num_with_webp += other.num_with_webp
         self.total_clip_duration += other.total_clip_duration
         self.max_clip_duration = max(self.max_clip_duration, other.max_clip_duration)
