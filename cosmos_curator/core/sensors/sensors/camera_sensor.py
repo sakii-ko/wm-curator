@@ -251,7 +251,7 @@ class CameraSensor:
                     continue
                 sampled_pts_stream = self.video_index.display_pts_stream[indices]
                 decode_plan = make_decode_plan(self.video_index.kf_pts_stream, sampled_pts_stream, counts)
-                frames = decoder.decode(decode_plan)
+                frames, motion_vectors = decoder.decode(decode_plan)
                 pts_stream_expanded = np.repeat(sampled_pts_stream, counts)
 
                 yield CameraData(
@@ -260,6 +260,7 @@ class CameraSensor:
                     pts_stream=pts_stream_expanded,
                     frames=frames,
                     metadata=self._video_metadata,
+                    motion_vectors=motion_vectors,
                     intrinsics=self._intrinsics,
                     extrinsics=self._extrinsics,
                 )

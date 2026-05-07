@@ -38,11 +38,13 @@ import numpy.typing as npt
 from av.container import InputContainer
 from loguru import logger
 
+from cosmos_curator.core.sensors.data.camera_data import MotionVectorData, MotionVectorFrameData
 from cosmos_curator.core.sensors.data.video import VideoIndex, VideoMetadata
 from cosmos_curator.core.sensors.types.types import DataSource, VideoIndexCreationMethod
 from cosmos_curator.core.sensors.utils.io import open_data_source
 
 type DecodePlan = list[tuple[int, list[tuple[int, int]]]]
+type DecodeResult = tuple[npt.NDArray[np.uint8], MotionVectorData | None]
 
 _VALID_THREAD_TYPES = {"NONE", "FRAME", "SLICE", "AUTO"}
 _CPU_OUTPUT_FORMATS: dict[str, tuple[np.dtype[np.uint8], int]] = {
@@ -62,6 +64,7 @@ class CpuVideoDecodeConfig(VideoDecodeConfig):
     thread_type: str = "AUTO"
     thread_count: int = 4
     dest_format: str = "rgb24"
+    export_mvs: bool = False
 
     def __attrs_post_init__(self) -> None:
         """Validate CPU decoder threading parameters."""
@@ -101,7 +104,7 @@ class VideoDecoder(Protocol):
     def time_base(self) -> Fraction:
         """Return the stream time base for the opened decoder session."""
 
-    def decode(self, decode_plan: DecodePlan) -> npt.NDArray[np.uint8]:
+    def decode(self, decode_plan: DecodePlan) -> DecodeResult:
         """Decode frames described by ``decode_plan``."""
 
 
@@ -140,6 +143,8 @@ class CpuVideoDecoder:
         self.stats = stats
         self.stream.thread_type = self.config.thread_type
         self.stream.thread_count = self.config.thread_count
+        if self.config.export_mvs:
+            self.stream.codec_context.flags2 |= av.codec.context.Flags2.export_mvs
         self.last_decoded_pts: int | None = None
 
     @property
@@ -238,12 +243,42 @@ class CpuVideoDecoder:
         self._accumulate_stat("t_copy", time.perf_counter() - t0)
         return dest_idx + current_count
 
+    @staticmethod
+    def _motion_vector_frame_from_video_frame(frame: av.VideoFrame) -> MotionVectorFrameData:
+        """Convert PyAV motion-vector side data into the sensor data model."""
+        for side_data in frame.side_data:
+            if side_data.type != av.sidedata.sidedata.Type.MOTION_VECTORS:  # type: ignore[attr-defined]
+                continue
+
+            raw_motion_vectors = side_data.to_ndarray()  # type: ignore[attr-defined]
+            field_names = raw_motion_vectors.dtype.names
+            if field_names is None:
+                msg = "PyAV motion-vector side data did not expose structured fields"
+                raise ValueError(msg)
+
+            return MotionVectorFrameData(
+                source=np.asarray(raw_motion_vectors["source"], dtype=np.int32),
+                w=np.asarray(raw_motion_vectors["w"], dtype=np.int32),
+                h=np.asarray(raw_motion_vectors["h"], dtype=np.int32),
+                src_x=np.asarray(raw_motion_vectors["src_x"], dtype=np.int32),
+                src_y=np.asarray(raw_motion_vectors["src_y"], dtype=np.int32),
+                dst_x=np.asarray(raw_motion_vectors["dst_x"], dtype=np.int32),
+                dst_y=np.asarray(raw_motion_vectors["dst_y"], dtype=np.int32),
+                flags=np.asarray(raw_motion_vectors["flags"], dtype=np.int64),
+                motion_x=np.asarray(raw_motion_vectors["motion_x"], dtype=np.int32),
+                motion_y=np.asarray(raw_motion_vectors["motion_y"], dtype=np.int32),
+                motion_scale=np.asarray(raw_motion_vectors["motion_scale"], dtype=np.int32),
+            )
+
+        return MotionVectorFrameData.empty()
+
     def _decode_group(
         self,
         dest: npt.NDArray[np.uint8],
         dest_idx: int,
         kf_pts_stream: int,
         group_targets: list[tuple[int, int]],
+        motion_vector_frames: list[MotionVectorFrameData] | None = None,
     ) -> int:
         """Decode one GOP-worth of target frames after seeking to its keyframe."""
         self._seek_and_flush(kf_pts_stream)
@@ -265,7 +300,12 @@ class CpuVideoDecoder:
                 if target_idx >= len(group_targets) or frame.pts != group_targets[target_idx][0]:
                     continue
 
-                dest_idx = self._copy_decoded_frame(dest, dest_idx, frame, group_targets[target_idx][1])
+                current_count = group_targets[target_idx][1]
+                if self.config.export_mvs and motion_vector_frames is not None:
+                    motion_vector_frame = self._motion_vector_frame_from_video_frame(frame)
+                    motion_vector_frames.extend([motion_vector_frame] * current_count)
+
+                dest_idx = self._copy_decoded_frame(dest, dest_idx, frame, current_count)
                 target_idx += 1
                 if target_idx >= len(group_targets):
                     return dest_idx
@@ -283,7 +323,7 @@ class CpuVideoDecoder:
             raise ValueError(msg)
         return dest_idx
 
-    def decode(self, decode_plan: DecodePlan) -> npt.NDArray[np.uint8]:
+    def decode(self, decode_plan: DecodePlan) -> DecodeResult:
         """Decode the exact frame for each target timestamp in ``decode_plan``.
 
         For each ``(kf_pts_stream, group)`` entry in ``decode_plan``:
@@ -313,8 +353,11 @@ class CpuVideoDecoder:
                 ``(pts_stream, count)`` pairs, all in stream time_base units.
 
         Returns:
-            Fresh ``uint8`` array of shape ``(total_count, height, width, 3)``
-            in rgb24 order.
+            Tuple of ``(frames, motion_vectors)``. ``frames`` is a fresh
+            ``uint8`` array of shape ``(total_count, height, width, 3)`` in
+            rgb24 order. ``motion_vectors`` is ``None`` unless
+            ``CpuVideoDecodeConfig.export_mvs`` is enabled, in which case it
+            contains one aligned per-frame payload per decoded RGB frame.
 
             ``total_count = sum(count for _, group in decode_plan for _, count in group)``.
 
@@ -333,8 +376,9 @@ class CpuVideoDecoder:
         )
         frames_np_idx = 0
         self.last_decoded_pts = None
+        motion_vector_frames: list[MotionVectorFrameData] | None = [] if self.config.export_mvs else None
         for kf_pts_stream, group in decode_plan:
-            frames_np_idx = self._decode_group(frames_np, frames_np_idx, kf_pts_stream, group)
+            frames_np_idx = self._decode_group(frames_np, frames_np_idx, kf_pts_stream, group, motion_vector_frames)
 
         if frames_np_idx != total_count:
             msg = (
@@ -343,7 +387,14 @@ class CpuVideoDecoder:
             )
             raise RuntimeError(msg)
 
-        return frames_np
+        motion_vectors = (
+            None
+            if motion_vector_frames is None
+            else MotionVectorData(
+                frames=motion_vector_frames,  # type: ignore[arg-type]  # attrs converter stores an immutable tuple
+            )
+        )
+        return frames_np, motion_vectors
 
 
 class GpuVideoDecoder:
@@ -387,7 +438,7 @@ class GpuVideoDecoder:
         ):
             yield cls(container, video_stream, config, stats)
 
-    def decode(self, decode_plan: DecodePlan) -> npt.NDArray[np.uint8]:
+    def decode(self, decode_plan: DecodePlan) -> DecodeResult:
         """Decode the frame closest to each target timestamp using the GPU."""
         del decode_plan
         msg = "GPU decode mode not implemented"

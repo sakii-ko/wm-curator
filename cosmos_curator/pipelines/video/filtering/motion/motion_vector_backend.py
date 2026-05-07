@@ -21,15 +21,19 @@ from typing import cast
 import attrs
 import av
 import cv2
+import numpy as np
 import numpy.typing as npt
 import torch
 from numpy.lib.recfunctions import structured_to_unstructured
 from nvtx import nvtx  # type: ignore[import-untyped]
 from torch import Tensor
 
+from cosmos_curator.core.sensors.data.camera_data import MotionVectorData, MotionVectorFrameData
+
 # We error on any video with a width or height less than this.
 # The motion detection algorithm can't handle any resolutions less than this.
 _MIN_SIDE_RESOLUTION = 256
+_LEGACY_MOTION_VECTOR_COLUMNS = 10
 
 
 class VideoResolutionTooSmallError(Exception):
@@ -79,6 +83,47 @@ class DecodedData:
         for frame in self.frames:
             total_size += frame.nbytes
         return total_size
+
+
+def sensor_motion_vector_frame_to_legacy_matrix(frame: MotionVectorFrameData) -> npt.NDArray[np.float64]:
+    """Project one sensor motion-vector frame into the legacy 10-column matrix layout.
+
+    Columns are ``w``, ``h``, ``src_x``, ``src_y``, ``dst_x``, ``dst_y``,
+    ``flags``, ``motion_x``, ``motion_y``, and ``motion_scale``. The canonical
+    sensor ``source`` field is intentionally omitted because the legacy motion
+    scoring layout had no column for it.
+    """
+    if len(frame.source) == 0:
+        return np.empty((0, _LEGACY_MOTION_VECTOR_COLUMNS), dtype=np.float64)
+    return np.asarray(
+        np.column_stack(
+            (
+                frame.w,
+                frame.h,
+                frame.src_x,
+                frame.src_y,
+                frame.dst_x,
+                frame.dst_y,
+                frame.flags,
+                frame.motion_x,
+                frame.motion_y,
+                frame.motion_scale,
+            )
+        ),
+        dtype=np.float64,
+    )
+
+
+def sensor_motion_vector_data_to_legacy_matrices(
+    motion_vectors: MotionVectorData,
+) -> list[npt.NDArray[np.float64]]:
+    """Project sensor motion vectors into legacy per-frame 10-column matrices.
+
+    This adapter is for future pipeline wiring that consumes
+    ``CameraData.motion_vectors`` but still needs the older motion-filter matrix
+    projection. The canonical sensor data model remains named and lossless.
+    """
+    return [sensor_motion_vector_frame_to_legacy_matrix(frame) for frame in motion_vectors.frames]
 
 
 @nvtx.annotate()  # type: ignore[untyped-decorator]

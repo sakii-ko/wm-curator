@@ -996,6 +996,7 @@ def test_cpu_video_decode_config_defaults() -> None:
     assert config.dest_format == "rgb24"
     assert config.dest_dtype == np.dtype(np.uint8)
     assert config.channels == 3
+    assert config.export_mvs is False
 
 
 def test_cpu_video_decode_config_raises_on_unsupported_dest_format() -> None:
@@ -1026,10 +1027,11 @@ def test_cpu_video_decoder_uses_configured_output_format(synthetic_video: io.Byt
         target_pts_stream = index.pts_stream[:1]
         counts = np.ones(len(target_pts_stream), dtype=np.int64)
         plan = make_decode_plan(index.kf_pts_stream, target_pts_stream, counts)
-        frames = decoder.decode(plan)
+        frames, motion_vectors = decoder.decode(plan)
 
     assert frames.dtype == config.dest_dtype
     assert frames.shape == (1, 16, 16, config.channels)
+    assert motion_vectors is None
 
 
 def test_cpu_video_decoder_raises_without_time_base() -> None:
@@ -1049,14 +1051,73 @@ def test_cpu_video_decoder_decode_updates_stats_and_broadcasts_duplicates(synthe
         target_pts_stream = index.pts_stream[:1]
         counts = np.array([2], dtype=np.int64)
         plan = make_decode_plan(index.kf_pts_stream, target_pts_stream, counts)
-        frames = decoder.decode(plan)
+        frames, motion_vectors = decoder.decode(plan)
 
     assert frames.shape == (2, 16, 16, 3)
+    assert motion_vectors is None
     np.testing.assert_array_equal(frames[0], frames[1])
     assert stats["frames_decoded"] >= 1
     assert stats["t_seek"] >= 0.0
     assert stats["t_convert"] >= 0.0
     assert stats["t_copy"] >= 0.0
+
+
+def test_cpu_video_decoder_export_mvs_returns_aligned_motion_vectors() -> None:
+    """CpuVideoDecoder should return one named motion-vector payload per decoded RGB frame."""
+    video_path = Path(__file__).parents[4] / "cosmos_curator/pipelines/video/data/test_clip_10s.mp4"
+    index, _metadata = make_index_and_metadata(video_path, index_method=VideoIndexCreationMethod.FULL_DEMUX)
+    target_pts_stream = index.display_pts_stream[:4]
+    counts = np.ones(len(target_pts_stream), dtype=np.int64)
+    plan = make_decode_plan(index.kf_pts_stream, target_pts_stream, counts)
+
+    with CpuVideoDecoder.open(video_path, config=CpuVideoDecodeConfig(export_mvs=True)) as decoder:
+        frames, motion_vectors = decoder.decode(plan)
+
+    assert frames.shape[0] == len(target_pts_stream)
+    assert motion_vectors is not None
+    assert len(motion_vectors.frames) == frames.shape[0]
+    assert any(len(frame.source) > 0 for frame in motion_vectors.frames)
+    for motion_vector_frame in motion_vectors.frames:
+        assert motion_vector_frame.source.dtype == np.int32
+        assert motion_vector_frame.flags.dtype == np.int64
+        assert motion_vector_frame.w.dtype == np.int32
+
+
+def test_cpu_video_decoder_export_mvs_broadcasts_duplicate_targets() -> None:
+    """CpuVideoDecoder should duplicate motion-vector payloads for repeated sampled frames."""
+    video_path = Path(__file__).parents[4] / "cosmos_curator/pipelines/video/data/test_clip_10s.mp4"
+    index, _metadata = make_index_and_metadata(video_path, index_method=VideoIndexCreationMethod.FULL_DEMUX)
+    target_pts_stream = index.display_pts_stream[1:2]
+    counts = np.array([2], dtype=np.int64)
+    plan = make_decode_plan(index.kf_pts_stream, target_pts_stream, counts)
+
+    with CpuVideoDecoder.open(video_path, config=CpuVideoDecodeConfig(export_mvs=True)) as decoder:
+        frames, motion_vectors = decoder.decode(plan)
+
+    assert frames.shape[0] == 2
+    assert motion_vectors is not None
+    assert len(motion_vectors.frames) == 2
+    np.testing.assert_array_equal(motion_vectors.frames[0].source, motion_vectors.frames[1].source)
+
+
+def test_cpu_video_decoder_export_mvs_uses_empty_payload_when_side_data_is_absent(
+    synthetic_mjpeg_all_keyframes_video: io.BytesIO,
+) -> None:
+    """Frames without motion-vector side data should still have aligned empty payloads."""
+    synthetic_mjpeg_all_keyframes_video.seek(0)
+    video_bytes = synthetic_mjpeg_all_keyframes_video.read()
+    index, _metadata = make_index_and_metadata(video_bytes, index_method=VideoIndexCreationMethod.FULL_DEMUX)
+    target_pts_stream = index.display_pts_stream[:1]
+    counts = np.ones(len(target_pts_stream), dtype=np.int64)
+    plan = make_decode_plan(index.kf_pts_stream, target_pts_stream, counts)
+
+    with CpuVideoDecoder.open(video_bytes, config=CpuVideoDecodeConfig(export_mvs=True)) as decoder:
+        frames, motion_vectors = decoder.decode(plan)
+
+    assert frames.shape[0] == 1
+    assert motion_vectors is not None
+    assert len(motion_vectors.frames) == 1
+    assert len(motion_vectors.frames[0].source) == 0
 
 
 def test_cpu_video_decoder_validate_monotonic_frame_pts_raises() -> None:
@@ -1720,9 +1781,10 @@ def test_cpu_video_decoder_no_duplicate_frames_fps_rate_timebase(synthetic_video
 
     with CpuVideoDecoder.open(video_bytes) as decoder:
         time_base = decoder.time_base
-        frames = decoder.decode(plan)
+        frames, motion_vectors = decoder.decode(plan)
 
     assert frames.shape[0] == len(index.pts_stream), f"expected {len(index.pts_stream)} frames, got {frames.shape[0]}"
+    assert motion_vectors is None
     canonical_ts = pts_to_ns(index.pts_stream, time_base)
     assert len(canonical_ts) == len(np.unique(canonical_ts)), f"duplicate canonical timestamps: {canonical_ts.tolist()}"
 
@@ -1756,8 +1818,9 @@ def test_cpu_video_decoder_all_keyframes_exact_targets(
                 expected_by_pts[int(frame.pts)] = np.asarray(frame_rgb, dtype=np.uint8)
 
     with CpuVideoDecoder.open(video_bytes) as decoder:
-        frames = decoder.decode(plan)
+        frames, motion_vectors = decoder.decode(plan)
 
     assert frames.shape[0] == len(target_pts_stream)
+    assert motion_vectors is None
     for i, pts in enumerate(target_pts_stream):
         np.testing.assert_array_equal(frames[i], expected_by_pts[int(pts)])

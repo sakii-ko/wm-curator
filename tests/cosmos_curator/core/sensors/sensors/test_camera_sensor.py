@@ -30,6 +30,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from cosmos_curator.core.sensors.data.camera_data import MotionVectorData, MotionVectorFrameData
 from cosmos_curator.core.sensors.data.extrinsics import SensorExtrinsics
 from cosmos_curator.core.sensors.data.intrinsics import CameraIntrinsics
 from cosmos_curator.core.sensors.data.video import VideoIndex, VideoMetadata
@@ -86,13 +87,24 @@ class _FakeDecoder:
         self,
         *,
         time_base: Fraction,
-        decode_fn: Callable[[list[tuple[int, list[tuple[int, int]]]]], npt.NDArray[np.uint8]],
+        decode_fn: Callable[
+            [list[tuple[int, list[tuple[int, int]]]]],
+            npt.NDArray[np.uint8] | tuple[npt.NDArray[np.uint8], MotionVectorData | None],
+        ],
     ) -> None:
         self._time_base = time_base
         self._decode_fn = decode_fn
 
     def __enter__(self) -> SimpleNamespace:
-        return SimpleNamespace(time_base=self._time_base, decode=self._decode_fn)
+        def _decode(
+            decode_plan: list[tuple[int, list[tuple[int, int]]]],
+        ) -> tuple[npt.NDArray[np.uint8], MotionVectorData | None]:
+            result = self._decode_fn(decode_plan)
+            if isinstance(result, tuple):
+                return result
+            return result, None
+
+        return SimpleNamespace(time_base=self._time_base, decode=_decode)
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         del exc_type, exc, tb
@@ -112,6 +124,11 @@ def _make_intrinsics(*, width: int = 2, height: int = 2) -> CameraIntrinsics:
         width=width,
         height=height,
     )
+
+
+def _make_motion_vector_data(count: int) -> MotionVectorData:
+    """Build a minimal aligned motion-vector batch for CameraSensor tests."""
+    return MotionVectorData(frames=tuple(MotionVectorFrameData.empty() for _ in range(count)))
 
 
 @pytest.fixture
@@ -553,6 +570,71 @@ def test_camera_sensor_expands_repeated_picks_into_aligned_rows(
         == batch.frames.shape[0]
     )
     assert decode_calls == [[(10, [(10, 2), (30, 1)])]]
+
+
+def test_camera_sensor_populates_decoder_motion_vectors(
+    patch_camera_sensor_dependencies: Callable[..., None],
+) -> None:
+    """CameraSensor should pass decoder-provided motion vectors through to CameraData."""
+    index, metadata = _make_video_index_and_metadata(
+        pts_ns=[100, 200],
+        pts_stream=[10, 20],
+        is_keyframe=[True, False],
+        is_discard=[False, False],
+        kf_pts_ns=[100],
+        kf_pts_stream=[10],
+    )
+    motion_vectors = _make_motion_vector_data(2)
+
+    def fake_make_index_and_metadata(
+        source: object,
+        stream_idx: int = 0,
+        index_method: object = None,
+    ) -> tuple[VideoIndex, VideoMetadata]:
+        del source, stream_idx, index_method
+        return index, metadata
+
+    def fake_decoder_open(
+        source: object,
+        stream_idx: int = 0,
+        config: object = None,
+        stats: object = None,
+    ) -> _FakeDecoder:
+        del source, stream_idx, config, stats
+        return _FakeDecoder(
+            time_base=index.time_base,
+            decode_fn=lambda decode_plan: (  # noqa: ARG005
+                np.zeros((2, metadata.height, metadata.width, 3), dtype=np.uint8),
+                motion_vectors,
+            ),
+        )
+
+    def fake_sample_window_indices(
+        canonical: npt.NDArray[np.int64],
+        grid: npt.NDArray[np.int64],
+        *,
+        policy: object = None,
+        dedup: bool = True,
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        del canonical, grid, policy, dedup
+        return np.array([0, 1], dtype=np.int64), np.array([1, 1], dtype=np.int64)
+
+    patch_camera_sensor_dependencies(
+        make_index_and_metadata_fn=fake_make_index_and_metadata,
+        decoder_open_fn=fake_decoder_open,
+        sample_window_indices_fn=fake_sample_window_indices,
+    )
+
+    sensor = CameraSensor(b"not-used")
+    grid = make_sampling_grid(
+        timestamps_ns=np.array([100, 200, 201], dtype=np.int64),
+        stride_ns=1_000,
+        duration_ns=1_000,
+    )
+
+    batch = next(sensor.sample(SamplingSpec(grid=grid)))
+
+    assert batch.motion_vectors is motion_vectors
 
 
 def test_camera_sensor_returns_empty_when_window_has_no_displayable_matches(

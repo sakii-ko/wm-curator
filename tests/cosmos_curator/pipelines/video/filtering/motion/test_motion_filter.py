@@ -21,13 +21,19 @@ These values serve as a regression test to ensure the motion detection algorithm
 maintains consistency across code changes.
 """
 
+import numpy as np
 import pytest
 
 from cosmos_curator.core.interfaces.pipeline_interface import run_pipeline
 from cosmos_curator.core.interfaces.runner_interface import RunnerInterface
+from cosmos_curator.core.sensors.data.camera_data import MotionVectorData, MotionVectorFrameData
 from cosmos_curator.pipelines.video.filtering.motion.motion_filter_stages import (
     MotionFilterStage,
     MotionVectorDecodeStage,
+)
+from cosmos_curator.pipelines.video.filtering.motion.motion_vector_backend import (
+    sensor_motion_vector_data_to_legacy_matrices,
+    sensor_motion_vector_frame_to_legacy_matrix,
 )
 from cosmos_curator.pipelines.video.utils.data_model import SplitPipeTask
 
@@ -35,6 +41,69 @@ from cosmos_curator.pipelines.video.utils.data_model import SplitPipeTask
 EXPECTED_MOTION_GLOBAL_MEAN: float = 0.002402
 EXPECTED_MOTION_PER_PATCH_MIN_256: float = 0.001553
 TOLERANCE: float = 0.000001
+
+
+def test_sensor_motion_vector_frame_to_legacy_matrix_projects_expected_columns() -> None:
+    """Sensor motion-vector adapter should make legacy column ordering explicit."""
+    frame = MotionVectorFrameData(
+        source=np.array([1, -1], dtype=np.int32),
+        w=np.array([16, 8], dtype=np.int32),
+        h=np.array([16, 8], dtype=np.int32),
+        src_x=np.array([1, 2], dtype=np.int32),
+        src_y=np.array([3, 4], dtype=np.int32),
+        dst_x=np.array([5, 6], dtype=np.int32),
+        dst_y=np.array([7, 8], dtype=np.int32),
+        flags=np.array([9, 10], dtype=np.int64),
+        motion_x=np.array([11, 12], dtype=np.int32),
+        motion_y=np.array([13, 14], dtype=np.int32),
+        motion_scale=np.array([15, 16], dtype=np.int32),
+    )
+
+    legacy_matrix = sensor_motion_vector_frame_to_legacy_matrix(frame)
+
+    assert legacy_matrix.dtype == np.float64
+    np.testing.assert_array_equal(
+        legacy_matrix,
+        np.array(
+            [
+                [16, 16, 1, 3, 5, 7, 9, 11, 13, 15],
+                [8, 8, 2, 4, 6, 8, 10, 12, 14, 16],
+            ],
+            dtype=np.float64,
+        ),
+    )
+
+
+def test_sensor_motion_vector_frame_to_legacy_matrix_accepts_empty_payload() -> None:
+    """Sensor motion-vector adapter should preserve empty-frame shape."""
+    legacy_matrix = sensor_motion_vector_frame_to_legacy_matrix(MotionVectorFrameData.empty())
+
+    assert legacy_matrix.shape == (0, 10)
+    assert legacy_matrix.dtype == np.float64
+
+
+def test_sensor_motion_vector_data_to_legacy_matrices_projects_each_frame() -> None:
+    """Sensor motion-vector adapter should return one legacy matrix per sensor frame."""
+    frame = MotionVectorFrameData(
+        source=np.array([-1], dtype=np.int32),
+        w=np.array([16], dtype=np.int32),
+        h=np.array([8], dtype=np.int32),
+        src_x=np.array([1], dtype=np.int32),
+        src_y=np.array([2], dtype=np.int32),
+        dst_x=np.array([3], dtype=np.int32),
+        dst_y=np.array([4], dtype=np.int32),
+        flags=np.array([5], dtype=np.int64),
+        motion_x=np.array([6], dtype=np.int32),
+        motion_y=np.array([7], dtype=np.int32),
+        motion_scale=np.array([8], dtype=np.int32),
+    )
+    motion_vectors = MotionVectorData(frames=(frame, MotionVectorFrameData.empty()))
+
+    legacy_matrices = sensor_motion_vector_data_to_legacy_matrices(motion_vectors)
+
+    assert len(legacy_matrices) == 2
+    assert legacy_matrices[0].shape == (1, 10)
+    assert legacy_matrices[1].shape == (0, 10)
 
 
 @pytest.fixture

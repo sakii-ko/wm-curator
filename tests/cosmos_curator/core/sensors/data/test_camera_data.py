@@ -21,7 +21,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from cosmos_curator.core.sensors.data.camera_data import CameraData, MotionVectorData
+from cosmos_curator.core.sensors.data.camera_data import CameraData, MotionVectorData, MotionVectorFrameData
 from cosmos_curator.core.sensors.data.extrinsics import SensorExtrinsics
 from cosmos_curator.core.sensors.data.intrinsics import CameraIntrinsics
 from cosmos_curator.core.sensors.data.video import VideoMetadata
@@ -55,6 +55,23 @@ def _make_camera_data() -> CameraData:
     )
 
 
+def _make_motion_vector_frame(length: int = 1) -> MotionVectorFrameData:
+    """Build a valid per-frame motion-vector payload."""
+    return MotionVectorFrameData(
+        source=np.zeros(length, dtype=np.int32),
+        w=np.full(length, 16, dtype=np.int32),
+        h=np.full(length, 16, dtype=np.int32),
+        src_x=np.arange(length, dtype=np.int32),
+        src_y=np.arange(length, dtype=np.int32),
+        dst_x=np.arange(length, dtype=np.int32),
+        dst_y=np.arange(length, dtype=np.int32),
+        flags=np.zeros(length, dtype=np.int64),
+        motion_x=np.zeros(length, dtype=np.int32),
+        motion_y=np.zeros(length, dtype=np.int32),
+        motion_scale=np.ones(length, dtype=np.int32),
+    )
+
+
 def _make_extrinsics() -> SensorExtrinsics:
     """Build a minimal SensorExtrinsics instance."""
     return SensorExtrinsics(matrix=np.eye(4, dtype=np.float64))
@@ -77,8 +94,8 @@ def test_camera_data_raises_on_motion_vector_length_mismatch() -> None:
     frames = np.zeros((1, 1, 1, 3), dtype=np.uint8)
     motion_vectors = MotionVectorData(
         frames=(
-            np.zeros((0, 10), dtype=np.float64),
-            np.zeros((0, 10), dtype=np.float64),
+            MotionVectorFrameData.empty(),
+            MotionVectorFrameData.empty(),
         ),
     )
 
@@ -138,49 +155,81 @@ def test_camera_data_allows_repeated_canonical_and_pts_stream_values() -> None:
 
 def test_motion_vector_data_frames_are_immutable() -> None:
     """MotionVectorData should not expose a mutable top-level frame collection."""
-    motion_vectors = MotionVectorData(
-        frames=(np.zeros((0, 10), dtype=np.float64),),
-    )
+    motion_vectors = MotionVectorData(frames=(MotionVectorFrameData.empty(),))
 
     with pytest.raises(AttributeError):
-        cast("Any", motion_vectors.frames).append(np.zeros((0, 10), dtype=np.float64))
+        cast("Any", motion_vectors.frames).append(MotionVectorFrameData.empty())
 
 
-def test_motion_vector_data_accepts_valid_frames_and_marks_them_readonly() -> None:
-    """MotionVectorData should accept valid block tables and freeze each frame array."""
-    frame0 = np.zeros((1, 10), dtype=np.float64)
-    frame1 = np.ones((2, 10), dtype=np.float64)
+def test_motion_vector_frame_data_accepts_valid_fields_and_marks_them_readonly() -> None:
+    """MotionVectorFrameData should accept valid field arrays and freeze them."""
+    source = np.zeros(2, dtype=np.int32)
 
-    motion_vectors = MotionVectorData(frames=(frame0, frame1))
+    frame = MotionVectorFrameData(
+        source=source,
+        w=np.full(2, 16, dtype=np.int32),
+        h=np.full(2, 16, dtype=np.int32),
+        src_x=np.zeros(2, dtype=np.int32),
+        src_y=np.zeros(2, dtype=np.int32),
+        dst_x=np.zeros(2, dtype=np.int32),
+        dst_y=np.zeros(2, dtype=np.int32),
+        flags=np.zeros(2, dtype=np.int64),
+        motion_x=np.zeros(2, dtype=np.int32),
+        motion_y=np.zeros(2, dtype=np.int32),
+        motion_scale=np.ones(2, dtype=np.int32),
+    )
 
-    assert len(motion_vectors.frames) == 2
+    assert len(frame.source) == 2
     with pytest.raises(ValueError, match="assignment destination is read-only"):
-        motion_vectors.frames[0][0, 0] = 1.0
+        frame.source[0] = 1
 
 
-def test_motion_vector_data_does_not_mutate_caller_owned_frames() -> None:
-    """MotionVectorData should keep caller-owned frame tables writeable."""
-    frame0 = np.zeros((1, 10), dtype=np.float64)
-    frame1 = np.ones((2, 10), dtype=np.float64)
+def test_motion_vector_frame_data_does_not_mutate_caller_owned_arrays() -> None:
+    """MotionVectorFrameData should keep caller-owned arrays writeable."""
+    source = np.zeros(2, dtype=np.int32)
+
+    frame = MotionVectorFrameData(
+        source=source,
+        w=np.full(2, 16, dtype=np.int32),
+        h=np.full(2, 16, dtype=np.int32),
+        src_x=np.zeros(2, dtype=np.int32),
+        src_y=np.zeros(2, dtype=np.int32),
+        dst_x=np.zeros(2, dtype=np.int32),
+        dst_y=np.zeros(2, dtype=np.int32),
+        flags=np.zeros(2, dtype=np.int64),
+        motion_x=np.zeros(2, dtype=np.int32),
+        motion_y=np.zeros(2, dtype=np.int32),
+        motion_scale=np.ones(2, dtype=np.int32),
+    )
+
+    assert source.flags.writeable is True
+    assert frame.source.flags.writeable is False
+    assert frame.source is not source
+    assert np.shares_memory(frame.source, source)
+
+
+def test_motion_vector_data_accepts_frame_containers() -> None:
+    """MotionVectorData should batch per-frame motion-vector containers."""
+    frame0 = _make_motion_vector_frame(1)
+    frame1 = _make_motion_vector_frame(2)
 
     motion_vectors = MotionVectorData(frames=(frame0, frame1))
 
-    assert frame0.flags.writeable is True
-    assert frame1.flags.writeable is True
-    assert motion_vectors.frames[0].flags.writeable is False
-    assert motion_vectors.frames[1].flags.writeable is False
-    assert motion_vectors.frames[0] is not frame0
-    assert motion_vectors.frames[1] is not frame1
-    assert np.shares_memory(motion_vectors.frames[0], frame0)
-    assert np.shares_memory(motion_vectors.frames[1], frame1)
+    assert motion_vectors.frames == (frame0, frame1)
+
+
+def test_motion_vector_data_rejects_non_frame_container() -> None:
+    """MotionVectorData should reject legacy/raw frame payloads as canonical frames."""
+    with pytest.raises(TypeError, match=r"frames\[0\] must be MotionVectorFrameData"):
+        MotionVectorData(frames=(cast("Any", np.zeros((1, 10), dtype=np.float64)),))
 
 
 def test_camera_data_accepts_matching_motion_vectors() -> None:
     """CameraData should accept motion vectors whose frame count matches the RGB frame count."""
     motion_vectors = MotionVectorData(
         frames=(
-            np.zeros((1, 10), dtype=np.float64),
-            np.ones((2, 10), dtype=np.float64),
+            _make_motion_vector_frame(1),
+            _make_motion_vector_frame(2),
         ),
     )
 
@@ -413,17 +462,86 @@ def test_camera_data_rejects_invalid_frame_tensor(
         )
 
 
-@pytest.mark.parametrize(
-    ("frames", "match"),
-    [
-        ((np.zeros(10, dtype=np.float64),), r"must be 2-D"),
-        ((np.zeros((1, 9), dtype=np.float64),), r"shape=\(1, 9\)"),
-    ],
-)
-def test_motion_vector_data_rejects_invalid_frame_shape(
-    frames: tuple[npt.NDArray[np.float64], ...],
-    match: str,
-) -> None:
-    """MotionVectorData should validate each per-frame block table."""
-    with pytest.raises(ValueError, match=match):
-        MotionVectorData(frames=frames)
+def test_motion_vector_frame_data_accepts_empty_payload() -> None:
+    """MotionVectorFrameData should accept an empty but well-typed payload."""
+    frame = MotionVectorFrameData.empty()
+
+    assert len(frame.source) == 0
+    assert frame.source.dtype == np.int32
+    assert frame.flags.dtype == np.int64
+
+
+def test_motion_vector_frame_data_rejects_non_1d_field() -> None:
+    """MotionVectorFrameData should reject fields that are not 1-D arrays."""
+    with pytest.raises(ValueError, match="source must be 1-D"):
+        MotionVectorFrameData(
+            source=np.zeros((1, 1), dtype=np.int32),
+            w=np.ones(1, dtype=np.int32),
+            h=np.ones(1, dtype=np.int32),
+            src_x=np.zeros(1, dtype=np.int32),
+            src_y=np.zeros(1, dtype=np.int32),
+            dst_x=np.zeros(1, dtype=np.int32),
+            dst_y=np.zeros(1, dtype=np.int32),
+            flags=np.zeros(1, dtype=np.int64),
+            motion_x=np.zeros(1, dtype=np.int32),
+            motion_y=np.zeros(1, dtype=np.int32),
+            motion_scale=np.ones(1, dtype=np.int32),
+        )
+
+
+def test_motion_vector_frame_data_rejects_unequal_field_lengths() -> None:
+    """MotionVectorFrameData should reject fields with different row counts."""
+    with pytest.raises(ValueError, match="all motion-vector fields must have equal length"):
+        MotionVectorFrameData(
+            source=np.zeros(2, dtype=np.int32),
+            w=np.ones(1, dtype=np.int32),
+            h=np.ones(1, dtype=np.int32),
+            src_x=np.zeros(1, dtype=np.int32),
+            src_y=np.zeros(1, dtype=np.int32),
+            dst_x=np.zeros(1, dtype=np.int32),
+            dst_y=np.zeros(1, dtype=np.int32),
+            flags=np.zeros(1, dtype=np.int64),
+            motion_x=np.zeros(1, dtype=np.int32),
+            motion_y=np.zeros(1, dtype=np.int32),
+            motion_scale=np.ones(1, dtype=np.int32),
+        )
+
+
+def test_motion_vector_frame_data_rejects_wrong_dtype() -> None:
+    """MotionVectorFrameData should enforce the documented normalized dtypes."""
+    with pytest.raises(ValueError, match="flags must have dtype int64"):
+        MotionVectorFrameData(
+            source=np.zeros(1, dtype=np.int32),
+            w=np.ones(1, dtype=np.int32),
+            h=np.ones(1, dtype=np.int32),
+            src_x=np.zeros(1, dtype=np.int32),
+            src_y=np.zeros(1, dtype=np.int32),
+            dst_x=np.zeros(1, dtype=np.int32),
+            dst_y=np.zeros(1, dtype=np.int32),
+            flags=np.zeros(1, dtype=np.int32),
+            motion_x=np.zeros(1, dtype=np.int32),
+            motion_y=np.zeros(1, dtype=np.int32),
+            motion_scale=np.ones(1, dtype=np.int32),
+        )
+
+
+@pytest.mark.parametrize("field_name", ["w", "h", "motion_scale"])
+def test_motion_vector_frame_data_rejects_non_positive_required_fields(field_name: str) -> None:
+    """MotionVectorFrameData should reject non-positive block sizes and motion scale."""
+    kwargs: dict[str, Any] = {
+        "source": np.zeros(1, dtype=np.int32),
+        "w": np.ones(1, dtype=np.int32),
+        "h": np.ones(1, dtype=np.int32),
+        "src_x": np.zeros(1, dtype=np.int32),
+        "src_y": np.zeros(1, dtype=np.int32),
+        "dst_x": np.zeros(1, dtype=np.int32),
+        "dst_y": np.zeros(1, dtype=np.int32),
+        "flags": np.zeros(1, dtype=np.int64),
+        "motion_x": np.zeros(1, dtype=np.int32),
+        "motion_y": np.zeros(1, dtype=np.int32),
+        "motion_scale": np.ones(1, dtype=np.int32),
+    }
+    kwargs[field_name] = np.zeros(1, dtype=np.int32)
+
+    with pytest.raises(ValueError, match=f"{field_name} must contain strictly positive values"):
+        MotionVectorFrameData(**kwargs)

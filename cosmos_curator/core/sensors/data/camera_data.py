@@ -15,7 +15,7 @@
 
 """Camera data structures for cosmos_curator.core.sensors package."""
 
-from typing import Protocol
+from typing import Any, Protocol, Self, cast, get_args
 
 import attrs
 import numpy as np
@@ -24,15 +24,13 @@ import numpy.typing as npt
 from cosmos_curator.core.sensors.data.extrinsics import SensorExtrinsics
 from cosmos_curator.core.sensors.data.intrinsics import CameraIntrinsics
 from cosmos_curator.core.sensors.data.video import VideoMetadata
-from cosmos_curator.core.sensors.utils.helpers import as_readonly_view, as_readonly_view_tuple
+from cosmos_curator.core.sensors.utils.helpers import as_readonly_view
 from cosmos_curator.core.sensors.utils.validation import (
     nondecreasing_int64_array,
     strictly_increasing_int64_array,
     uint8_frame_batch,
 )
 
-_MOTION_VECTOR_FRAME_NDIM = 2
-_MOTION_VECTOR_COLUMNS = 10
 _CAMERA_FRAME_NDIM = 4
 _RGB_CHANNELS = 3
 
@@ -51,18 +49,50 @@ class _HasMetadata(Protocol):
     metadata: VideoMetadata
 
 
-def _mvd_frames(
+class _HasArrayAttribute(Protocol):
+    name: str
+    type: Any
+
+
+def _dtype_from_ndarray_annotation(attribute: _HasArrayAttribute) -> np.dtype[Any]:
+    """Return the scalar dtype declared by a ``npt.NDArray[...]`` field annotation."""
+    _, dtype_annotation = get_args(attribute.type)
+    dtype_arg = get_args(dtype_annotation)[0]
+    return np.dtype(cast("type[np.generic]", dtype_arg))
+
+
+def _motion_vector_array(
     _instance: object,
-    _attribute: object,
-    value: tuple[npt.NDArray[np.float64], ...],
+    attribute: _HasArrayAttribute,
+    value: npt.NDArray[Any],
 ) -> None:
-    """Validate per-frame motion vector block tables."""
-    for i, frame in enumerate(value):
-        if frame.ndim != _MOTION_VECTOR_FRAME_NDIM:
-            msg = f"motion_vectors.frames[{i}] must be 2-D, got ndim={frame.ndim}"
-            raise ValueError(msg)
-        if frame.shape[1] != _MOTION_VECTOR_COLUMNS:
-            msg = f"motion_vectors.frames[{i}] must have shape (N, {_MOTION_VECTOR_COLUMNS}), got shape={frame.shape}"
+    """Validate one named motion-vector field array."""
+    attribute_name = attribute.name
+    expected_dtype = _dtype_from_ndarray_annotation(attribute)
+    if value.ndim != 1:
+        msg = f"{attribute_name} must be 1-D, got ndim={value.ndim}"
+        raise ValueError(msg)
+    if value.dtype != expected_dtype:
+        msg = f"{attribute_name} must have dtype {expected_dtype}, got {value.dtype}"
+        raise ValueError(msg)
+
+
+def _motion_vector_frame_lengths(instance: "MotionVectorFrameData") -> None:
+    """Validate all arrays in one motion-vector frame have equal length."""
+    lengths = {field.name: len(getattr(instance, field.name)) for field in attrs.fields(type(instance))}
+    if len(set(lengths.values())) != 1:
+        msg = "all motion-vector fields must have equal length: " + ", ".join(
+            f"{name}={length}" for name, length in lengths.items()
+        )
+        raise ValueError(msg)
+
+
+def _positive_motion_vector_fields(instance: "MotionVectorFrameData") -> None:
+    """Validate positive block dimensions and sub-pixel motion scale."""
+    for field_name in ("w", "h", "motion_scale"):
+        values = getattr(instance, field_name)
+        if np.any(values <= 0):
+            msg = f"{field_name} must contain strictly positive values"
             raise ValueError(msg)
 
 
@@ -132,23 +162,82 @@ def _intrinsics_dimensions_match_metadata(
 
 
 @attrs.define(hash=False, frozen=True)
-class MotionVectorData:
-    """Per-frame motion vectors from H.264/HEVC (FFmpeg AVMotionVector). Variable num_blocks per frame."""
+class MotionVectorFrameData:
+    """Lossless named motion-vector side data for one decoded video frame.
+
+    PyAV 17.0.0 exposes FFmpeg ``AVMotionVector`` side data as a structured
+    NumPy array with fields ``source``, ``w``, ``h``, ``src_x``, ``src_y``,
+    ``dst_x``, ``dst_y``, ``flags``, ``motion_x``, ``motion_y``, and
+    ``motion_scale``. The sensor-layer contract normalizes those mixed-width
+    integer fields into this stable schema: every field is ``int32`` except
+    ``flags``, which is ``int64``. No field is dropped.
+    """
 
     __hash__ = None  # type: ignore[assignment]
 
-    # List of length N; frame i has shape (num_blocks_i, 10).
-    # Columns:
-    # [0:2] w, h (block size)
-    # [2:4] src_x, src_y
-    # [4:6] dst_x, dst_y
-    # [6:7] flags
-    # [7:9] motion_x, motion_y (sub-pixel; divide by motion_scale for pixel delta)
-    # [9]   motion_scale
-    frames: tuple[npt.NDArray[np.float64], ...] = attrs.field(
-        validator=_mvd_frames,
-        converter=as_readonly_view_tuple,
-    )
+    source: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    w: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    h: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    src_x: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    src_y: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    dst_x: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    dst_y: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    flags: npt.NDArray[np.int64] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    motion_x: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    motion_y: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+    motion_scale: npt.NDArray[np.int32] = attrs.field(converter=as_readonly_view, validator=_motion_vector_array)
+
+    def __attrs_post_init__(self) -> None:
+        """Validate cross-field frame invariants."""
+        _motion_vector_frame_lengths(self)
+        _positive_motion_vector_fields(self)
+
+    @classmethod
+    def empty(cls) -> Self:
+        """Return an empty, well-typed motion-vector payload for one frame."""
+        return cls(
+            source=np.empty(0, dtype=np.int32),
+            w=np.empty(0, dtype=np.int32),
+            h=np.empty(0, dtype=np.int32),
+            src_x=np.empty(0, dtype=np.int32),
+            src_y=np.empty(0, dtype=np.int32),
+            dst_x=np.empty(0, dtype=np.int32),
+            dst_y=np.empty(0, dtype=np.int32),
+            flags=np.empty(0, dtype=np.int64),
+            motion_x=np.empty(0, dtype=np.int32),
+            motion_y=np.empty(0, dtype=np.int32),
+            motion_scale=np.empty(0, dtype=np.int32),
+        )
+
+
+def _motion_vector_frames(
+    _instance: object,
+    _attribute: object,
+    value: tuple[object, ...],
+) -> None:
+    """Validate that a motion-vector batch contains per-frame containers."""
+    for index, frame in enumerate(value):
+        if not isinstance(frame, MotionVectorFrameData):
+            msg = f"frames[{index}] must be MotionVectorFrameData, got {type(frame).__name__}"
+            raise TypeError(msg)
+
+
+@attrs.define(hash=False, frozen=True)
+class MotionVectorData:
+    """Motion-vector batch aligned one-to-one with decoded RGB frames.
+
+    ``frames[i]`` contains the named motion-vector payload for
+    ``CameraData.frames[i]``. This is the canonical sensor-library
+    representation: it preserves all PyAV/FFmpeg fields as named integer
+    arrays, including ``source``.
+
+    This intentionally replaces the older positional ``float64`` matrix shape
+    ``(N, 10)``.
+    """
+
+    __hash__ = None  # type: ignore[assignment]
+
+    frames: tuple[MotionVectorFrameData, ...] = attrs.field(converter=tuple, validator=_motion_vector_frames)
 
 
 @attrs.define(hash=False, frozen=True)
@@ -199,10 +288,11 @@ class CameraData:
             _metadata_shape,
         )
     )
+    # Optional; requires decoder with export_mvs
     motion_vectors: MotionVectorData | None = attrs.field(
         default=None,
         validator=_motion_vectors,
-    )  # optional; requires decoder with export_mvs
+    )
     intrinsics: CameraIntrinsics | None = attrs.field(
         default=None,
         validator=_intrinsics_dimensions_match_metadata,
