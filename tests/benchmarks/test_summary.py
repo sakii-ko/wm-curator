@@ -14,11 +14,56 @@
 # limitations under the License.
 """Test benchmarks/summary.py."""
 
+import math
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from benchmarks.summary import make_summary_metrics, video_hours_per_day_per_gpu
+
+
+def _make_required_summary() -> dict[str, Any]:
+    return {
+        "num_input_videos": 100,
+        "num_input_videos_selected": 95,
+        "num_processed_videos": 95,
+        "total_video_duration": 3600,
+        "total_clip_duration": 1800,
+        "max_clip_duration": 300,
+        "pipeline_run_time": 60,
+        "total_num_clips_filtered_by_motion": 10,
+        "total_num_clips_filtered_by_aesthetic": 5,
+        "total_num_clips_filtered_by_qwen_classifier": 0,
+        "total_num_clips_filtered_by_qwen_semantic": 0,
+        "total_num_clips_passed": 80,
+        "total_num_clips_transcoded": 80,
+        "total_num_clips_with_embeddings": 80,
+        "total_num_clips_with_caption": 80,
+        "total_num_clips_with_webp": 80,
+    }
+
+
+def _make_summary_metrics_with_token_fields(
+    token_fields: dict[str, Any],
+    *,
+    runtime_minutes: float = 10,
+    num_nodes: int = 2,
+    gpus_per_node: int = 4,
+) -> dict[str, Any]:
+    summary = {
+        **_make_required_summary(),
+        "pipeline_run_time": runtime_minutes,
+        **token_fields,
+    }
+    return make_summary_metrics(
+        summary,
+        num_nodes,
+        gpus_per_node,
+        caption=True,
+        env="nvcf",
+        splitting_algorithm="transnetv2",
+    )
 
 
 @pytest.mark.parametrize(
@@ -50,24 +95,7 @@ def test_video_hours_per_day_per_gpu(
 def test_make_summary_metrics(mock_video_calc: MagicMock, mock_datetime: MagicMock, *, caption: bool) -> None:
     """Test make_summary_metrics function."""
     # Arrange
-    test_summary = {
-        "num_input_videos": 100,
-        "num_input_videos_selected": 95,
-        "num_processed_videos": 95,
-        "total_video_duration": 3600,
-        "total_clip_duration": 1800,
-        "max_clip_duration": 300,
-        "pipeline_run_time": 60,
-        "total_num_clips_filtered_by_motion": 10,
-        "total_num_clips_filtered_by_aesthetic": 5,
-        "total_num_clips_filtered_by_qwen_classifier": 0,
-        "total_num_clips_filtered_by_qwen_semantic": 0,
-        "total_num_clips_passed": 80,
-        "total_num_clips_transcoded": 80,
-        "total_num_clips_with_embeddings": 80,
-        "total_num_clips_with_caption": 80,
-        "total_num_clips_with_webp": 80,
-    }
+    test_summary = _make_required_summary()
     test_num_nodes = 2
     test_gpus_per_node = 4
     test_env = "nvcf"
@@ -97,6 +125,7 @@ def test_make_summary_metrics(mock_video_calc: MagicMock, mock_datetime: MagicMo
         **test_summary,
         "env": test_env,
         "num_nodes": test_num_nodes,
+        "gpus_per_node": test_gpus_per_node,
         "time": test_timestamp,
         "video_hours_per_day_per_gpu": test_video_hours_per_day_per_gpu,
         "caption": int(caption),
@@ -104,6 +133,154 @@ def test_make_summary_metrics(mock_video_calc: MagicMock, mock_datetime: MagicMo
     }
 
     assert result == expected_result
+
+
+def test_make_summary_metrics_with_nonzero_output_tokens() -> None:
+    """Preserve raw token fields and compute derived token metrics."""
+    result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": 1200,
+            "total_output_tokens": 600,
+            "total_num_caption_windows": 12,
+            "output_tokens_per_s": 999.0,
+        }
+    )
+
+    assert result["gpus_per_node"] == 4
+    assert result["total_prompt_tokens"] == 1200
+    assert result["total_output_tokens"] == 600
+    assert result["total_num_caption_windows"] == 12
+    assert result["output_tokens_per_s"] == 999.0
+    assert result["avg_prompt_tokens_per_window"] == 100.0
+    assert result["avg_output_tokens_per_window"] == 50.0
+    assert result["output_tokens_per_s_per_gpu"] == pytest.approx(600 / (10 * 60 * 2 * 4))
+
+
+def test_make_summary_metrics_with_zero_output_tokens() -> None:
+    """Preserve zero token totals while omitting generated-output throughput metrics."""
+    result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": 0,
+            "total_output_tokens": 0,
+            "total_num_caption_windows": 3,
+        }
+    )
+
+    assert result["total_prompt_tokens"] == 0
+    assert result["total_output_tokens"] == 0
+    assert result["total_num_caption_windows"] == 3
+    assert result["avg_prompt_tokens_per_window"] == 0.0
+    assert result["avg_output_tokens_per_window"] == 0.0
+    assert "output_tokens_per_s" not in result
+    assert "output_tokens_per_s_per_gpu" not in result
+
+    prompt_only_result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": 120,
+            "total_output_tokens": 0,
+            "total_num_caption_windows": 3,
+        }
+    )
+
+    assert prompt_only_result["total_prompt_tokens"] == 120
+    assert prompt_only_result["total_output_tokens"] == 0
+    assert prompt_only_result["total_num_caption_windows"] == 3
+    assert prompt_only_result["avg_prompt_tokens_per_window"] == 40.0
+    assert prompt_only_result["avg_output_tokens_per_window"] == 0.0
+    assert "output_tokens_per_s_per_gpu" not in prompt_only_result
+
+    zero_window_result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": 0,
+            "total_output_tokens": 0,
+            "total_num_caption_windows": 0,
+        }
+    )
+
+    assert zero_window_result["total_prompt_tokens"] == 0
+    assert zero_window_result["total_output_tokens"] == 0
+    assert zero_window_result["total_num_caption_windows"] == 0
+    assert "avg_prompt_tokens_per_window" not in zero_window_result
+    assert "avg_output_tokens_per_window" not in zero_window_result
+    assert "output_tokens_per_s_per_gpu" not in zero_window_result
+
+
+def test_make_summary_metrics_with_absent_token_fields() -> None:
+    """Omit token metrics when older summary.json files do not include token fields."""
+    result = _make_summary_metrics_with_token_fields({})
+
+    assert "total_prompt_tokens" not in result
+    assert "total_output_tokens" not in result
+    assert "total_num_caption_windows" not in result
+    assert "output_tokens_per_s" not in result
+    assert "avg_prompt_tokens_per_window" not in result
+    assert "avg_output_tokens_per_window" not in result
+    assert "output_tokens_per_s_per_gpu" not in result
+
+
+def test_make_summary_metrics_with_token_totals_but_no_caption_windows() -> None:
+    """Preserve token totals and omit per-window averages when caption windows are absent."""
+    result = _make_summary_metrics_with_token_fields({"total_prompt_tokens": 1200, "total_output_tokens": 600})
+
+    assert result["total_prompt_tokens"] == 1200
+    assert result["total_output_tokens"] == 600
+    assert "avg_prompt_tokens_per_window" not in result
+    assert "avg_output_tokens_per_window" not in result
+    assert result["output_tokens_per_s_per_gpu"] == pytest.approx(600 / (10 * 60 * 2 * 4))
+
+
+def test_make_summary_metrics_omits_derived_fields_for_invalid_optional_values() -> None:
+    """Preserve raw passthrough values while omitting derived fields for invalid optional values."""
+    result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": None,
+            "total_output_tokens": None,
+            "total_num_caption_windows": None,
+        }
+    )
+
+    assert result["total_prompt_tokens"] is None
+    assert result["total_output_tokens"] is None
+    assert result["total_num_caption_windows"] is None
+    assert "avg_prompt_tokens_per_window" not in result
+    assert "avg_output_tokens_per_window" not in result
+    assert "output_tokens_per_s_per_gpu" not in result
+
+
+def test_make_summary_metrics_omits_derived_fields_for_non_finite_optional_values() -> None:
+    """Preserve raw passthrough values while omitting derived fields for nan and inf inputs."""
+    result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": float("nan"),
+            "total_output_tokens": float("inf"),
+            "total_num_caption_windows": 12,
+        }
+    )
+
+    assert math.isnan(result["total_prompt_tokens"])
+    assert math.isinf(result["total_output_tokens"])
+    assert result["total_num_caption_windows"] == 12
+    assert "avg_prompt_tokens_per_window" not in result
+    assert "avg_output_tokens_per_window" not in result
+    assert "output_tokens_per_s_per_gpu" not in result
+
+
+def test_make_summary_metrics_omits_derived_fields_for_bool_optional_values() -> None:
+    """Preserve raw passthrough values while excluding bool values from derived metrics."""
+    result = _make_summary_metrics_with_token_fields(
+        {
+            "total_prompt_tokens": True,
+            "total_output_tokens": True,
+            "total_num_caption_windows": 12,
+        }
+    )
+
+    assert result["total_prompt_tokens"] is True
+    assert result["total_output_tokens"] is True
+    assert result["total_num_caption_windows"] == 12
+    assert "avg_prompt_tokens_per_window" not in result
+    assert "avg_output_tokens_per_window" not in result
+    assert "output_tokens_per_s_per_gpu" not in result
 
 
 def test_make_summary_metrics_missing_keys() -> None:
@@ -132,24 +309,7 @@ def test_make_summary_metrics_missing_keys() -> None:
 def test_make_summary_metrics_specific_missing_key(missing_key: str) -> None:
     """Test make_summary_metrics with specific missing keys."""
     # Arrange
-    complete_summary = {
-        "num_input_videos": 100,
-        "num_input_videos_selected": 95,
-        "num_processed_videos": 95,
-        "total_video_duration": 3600,
-        "total_clip_duration": 1800,
-        "max_clip_duration": 300,
-        "pipeline_run_time": 60,
-        "total_num_clips_filtered_by_motion": 10,
-        "total_num_clips_filtered_by_aesthetic": 5,
-        "total_num_clips_filtered_by_qwen_classifier": 0,
-        "total_num_clips_filtered_by_qwen_semantic": 0,
-        "total_num_clips_passed": 80,
-        "total_num_clips_transcoded": 80,
-        "total_num_clips_with_embeddings": 80,
-        "total_num_clips_with_caption": 80,
-        "total_num_clips_with_webp": 80,
-    }
+    complete_summary = _make_required_summary()
 
     # Remove the specific key
     incomplete_summary = {k: v for k, v in complete_summary.items() if k != missing_key}

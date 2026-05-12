@@ -14,8 +14,9 @@
 # limitations under the License.
 """Process summary.json written by the pipeline."""
 
+import math
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeGuard
 
 
 def video_hours_per_day_per_gpu(
@@ -34,6 +35,65 @@ def video_hours_per_day_per_gpu(
 
     """
     return (video_seconds * 24) / (60 * runtime_minutes * num_nodes * gpus_per_node)
+
+
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    """Return whether a value can be used as a finite numeric input."""
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _make_token_metrics(
+    summary: dict[str, Any], runtime_minutes: float, num_nodes: int, gpus_per_node: int
+) -> dict[str, Any]:
+    """Build optional token metrics from summary.json.
+
+    The per-GPU token metrics are benchmark-owned run-level rates, derived from
+    total output tokens over total GPU time for the run.
+
+    Args:
+        summary: summary.json written by the pipeline.
+        runtime_minutes: Total pipeline runtime in minutes.
+        num_nodes: Number of nodes used in the benchmark.
+        gpus_per_node: Number of GPUs per node.
+
+    Returns:
+        Raw token passthrough fields and derived token metrics when available.
+
+    """
+    token_metrics: dict[str, Any] = {}
+    raw_token_keys = [
+        "total_prompt_tokens",
+        "total_output_tokens",
+        "total_num_caption_windows",
+        "output_tokens_per_s",
+    ]
+    for key in raw_token_keys:
+        if key in summary:
+            token_metrics[key] = summary[key]
+
+    num_caption_windows = summary.get("total_num_caption_windows")
+    total_prompt_tokens = summary.get("total_prompt_tokens")
+    total_output_tokens = summary.get("total_output_tokens")
+    if _is_finite_number(num_caption_windows) and num_caption_windows > 0:
+        if _is_finite_number(total_prompt_tokens):
+            token_metrics["avg_prompt_tokens_per_window"] = total_prompt_tokens / num_caption_windows
+        if _is_finite_number(total_output_tokens):
+            token_metrics["avg_output_tokens_per_window"] = total_output_tokens / num_caption_windows
+
+    if (
+        _is_finite_number(total_output_tokens)
+        and total_output_tokens > 0
+        and _is_finite_number(runtime_minutes)
+        and runtime_minutes > 0
+        and _is_finite_number(num_nodes)
+        and num_nodes > 0
+        and _is_finite_number(gpus_per_node)
+        and gpus_per_node > 0
+    ):
+        output_tokens_per_s_per_gpu = total_output_tokens / (runtime_minutes * 60 * num_nodes * gpus_per_node)
+        token_metrics["output_tokens_per_s_per_gpu"] = output_tokens_per_s_per_gpu
+
+    return token_metrics
 
 
 def make_summary_metrics(  # noqa: PLR0913
@@ -92,6 +152,7 @@ def make_summary_metrics(  # noqa: PLR0913
         {
             "env": env,
             "num_nodes": num_nodes,
+            "gpus_per_node": gpus_per_node,
             "time": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "video_hours_per_day_per_gpu": video_hours_per_day_per_gpu(
                 video_seconds, runtime_minutes, num_nodes, gpus_per_node
@@ -100,5 +161,6 @@ def make_summary_metrics(  # noqa: PLR0913
             "splitting_algorithm": splitting_algorithm,
         }
     )
+    data.update(_make_token_metrics(summary, runtime_minutes, num_nodes, gpus_per_node))
 
     return data

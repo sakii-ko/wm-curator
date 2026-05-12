@@ -13,7 +13,7 @@ import argparse
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import boto3
 import smart_open  # type: ignore[import-untyped]
@@ -44,7 +44,7 @@ def _log_retryable_attempt_failure(retry_state: tenacity.RetryCallState) -> None
 def _read_summary_json(summary_path: str, transport_params: dict[str, Any]) -> dict[str, Any]:
     """Load and return summary.json content."""
     with smart_open.open(summary_path, transport_params=transport_params) as f:
-        return json.load(f)
+        return cast("dict[str, Any]", json.load(f))
 
 
 def _summary_counts_are_valid(summary_path: str, transport_params: dict[str, Any], limit: int) -> bool:
