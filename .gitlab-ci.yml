@@ -105,11 +105,26 @@ variables:
       - "True"
       - "False"
   RUN_BENCHMARK:
-    description: "Scheduled nvcf_split_benchmark (same STAGING_TAG dotenv as promote; skopeo dev→perf then NVCF on perf)"
+    description: "Allow scheduled or web nvcf_split_benchmark (same STAGING_TAG dotenv as promote; skopeo dev→perf then NVCF on perf)"
     value: "False"
     options:
       - "True"
       - "False"
+  NVCF_SPLIT_BENCHMARK_MODELS:
+    description: "Comma-separated captioning model(s) for nvcf_split_benchmark"
+    value: "qwen"
+  NVCF_SPLIT_BENCHMARK_CAPTIONS:
+    description: "Comma-separated caption flags for nvcf_split_benchmark: 1/0, true/false, or yes/no"
+    value: "1"
+  NVCF_SPLIT_BENCHMARK_SPLITTING_ALGORITHMS:
+    description: "Comma-separated split algorithm(s) for nvcf_split_benchmark"
+    value: "transnetv2,fixed-stride"
+  NVCF_SPLIT_BENCHMARK_NUM_NODES:
+    description: "Comma-separated node count(s) for nvcf_split_benchmark"
+    value: "4,2"
+  NVCF_SPLIT_BENCHMARK_LIMIT:
+    description: "Input video limit for nvcf_split_benchmark"
+    value: "5000"
   HELM_DEBUG_KEEP_FAILED_DEPLOYMENTS:
     description: "On failure, do not delete the deployment"
     value: "False"
@@ -779,7 +794,7 @@ resolve_nvcf_staging_tag:
     - build-runner
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $RUN_PROMOTE_TO_PROD == "True"'
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $RUN_BENCHMARK == "True"'
+    - if: '($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web") && $RUN_BENCHMARK == "True"'
     - when: never
   id_tokens:
     VAULT_JWT_TOKEN:
@@ -846,7 +861,7 @@ nvcf_split_benchmark:
   needs:
     - job: resolve_nvcf_staging_tag
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $RUN_BENCHMARK == "True"'
+    - if: '($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web") && $RUN_BENCHMARK == "True"'
     - when: never   # fallback: never run otherwise
   id_tokens:
     VAULT_JWT_TOKEN:

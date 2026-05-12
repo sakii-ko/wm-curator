@@ -11,6 +11,7 @@
 
 import argparse
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -212,6 +213,7 @@ def report_metrics(  # noqa: PLR0913
     *,
     caption: bool,
     splitting_algorithm: str,
+    metrics_metadata: dict[str, Any] | None = None,
     kratos_metrics_endpoint: str | None = None,
     kratos_secrets: KratosSecrets | None = None,
     metrics_path: str | None = None,
@@ -225,6 +227,7 @@ def report_metrics(  # noqa: PLR0913
         gpus_per_node: Number of GPUs per node.
         caption: Whether captions are enabled.
         splitting_algorithm: Splitting algorithm used.
+        metrics_metadata: Additional metadata to include with the uploaded metrics.
         kratos_metrics_endpoint: Endpoint for sending metrics.
             Must be provided if reporting metrics to Kratos.
         kratos_secrets: Authentication secrets for metrics endpoint.
@@ -242,6 +245,8 @@ def report_metrics(  # noqa: PLR0913
     summary_metrics = make_summary_metrics(
         summary_data, num_nodes, gpus_per_node, caption=caption, env="nvcf", splitting_algorithm=splitting_algorithm
     )
+    if metrics_metadata:
+        summary_metrics.update(metrics_metadata)
 
     logger.info("Summary metrics:")
     print_json(json.dumps(summary_metrics, indent=2))
@@ -362,7 +367,7 @@ aws_region = {s3_secrets.aws_region}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         logger.info(
-            f"Benchmarking with {caption=} {num_nodes=} {splitting_algorithm=}, "
+            f"Benchmarking with {caption=} {num_nodes=} {captioning_algorithm=} {splitting_algorithm=}, "
             f"input: {s3_input_prefix}, output: {s3_output_prefix}"
         )
         tmpdir_path = Path(tmpdir)
@@ -413,6 +418,25 @@ aws_region = {s3_secrets.aws_region}
             gpus_per_node=gpus_per_node,
             caption=bool(caption),
             splitting_algorithm=splitting_algorithm,
+            metrics_metadata={
+                "image": image_repository,
+                "tag": image_tag,
+                "scheduled": os.getenv("CI_PIPELINE_SOURCE") == "schedule",
+                "backend": backend,
+                "gpu": gpu,
+                "instance_type": instance_type,
+                "captioning_algorithm": captioning_algorithm,
+                "gpus_per_node": gpus_per_node,
+                "max_concurrency": max_concurrency,
+                "limit": limit,
+                "funcid": funcid,
+                "version": version,
+                "ci_pipeline_source": os.getenv("CI_PIPELINE_SOURCE", "unknown"),
+                "gitlab_user_login": os.getenv("GITLAB_USER_LOGIN", "unknown"),
+                "input_path": s3_input_prefix,
+                "output_path": s3_output_prefix,
+                "vllm_sampling_temperature": vllm_sampling_temperature,
+            },
             kratos_secrets=kratos_secrets,
             kratos_metrics_endpoint=kratos_metrics_endpoint,
             metrics_path=metrics_path,
