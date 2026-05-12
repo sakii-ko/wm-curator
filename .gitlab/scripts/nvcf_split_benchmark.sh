@@ -32,6 +32,10 @@ export RUST_BACKTRACE=1
 # Defaults: caption=1 (performance-critical path), nodes=4 2, algorithms=transnetv2 fixed-stride.
 # Override via env vars for targeted ad-hoc runs without editing the script.
 caption="${CAPTION:-1}"
+vllm_sampling_temperature_args=()
+if [[ -n "${VLLM_SAMPLING_TEMPERATURE:-}" ]]; then
+  vllm_sampling_temperature_args=(--vllm-sampling-temperature "${VLLM_SAMPLING_TEMPERATURE}")
+fi
 IFS=' ' read -ra _num_nodes_list      <<< "${NUM_NODES_LIST:-4 2}"
 IFS=' ' read -ra _splitting_algo_list <<< "${SPLITTING_ALGORITHM_LIST:-transnetv2 fixed-stride}"
 for num_nodes in "${_num_nodes_list[@]}"; do
@@ -55,6 +59,7 @@ for num_nodes in "${_num_nodes_list[@]}"; do
       --s3-output-prefix "${PERF_S3_OUTPUT_DIR}" \
       --gpus-per-node 8 \
       --max-concurrency 2 \
+      "${vllm_sampling_temperature_args[@]}" \
       --kratos-metrics-endpoint "${PERF_KRATOS_METRICS_ENDPOINT}" \
       --kratos-bearer-url "${PERF_KRATOS_BEARER_URL}" \
       --limit "${LIMIT_INPUT_VIDEOS}" \

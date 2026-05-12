@@ -27,6 +27,9 @@ from benchmarks.summary import make_summary_metrics
 from cosmos_curator.client.nvcf_cli.ncf.launcher.nvcf_driver import _get_s3_config_str
 from cosmos_curator.client.nvcf_cli.ncf.launcher.nvcf_function import NvcfFunction, NvcfFunctionAlreadyDeployedError
 
+# Qwen's default temp is 0.000001
+DEFAULT_BENCHMARK_VLLM_SAMPLING_TEMPERATURE = 0.000001
+
 
 class RetryableBenchmarkAttemptError(RuntimeError):
     """Retryable benchmark-attempt failure."""
@@ -290,6 +293,7 @@ def nvcf_split_benchmark(  # noqa: PLR0913
     clip_re_chunk_size: int,
     qwen_use_fp8_weights: bool,
     report_metrics_to_kratos: bool,
+    vllm_sampling_temperature: float,
     vllm_use_inflight_batching: bool,
 ) -> None:
     """Run benchmark tests."""
@@ -326,6 +330,7 @@ def nvcf_split_benchmark(  # noqa: PLR0913
             "limit": limit,
             "clip_re_chunk_size": clip_re_chunk_size,
             "qwen_use_fp8_weights": qwen_use_fp8_weights,
+            "vllm_sampling_temperature": vllm_sampling_temperature,
             "vllm_use_inflight_batching": vllm_use_inflight_batching,
         }
     )
@@ -529,6 +534,13 @@ def _parse_args() -> argparse.Namespace:
         help="Whether to use inflight batching with vllm.",
     )
     parser.add_argument(
+        "--vllm-sampling-temperature",
+        type=float,
+        required=False,
+        default=DEFAULT_BENCHMARK_VLLM_SAMPLING_TEMPERATURE,
+        help="Temperature for vLLM sampling in benchmark invoke args.",
+    )
+    parser.add_argument(
         "--max-attempts",
         type=int,
         required=False,
@@ -603,6 +615,7 @@ def main() -> None:
         report_metrics_to_kratos=args.report_metrics_to_kratos,
         clip_re_chunk_size=args.clip_re_chunk_size,
         qwen_use_fp8_weights=args.qwen_use_fp8_weights,
+        vllm_sampling_temperature=args.vllm_sampling_temperature,
         vllm_use_inflight_batching=args.vllm_use_inflight_batching,
     )
 
