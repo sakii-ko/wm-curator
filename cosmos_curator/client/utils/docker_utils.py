@@ -39,6 +39,7 @@ def generate_dockerfile(  # noqa: PLR0913
     verbose: bool = False,
     nsight: bool = False,
     slim: bool = False,
+    redistributable: bool = False,
 ) -> pathlib.Path:
     """Generate a Dockerfile based on the provided template and parameters.
 
@@ -52,6 +53,7 @@ def generate_dockerfile(  # noqa: PLR0913
         verbose (bool): If True, logs detailed information.
         nsight (bool): If True, installs nsight-systems for CUDA profiling. Defaults to False.
         slim (bool): If True, skip pixi install (lockfile + source only). Defaults to False.
+        redistributable (bool): If True, build the redistributable image variant. Defaults to False.
 
     Returns:
         pathlib.Path: The path to the generated Dockerfile.
@@ -77,6 +79,7 @@ def generate_dockerfile(  # noqa: PLR0913
         verbose=verbose,
         nsight=nsight,
         slim=slim,
+        redistributable=redistributable,
         **attrs.asdict(common_template_params),
     )
     if verbose:

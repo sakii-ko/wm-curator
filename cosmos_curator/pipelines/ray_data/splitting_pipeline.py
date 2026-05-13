@@ -31,6 +31,7 @@ import logging
 import ray
 from ray.data import TaskPoolStrategy
 
+from cosmos_curator.core.utils.ffmpeg_utils import assert_ffmpeg_supports_h264
 from cosmos_curator.core.utils.storage.storage_utils import get_files_relative, get_full_path, get_storage_client
 from cosmos_curator.pipelines.ray_data._clip_transcoder import make_transcode_fn
 from cosmos_curator.pipelines.ray_data._clip_writer import make_write_fn
@@ -67,6 +68,8 @@ def run(args: argparse.Namespace) -> int:
         Number of clips written.
 
     """
+    assert_ffmpeg_supports_h264()
+
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
 

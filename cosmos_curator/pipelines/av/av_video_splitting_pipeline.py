@@ -24,6 +24,7 @@ from cosmos_curator.core.interfaces.pipeline_interface import run_pipeline
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageSpec
 from cosmos_curator.core.utils.config import args_utils
 from cosmos_curator.core.utils.db.database_types import EnvType, PostgresDB
+from cosmos_curator.core.utils.ffmpeg_utils import assert_ffmpeg_supports_h264
 from cosmos_curator.core.utils.infra.profiling import profiling_scope
 from cosmos_curator.pipelines.av.av_video_pipelines_common import (
     build_caption_pipeline_stages,
@@ -69,6 +70,8 @@ def _split(args: argparse.Namespace) -> None:  # noqa: C901
         args: The arguments for the pipeline.
 
     """
+    assert_ffmpeg_supports_h264()
+
     zero_start = time.time()
     # it is possible a filename containing intended sessions are passed
     # process only those sessions

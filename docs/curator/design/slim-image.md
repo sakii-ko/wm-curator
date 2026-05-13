@@ -7,6 +7,12 @@
 > valuable independently of the slim image work — they unblock CUDA 13, simplify compliance, and reduce image size for
 > all modes. Only Phase 3 depends on the slim mode design and its shared storage assumptions.
 
+> **Current FFmpeg packaging note:** The conda-forge FFmpeg plan in this design has been superseded for distribution
+> compliance. Pixi no longer locks conda `ffmpeg`/`openh264`; images build FFmpeg 8.1.1 into `/opt/ffmpeg` and
+> full images rebuild PyAV against it. Slim images keep the locked PyPI PyAV wheel and use `/opt/ffmpeg` for CLI work.
+> Image builds use the non-redistributable runtime policy by default; pass `--redistributable` for the redistributable
+> variant.
+
 ## Motivation
 
 1. **Local dev velocity**: A slim image rebuilds in seconds (just source code, no conda install). Mounting the host's

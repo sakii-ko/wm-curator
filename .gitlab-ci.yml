@@ -38,6 +38,7 @@ variables:
   # GitLab container registry
   CURATOR_IMAGE: ${CI_REGISTRY_IMAGE}/curator
   CURATOR_SLIM_IMAGE: ${CI_REGISTRY_IMAGE}/curator-slim
+  CURATOR_DISTRIBUTABLE_IMAGE: ${CI_REGISTRY_IMAGE}/curator-distributable
   CI_BUILDER_IMAGE_REPO: ${CI_REGISTRY_IMAGE}/ci-builder
   CI_BUILDER_IMAGE: ${CI_BUILDER_IMAGE_REPO}:latest
   BUILDX_BUILDER_NAME: ci-cosmos-builder
@@ -63,8 +64,12 @@ variables:
   # Image names
   NVCF_DEV_BASE_IMAGE: "dev-cosmos-curator"  # Base name for NVCF dev images
   NVCF_DEV_IMAGE: "nvcr.io/${NGC_NVCF_ORG}/${NVCF_DEV_BASE_IMAGE}"  # Complete NVCF dev image path
+  NVCF_DEV_DISTRIBUTABLE_BASE_IMAGE: "dev-cosmos-curator-distributable"  # Redistributable NVCF dev image
+  NVCF_DEV_DISTRIBUTABLE_IMAGE: "nvcr.io/${NGC_NVCF_ORG}/${NVCF_DEV_DISTRIBUTABLE_BASE_IMAGE}"  # Complete NVCF dev distributable image path
   NVCF_STAGING_BASE_IMAGE: "staging-cosmos-curator"  # Base name for NVCF staging images
   NVCF_STAGING_IMAGE: "nvcr.io/${NGC_NVCF_ORG}/${NVCF_STAGING_BASE_IMAGE}"  # Complete NVCF staging image path
+  NVCF_STAGING_DISTRIBUTABLE_BASE_IMAGE: "staging-cosmos-curator-distributable"  # Redistributable NVCF staging image
+  NVCF_STAGING_DISTRIBUTABLE_IMAGE: "nvcr.io/${NGC_NVCF_ORG}/${NVCF_STAGING_DISTRIBUTABLE_BASE_IMAGE}"  # Complete NVCF staging distributable image path
   NVCF_PROD_BASE_IMAGE: "prod-cosmos-curator"  # Base name for NVCF prod images
   NVCF_PROD_IMAGE: "nvcr.io/${NGC_NVCF_ORG}/${NVCF_PROD_BASE_IMAGE}"  # Complete NVCF prod image path
 
@@ -225,6 +230,24 @@ stages:
   # Rules for scheduled promote/package jobs
   schedule_rules_promote: &schedule_rules_promote
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $RUN_PROMOTE_TO_PROD == "True"'
+    - when: never
+
+  # Rules for the redistributable image:
+  # - Always on post-merge to main / protected pushes and on web triggers,
+  #   so the post-merge pipeline produces all three images (regular, slim,
+  #   distributable) at the same moment from the same apt/conda/pixi state.
+  # - On MR pipelines: only when the image/runtime surface changes, or when
+  #   the explicit `build-all-images` MR label is set as an escape hatch.
+  distributable_rules: &distributable_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_PROTECTED == "true"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_LABELS =~ /(^|,)build-all-images($|,)/'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - package/cosmos_curator/default.dockerfile.jinja2
+        - cosmos_curator/client/image_cli/image_app.py
+        - cosmos_curator/client/utils/docker_utils.py
+        - cosmos_curator/core/utils/ffmpeg_utils.py
     - when: never
 
   # Rules for ci-builder image refresh jobs
@@ -438,6 +461,18 @@ build_deploy_curator_slim_arch:
     BUILD_IMAGE_REPO: ${CURATOR_SLIM_IMAGE}
     BUILD_EXTRA_ARGS: "--slim"
 
+# Redistributable image: same Python + pixi envs as the regular curator image,
+# but built with the narrower redistributable runtime policy. Built post-merge
+# alongside regular + slim so all three share the exact same apt/conda/pixi
+# state at build time. On MRs, only built when the image/runtime surface changes
+# (see distributable_rules) or the `build-all-images` label is set.
+build_deploy_curator_distributable_arch:
+  extends: .build_curator_arch
+  rules: *distributable_rules
+  variables:
+    BUILD_IMAGE_REPO: ${CURATOR_DISTRIBUTABLE_IMAGE}
+    BUILD_EXTRA_ARGS: "--redistributable"
+
 build_ci_builder_image_arch:
   stage: build
   parallel:
@@ -550,6 +585,19 @@ build_deploy_curator_slim:
   variables:
     BUILD_IMAGE_REPO: ${CURATOR_SLIM_IMAGE}
     DOTENV_VAR_NAME: CURATOR_SLIM_FULL_IMAGE
+  artifacts:
+    reports:
+      dotenv: build.env
+
+build_deploy_curator_distributable:
+  extends: .build_curator_manifest
+  rules: *distributable_rules
+  needs:
+    - build_deploy_curator_distributable_arch
+  variables:
+    BUILD_IMAGE_REPO: ${CURATOR_DISTRIBUTABLE_IMAGE}
+    DOTENV_VAR_NAME: CURATOR_DISTRIBUTABLE_FULL_IMAGE
+    NVCF_PUSH_IMAGE: ${NVCF_DEV_DISTRIBUTABLE_IMAGE}
   artifacts:
     reports:
       dotenv: build.env
@@ -785,6 +833,24 @@ promote_to_staging:
     - *docker_login
     - DEV="${NVCF_DEV_IMAGE}:${IMAGE_TAG}"
     - STAGING="${NVCF_STAGING_IMAGE}:${IMAGE_TAG}"
+    - docker buildx imagetools create --tag "${STAGING}" "${DEV}"
+
+promote_distributable_to_staging:
+  stage: post-merge
+  variables:
+    GIT_STRATEGY: none
+  rules: *post_merge_rules
+  id_tokens:
+    VAULT_JWT_TOKEN:
+      aud: ${VAULT_ADDR}
+  before_script:
+    - source .gitlab/vault/vault-auth.sh
+  script:
+    - *compute_image_tag
+    - echo "Promoting distributable to staging from $IMAGE_TAG"
+    - *docker_login
+    - DEV="${NVCF_DEV_DISTRIBUTABLE_IMAGE}:${IMAGE_TAG}"
+    - STAGING="${NVCF_STAGING_DISTRIBUTABLE_IMAGE}:${IMAGE_TAG}"
     - docker buildx imagetools create --tag "${STAGING}" "${DEV}"
 
 resolve_nvcf_staging_tag:

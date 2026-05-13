@@ -33,6 +33,7 @@ from loguru import logger
 from cosmos_curator.core.interfaces.pipeline_interface import run_pipeline
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageSpec
 from cosmos_curator.core.utils.config import args_utils
+from cosmos_curator.core.utils.ffmpeg_utils import assert_ffmpeg_supports_h264
 from cosmos_curator.core.utils.infra.hardware_info import get_gpu_infos
 from cosmos_curator.core.utils.infra.profiling import profiling_scope
 from cosmos_curator.core.utils.misc.stage_compare import get_stage_name_after, get_stages_to_compare, run_stage_compare
@@ -962,6 +963,7 @@ def _split(args: argparse.Namespace) -> None:
 
     """
     validate_stage_replay_args(args)
+    assert_ffmpeg_supports_h264()
 
     zero_start = time.time()
     input_tasks, input_videos_relative, _, num_input_videos_selected = build_input_data(args)

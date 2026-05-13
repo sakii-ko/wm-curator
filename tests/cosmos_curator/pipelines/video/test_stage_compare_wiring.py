@@ -49,6 +49,15 @@ class StageC(CuratorStage):
         return tasks
 
 
+@pytest.fixture
+def stub_ffmpeg_h264_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the startup FFmpeg check for wiring tests that do not process media."""
+    monkeypatch.setattr(
+        "cosmos_curator.pipelines.video.splitting_pipeline.assert_ffmpeg_supports_h264",
+        lambda: None,
+    )
+
+
 def test_get_stage_name_after() -> None:
     """The helper should return the immediate successor stage name."""
     assert get_stage_name_after([StageA(), StageB(), StageC()], "StageA") == "StageB"
@@ -74,6 +83,7 @@ def test_get_stages_to_compare_uses_half_open_interval_and_preserves_specs() -> 
     assert compare_stages[1] is stage_b_spec
 
 
+@pytest.mark.usefixtures("stub_ffmpeg_h264_preflight")
 def test_split_compare_branch_uses_stage_compare(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The compare branch should invoke run_stage_compare and return early."""
     args = argparse.Namespace(
@@ -122,6 +132,7 @@ def test_split_compare_branch_uses_stage_compare(monkeypatch: pytest.MonkeyPatch
     assert call_args.kwargs["model_weights_prefix"] == args.model_weights_path
 
 
+@pytest.mark.usefixtures("stub_ffmpeg_h264_preflight")
 def test_split_compare_branch_preserves_remote_stage_compare_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -162,6 +173,7 @@ def test_split_compare_branch_preserves_remote_stage_compare_path(
     assert str(call_args.args[2]) == "s3://bucket/golden/tasks/StageB"
 
 
+@pytest.mark.usefixtures("stub_ffmpeg_h264_preflight")
 def test_split_compare_branch_uses_explicit_half_open_end(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Two-stage compare should run [start, end) and compare against input to end."""
     args = argparse.Namespace(

@@ -23,8 +23,6 @@ libc = { family = "glibc", version = "2.35" } # vllm cu130 wheels require manyli
 [feature.core.dependencies]
 astral = "*"
 attrs = "*"
-av = "==17.0.0"  # conda dep so it pulls conda-forge FFmpeg (LGPL, full codec suite) instead of PyPI's bundled build; pin: 17.0.1 deadlocks in CodecContext.__dealloc__ during multi-threaded decode when a Python log callback is installed (TODO: unpin once PyAV releases a fix)
-ffmpeg = { version = ">=8.1", build = "lgpl_*" }  # pin LGPL variant (not GPL)
 azure-identity = "*"
 azure-storage-blob = "*"
 cattrs = "*"
@@ -62,6 +60,7 @@ uvicorn = "*"
 websockets = "<16" # google-genai requires websockets<16
 
 [feature.core.pypi-dependencies]
+av = "==17.0.0"  # PyAV; pinned because 17.0.1 deadlocks in CodecContext.__dealloc__ during multi-threaded decode when a Python log callback is installed (TODO: unpin once PyAV releases a fix). Sourced from PyPI so image builds can replace it with a source build linked to /opt/ffmpeg; local/dev envs use the wheel as-is.
 google-genai= ">=1.59.0" # conda-forge package is too old
 ngcsdk = "*" # not available on conda-forge
 opencv-python-headless = "*" # not available on conda-forge
@@ -154,6 +153,7 @@ transformers = ">=4.57.1,<5.0.0" # Transformers v5 changes apply_chat_template t
 
 [feature.unified.dependencies]
 cuda-libraries-dev = "*"
+libgl = "*" # paddleocr -> opencv-python needs libGL.so.1; previously satisfied transitively via FFmpeg's conda deps
 pycountry = "*"
 
 # SeedVR2 super-resolution dependencies.
@@ -163,11 +163,11 @@ pycountry = "*"
 [feature.seedvr.dependencies]
 cuda-libraries-dev = "*"
 einops = "*"
-mediapy = "*"
 omegaconf = "*"
 
 [feature.seedvr.pypi-dependencies]
 diffusers = "*"
+mediapy = "*" # SeedVR uses mediapy.write_image / write_video for super-resolution output (cosmos_curator/pipelines/video/super_resolution/inference_seedvr2_window.py). PyPI variant: the conda package transitively pulls conda-forge ffmpeg + openh264, which we no longer ship; PyPI mediapy shells out to /opt/ffmpeg via PATH instead.
 rotary-embedding-torch = "*"
 
 [feature.unified.pypi-dependencies]
@@ -183,6 +183,9 @@ einops = "*"
 transformers = "==4.55.4" # legacy models (cosmos-embed1, internvideo2) require older transformers
 
 # PaddleOCR for artificial text (overlay/post-production) detection. Isolated from unified's vllm dependencies.
+[feature.paddle-ocr.target.linux-64.dependencies]
+libgl = "*" # paddleocr -> opencv-python needs libGL.so.1; previously satisfied transitively via FFmpeg's conda deps
+
 [feature.paddle-ocr.target.linux-64.pypi-dependencies]
 paddleocr = "*"
 

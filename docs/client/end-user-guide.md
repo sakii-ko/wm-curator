@@ -465,15 +465,42 @@ Per-pipeline reference templates are provided under `examples/osmo/`:
 #### Extra Volume Mounts
 
 The `--extra-volumes` option lets you mount additional host directories into the container.
-Specify comma-separated `HOST_PATH:CONTAINER_PATH` pairs:
+Specify comma-separated `HOST_PATH:CONTAINER_PATH[:MODE]` entries, where `MODE` is optional:
 
 ```bash
 cosmos-curator local launch \
-    --extra-volumes /data/models:/config/models,/data/videos:/workspace/input \
+    --extra-volumes /data/models:/config/models,/data/videos:/workspace/input,/data/static:/workspace/static:ro \
     ...
 ```
 
 This is useful for mounting model weights, input data, and output directories without resorting to raw `docker run` commands.
+
+#### Mount FFmpeg for Redistributable Images
+
+This runtime override is only required when the image you are using has the redistributable runtime policy, such as
+NVIDIA-provided Cosmos Curator images published through `nvcr.io`. If you build the image yourself, the simpler path
+is to use the default non-redistributable image. If you select `--redistributable`, you must then provide ffmpeg
+separately with this route for pipelines that require codecs outside the redistributable image.
+
+Cosmos Curator images install FFmpeg at `/opt/ffmpeg` and configure `PATH`, `LD_LIBRARY_PATH`, and `PKG_CONFIG_PATH`
+to prefer that prefix. To use your own FFmpeg with a redistributable image, mount a complete FFmpeg installation
+prefix over `/opt/ffmpeg`:
+
+```bash
+USER_FFMPEG_PREFIX=/path/to/ffmpeg-8.1.1-custom
+
+cosmos-curator local launch \
+    --image-name cosmos-curator --image-tag slim \
+    --curator-path . --pixi-path . \
+    --extra-volumes "${USER_FFMPEG_PREFIX}:/opt/ffmpeg:ro" \
+    -- bash -lc 'which ffmpeg && ffmpeg -hide_banner -version && ffmpeg -hide_banner -encoders'
+```
+
+The mounted prefix should include `bin/ffmpeg`, `bin/ffprobe`, shared libraries under `lib/`, and `lib/pkgconfig`
+metadata. Include `include/` as well if you plan to build PyAV against that FFmpeg. For normal pipeline runs, this
+overrides FFmpeg CLI/subprocess usage. Full images build PyAV against the image FFmpeg; if Python `av` code paths use
+the mounted libraries, keep the mounted FFmpeg ABI-compatible with the image build. Slim images keep the PyPI PyAV
+wheel and do not rebuild it against the mounted prefix.
 
 ## Launch Pipelines on Slurm
 
@@ -611,6 +638,17 @@ The command above will print the slurm job id like below
 ```bash
 Submitted batch job <slurm_job_id>
 ```
+
+For a Slurm redistributable image, such as an NVIDIA-provided image imported from `nvcr.io`, make the user-provided
+FFmpeg prefix visible on the cluster and append a read-only mount before submitting the job:
+
+```bash
+USER_FFMPEG_PREFIX="${SLURM_USER_DIR}/ffmpeg-8.1.1-custom"
+export CONTAINER_MOUNTS="${CONTAINER_MOUNTS:+${CONTAINER_MOUNTS},}${USER_FFMPEG_PREFIX}:/opt/ffmpeg:ro"
+```
+
+The same `/opt/ffmpeg` requirements and PyAV compatibility notes from
+[Mount FFmpeg for Redistributable Images](#mount-ffmpeg-for-redistributable-images) apply.
 
 #### Email Notifications (Optional)
 

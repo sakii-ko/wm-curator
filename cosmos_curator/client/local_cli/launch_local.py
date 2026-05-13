@@ -69,7 +69,7 @@ class LaunchDocker:
     gpus: str | None
     mount_s3_creds: bool
     mount_azure_creds: bool
-    extra_volumes: list[str]  # each entry is HOST_PATH:CONTAINER_PATH
+    extra_volumes: list[str]  # each entry is HOST_PATH:CONTAINER_PATH[:MODE]
 
 
 # Stable while we use nvidia/cuda:*-devel-ubuntu*: those base images ship a
@@ -165,8 +165,8 @@ def launch(  # noqa: PLR0913
         str,
         Option(
             help=(
-                "Comma-separated extra volume mounts in HOST_PATH:CONTAINER_PATH format. "
-                "e.g. --extra-volumes /data/models:/config/models,/data/videos:/workspace/input"
+                "Comma-separated extra volume mounts in HOST_PATH:CONTAINER_PATH[:MODE] format. "
+                "e.g. --extra-volumes /data/models:/config/models,/data/videos:/workspace/input:ro"
             ),
             rich_help_panel="local-docker",
         ),

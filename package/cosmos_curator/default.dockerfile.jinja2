@@ -9,6 +9,9 @@
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Keep all CUDA base image tags in this template aligned. When bumping them,
+# re-check ffmpeg-builder's NVCODEC_VERSION against the Video Codec SDK driver floor.
+
 # ---------------------------------------------------------------------------
 # Wheels builder stage: install pixi (and pre-download NVIDIA wheels in full mode)
 # ---------------------------------------------------------------------------
@@ -54,6 +57,237 @@ RUN mkdir -p /opt/seedvr-artifacts \
 {% endif %}
 
 # ---------------------------------------------------------------------------
+# FFmpeg builder stage: compile FFmpeg from source
+# ---------------------------------------------------------------------------
+# FFmpeg is built here and copied into the runtime image. Non-redistributable
+# images include the full codec/runtime surface. Redistributable images keep a
+# narrower FFmpeg surface and exclude components we cannot redistribute.
+FROM nvcr.io/nvidia/cuda:13.0.2-devel-ubuntu24.04 AS ffmpeg-builder
+
+SHELL ["/bin/bash", "-c"]
+
+{% set ffmpeg_protocols = [
+    "file",
+    "pipe",
+] %}
+{% set ffmpeg_demuxers = [
+    "image2",
+    "ivf",
+    "matroska",
+    "mov",
+    "rawvideo",
+    "webp",
+] %}
+{% set ffmpeg_muxers = [
+    "image2",
+    "ivf",
+    "matroska",
+    "mp4",
+    "null",
+    "rawvideo",
+    "webm",
+    "webp",
+] %}
+{% set ffmpeg_decoders = [
+    "av1",
+    "libdav1d",
+    "libvpx_vp8",
+    "libvpx_vp9",
+    "png",
+    "rawvideo",
+    "vp8",
+    "vp9",
+    "webp",
+] %}
+{% set ffmpeg_encoders = [
+    "libaom_av1",
+    "libvpx_vp8",
+    "libvpx_vp9",
+    "libwebp",
+    "png",
+    "rawvideo",
+] %}
+{% set ffmpeg_parsers = [
+    "av1",
+    "png",
+    "vp8",
+    "vp9",
+    "webp",
+] %}
+{% set ffmpeg_bsfs = [
+    "av1_frame_merge",
+    "av1_frame_split",
+    "vp9_superframe",
+    "vp9_superframe_split",
+] %}
+{% set ffmpeg_filters = [
+    "anull",
+    "aresample",
+    "format",
+    "fps",
+    "null",
+    "scale",
+    "select",
+    "setpts",
+    "trim",
+] %}
+
+ENV FFMPEG_VERSION=8.1.1
+{% if not redistributable %}
+# nv-codec-headers tracks NVIDIA Video Codec SDK headers. Keep it compatible
+# with the CUDA base image tags used by this template.
+ENV NVCODEC_VERSION=13.0.19.0
+{% endif %}
+
+# Non-redistributable images use FFmpeg's default built-in codecs, demuxers,
+# muxers, parsers, filters, and bitstream filters. The narrow allowlist is only
+# used for redistributable variants.
+RUN mkdir -p /tmp && chmod 1777 /tmp && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libcrypt-dev \
+    autoconf \
+    automake \
+    build-essential \
+    cmake \
+    libaom-dev \
+    libdav1d-dev \
+{% if not redistributable %}    libopenh264-dev \
+{% endif %}    libtool \
+    libvpx-dev \
+    libwebp-dev \
+    nasm \
+    pkg-config \
+    texinfo \
+    xz-utils \
+    yasm \
+    zlib1g-dev && \
+{% if not redistributable %}
+    curl -fsSL -o /tmp/nv-codec-headers.tar.gz https://github.com/FFmpeg/nv-codec-headers/releases/download/n${NVCODEC_VERSION}/nv-codec-headers-${NVCODEC_VERSION}.tar.gz && \
+    tar xzf /tmp/nv-codec-headers.tar.gz -C /tmp/ && \
+    make -C /tmp/nv-codec-headers-${NVCODEC_VERSION} install && \
+{% endif %}
+    curl -fsSL -o /tmp/ffmpeg.tar.xz https://www.ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
+    cd /tmp/ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+    --prefix=/opt/ffmpeg \
+{% if redistributable %}    --disable-everything \
+{% endif %}    --disable-autodetect \
+    --disable-gpl \
+    --disable-programs \
+    --enable-ffmpeg \
+    --enable-ffprobe \
+    --enable-avcodec \
+    --enable-avformat \
+    --enable-avfilter \
+    --enable-swresample \
+    --enable-swscale \
+    --enable-zlib \
+    --enable-libaom \
+    --enable-libdav1d \
+    --enable-libvpx \
+    --enable-libwebp \
+{% if not redistributable %}    --enable-ffnvcodec \
+    --enable-cuda \
+    --enable-cuvid \
+    --enable-nvdec \
+    --enable-nvenc \
+    --enable-libopenh264 \
+{% endif %}{% if redistributable %}    --enable-protocol={{ ffmpeg_protocols | join(',') }} \
+    --enable-demuxer={{ ffmpeg_demuxers | join(',') }} \
+    --enable-muxer={{ ffmpeg_muxers | join(',') }} \
+    --enable-decoder={{ ffmpeg_decoders | join(',') }} \
+    --enable-encoder={{ ffmpeg_encoders | join(',') }} \
+    --enable-parser={{ ffmpeg_parsers | join(',') }} \
+    --enable-bsf={{ ffmpeg_bsfs | join(',') }} \
+    --enable-filter={{ ffmpeg_filters | join(',') }} \
+{% endif %}    --extra-libs=-lpthread \
+    --extra-libs=-lm \
+{% if not redistributable %}    --extra-cflags=-I/usr/local/cuda/include \
+    --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs" \
+{% endif %}    --disable-static \
+    --enable-shared \
+    --disable-doc \
+    --disable-debug && \
+    make -j$(nproc) && \
+    make install && \
+    echo "/opt/ffmpeg/lib" > /etc/ld.so.conf.d/ffmpeg.conf && \
+    ldconfig && \
+    /opt/ffmpeg/bin/ffmpeg -version && \
+    /opt/ffmpeg/bin/ffprobe -version && \
+    found=$(find /opt/ffmpeg /usr/lib /usr/local/lib -name 'libopenh264*' 2>/dev/null) && \
+{% if not redistributable %}    if [ -z "$found" ]; then \
+        echo "ERROR: non-redistributable build expected libopenh264 but it is not installed."; \
+        exit 1; \
+    fi
+{% else %}    if [ -n "$found" ]; then \
+        echo "ERROR: redistributable build contains libopenh264:"; \
+        echo "$found"; \
+        exit 1; \
+    fi
+{% endif %}
+
+{% if not slim %}
+# ---------------------------------------------------------------------------
+# PyAV builder stage: source-build PyAV against /opt/ffmpeg
+# ---------------------------------------------------------------------------
+# PyPI's PyAV wheels bundle their own FFmpeg shared libs.
+# Rebuilding from source linked against /opt/ffmpeg keeps Python and the ffmpeg
+# CLI on the same codec policy. The wheel is built in pixi's `default` env so
+# the Python ABI tracks pixi.toml automatically (one Python pin spans all envs);
+# the main stage then just `pip install`s it, with no C toolchain.
+FROM nvcr.io/nvidia/cuda:13.0.2-devel-ubuntu24.04 AS pyav-builder
+
+SHELL ["/bin/bash", "-c"]
+
+COPY --from=wheels-builder /opt/pixi/bin/pixi /usr/local/bin/pixi
+COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
+
+RUN echo "/opt/ffmpeg/lib" > /etc/ld.so.conf.d/ffmpeg.conf && \
+    ldconfig && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY pixi.toml pixi.lock /pyav-build/
+
+# Same NVIDIA-wheel patching trick as the main stage so `pixi install -e default`
+# does not stall on pypi.nvidia.com timeouts.
+RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheels-ready \
+    --mount=type=cache,id=pixi-nvidia-wheels,target=/pixi-cache/nvidia-wheels,readonly \
+    cd /pyav-build && \
+    for whl in /pixi-cache/nvidia-wheels/*.whl; do \
+        [ -f "$whl" ] || continue; \
+        filename=$(basename "$whl") && \
+        if grep -q "$filename" pixi.lock; then \
+            sed -i "s|https://pypi\.nvidia\.com/[^\"]*/${filename}\\b|file:///pixi-cache/nvidia-wheels/${filename}|g" pixi.lock; \
+        fi; \
+    done && \
+    export CONDA_OVERRIDE_CUDA=13.0.2 && \
+    export CUDA_PATH="/usr/local/cuda" && \
+    success=false && \
+    for attempt in {1..10}; do \
+        if pixi install -e default --frozen 2>&1; then \
+            success=true && break; \
+        fi; \
+        echo "pixi install attempt $attempt/10 failed, retrying in 3s..." && sleep 3; \
+    done && \
+    pixi clean cache -y && \
+    $success && \
+    export PKG_CONFIG_PATH="/opt/ffmpeg/lib/pkgconfig" && \
+    export LD_LIBRARY_PATH="/opt/ffmpeg/lib:${LD_LIBRARY_PATH:-}" && \
+    mkdir -p /pyav-wheelhouse && \
+    pixi run --as-is -e default pip wheel --no-binary av --no-cache-dir \
+        --wheel-dir /pyav-wheelhouse av==17.0.0
+{% endif %}
+
+# ---------------------------------------------------------------------------
 # Main stage
 # ---------------------------------------------------------------------------
 FROM nvcr.io/nvidia/cuda:13.0.2-devel-ubuntu24.04 AS main
@@ -72,12 +306,39 @@ RUN apt-get update \
 {%- endif %}
     # Needed to copy model weights using rclone
     rclone \
+    # Runtime libraries for source-built FFmpeg
+    libaom3 \
+    libdav1d7 \
+{% if not redistributable %}    libopenh264-7 \
+{% endif %}    libvpx9 \
+    libwebp7 \
+    libwebpmux3 \
     # Refresh GPG-related base packages without reintroducing full build tooling
     keyboxd gpgv gpgsm gpgconf gpg-agent \
     binutils openssl libsqlite3-0 \
     && update-ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy FFmpeg from the builder stage (installed to /opt/ffmpeg to avoid collisions).
+COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
+RUN echo "/opt/ffmpeg/lib" > /etc/ld.so.conf.d/ffmpeg.conf && \
+    ldconfig && \
+    /opt/ffmpeg/bin/ffmpeg -version > /dev/null && \
+    /opt/ffmpeg/bin/ffprobe -version > /dev/null
+
+# Confirm the runtime image's codec surface matches the requested policy.
+RUN found=$(find /opt/ffmpeg /usr/lib /usr/local/lib -name 'libopenh264*' 2>/dev/null) && \
+{% if not redistributable %}    if [ -z "$found" ]; then \
+        echo "ERROR: non-redistributable runtime image expected libopenh264 but it is not installed."; \
+        exit 1; \
+    fi
+{% else %}    if [ -n "$found" ]; then \
+        echo "ERROR: redistributable runtime image contains libopenh264:"; \
+        echo "$found"; \
+        exit 1; \
+    fi
+{% endif %}
 
 # Triton 3.6+ looks for a separate "ptxas-blackwell" binary on Blackwell GPUs
 # (arch >= 100). The CUDA toolkit ships a single ptxas that already supports
@@ -93,10 +354,11 @@ ENV AM_I_DOCKER=True \
     TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;10.0+PTX" \
     CUDA_HOME="/usr/local/cuda" \
     CUDA_PATH="/usr/local/cuda" \
-    PATH="/usr/local/cuda/bin:${PATH}" \
+    PATH="/opt/ffmpeg/bin:/usr/local/cuda/bin:${PATH}" \
     CPATH="/usr/local/cuda/include" \
     LIBRARY_PATH="/usr/local/cuda/lib64:${LIBRARY_PATH:-}" \
-    LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" \
+    PKG_CONFIG_PATH="/opt/ffmpeg/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    LD_LIBRARY_PATH="/opt/ffmpeg/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" \
     XFORMERS_IGNORE_FLASH_VERSION_CHECK="1" \
     VLLM_WORKER_MULTIPROC_METHOD="spawn"
 
@@ -241,6 +503,34 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
     pixi clean cache -y && \
     $success
 {% endif %}{# cuml #}
+
+# Pixi installs PyAV from PyPI for local/dev and slim-image parity. Full image
+# builds replace it with a source-built wheel linked against /opt/ffmpeg (built
+# by the pyav-builder stage) so Python and the ffmpeg/ffprobe CLI share the same
+# codec policy. Slim images keep the locked PyPI PyAV wheel and use /opt/ffmpeg
+# for CLI work. Post-install, confirm the installed environments match the
+# requested codec policy.
+COPY --from=pyav-builder /pyav-wheelhouse /tmp/pyav-wheelhouse
+
+RUN cd {{code_dir_str}} && \
+    for env in {{ envs | join(' ') }}; do \
+        if pixi run --as-is -e "$env" python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('av') else 1)"; then \
+            pixi run --as-is -e "$env" pip uninstall -y av && \
+            pixi run --as-is -e "$env" pip install --no-cache-dir /tmp/pyav-wheelhouse/av-17.0.0-*.whl && \
+            pixi run --as-is -e "$env" python -c "import av; print(av.__version__, av.library_versions)"; \
+        fi; \
+    done && \
+    found=$(find /opt/ffmpeg /usr/lib /usr/local/lib {{code_dir_str}}/.pixi -name 'libopenh264*' 2>/dev/null) && \
+{% if not redistributable %}    if [ -z "$found" ]; then \
+        echo "ERROR: non-redistributable PyAV rebuild expected libopenh264 but it is not installed."; \
+        exit 1; \
+    fi && \
+{% else %}    if [ -n "$found" ]; then \
+        echo "ERROR: redistributable PyAV rebuild produced or retained libopenh264:"; \
+        echo "$found"; \
+        exit 1; \
+    fi && \
+{% endif %}    rm -rf /tmp/pyav-wheelhouse
 
 # Run any hacky post-install script for each environment
 COPY package/cosmos_curator/envs/ /tmp/cosmos_curator_build_envs

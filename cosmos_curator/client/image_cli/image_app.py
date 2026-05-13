@@ -155,6 +155,17 @@ def build(  # noqa: PLR0913
             rich_help_panel="common",
         ),
     ] = False,
+    redistributable: Annotated[
+        bool,
+        Option(
+            "--redistributable/--non-redistributable",
+            help=(
+                "Build the redistributable image variant. This excludes components we cannot redistribute "
+                "and uses the narrower FFmpeg runtime policy."
+            ),
+            rich_help_panel="common",
+        ),
+    ] = False,
     extra_code_paths: Annotated[
         str | None,
         Option(
@@ -197,6 +208,8 @@ def build(  # noqa: PLR0913
 
     if slim:
         console.log("Generating slim docker image (no pixi install)")
+    elif redistributable:
+        console.log(f"Generating redistributable docker image with envs: {env_names}")
     else:
         console.log(f"Generating docker image with envs: {env_names}")
     dockerfile_template_path = package_path / Path("default.dockerfile.jinja2")
@@ -210,6 +223,7 @@ def build(  # noqa: PLR0913
         verbose=verbose,
         nsight=nsight,
         slim=slim,
+        redistributable=redistributable,
     )
 
     if dry_run:

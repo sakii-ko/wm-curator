@@ -644,7 +644,10 @@ def submit_cli(  # noqa: PLR0913
     ],
     container_mounts: Annotated[
         str | None,
-        Option(help="Comma separated container mounts, `src0:dst0,src1:dst1`", rich_help_panel="container"),
+        Option(
+            help="Comma separated container mounts, `src0:dst0[:ro|rw],src1:dst1[:ro|rw]`",
+            rich_help_panel="container",
+        ),
     ] = None,
     environment: Annotated[
         str | None,
