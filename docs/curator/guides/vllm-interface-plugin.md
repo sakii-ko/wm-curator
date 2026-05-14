@@ -2,7 +2,15 @@
 
 ## Overview
 
-This guide walks you through adding a new vLLM model to cosmos-curator by implementing a plugin. Plugins allow you to integrate new models without modifying core `vllm_interface` code or needing to add stages.
+This guide walks you through adding a new vLLM model to cosmos-curator
+by implementing a plugin.  Plugins are the **adapter layer** between
+cosmos-curator pipeline data and per-model request format /
+engine construction.  A single `VllmPlugin` subclass serves both the
+**synchronous** captioning pipeline (`model()` returns `LLM`) and the
+**asynchronous** captioning pipeline (`model_async()` returns
+`AsyncEngineArgs`) - per-variant numeric tuning lives as
+**module-scope constants** on the plugin and is the **single source of
+truth** read by both methods.  No drift between sync and async tunings.
 
 **Prerequisites:**
 - Familiarity with vLLM library and the model you want to add
@@ -12,12 +20,15 @@ This guide walks you through adding a new vLLM model to cosmos-curator by implem
 **Related Documentation:**
 - **[vllm-interface.md](../design/vllm-interface.md)**: Architecture and API reference
 - **[vllm-interface-debug.md](vllm-interface-debug.md)**: Debugging and troubleshooting
+- **[vllm-async-captioning.md](vllm-async-captioning.md)**: Async pipeline using these plugins
 
 ## Quick Start
 
 Adding a new model touches 4 implementation files plus tests and ~260 lines of code:
 
-1. **Create plugin**: `cosmos_curator/models/vllm_mymodel.py` (~150 lines)
+1. **Create plugin**: `cosmos_curator/models/vllm_mymodel.py` (~170 lines)
+   - Module-scope constants for per-variant tuning (`MAX_MODEL_LEN`, etc.)
+   - `model()` for sync, `model_async()` for async - both read those constants
 2. **Register plugin**: Add to `cosmos_curator/models/vllm_interface.py` (2 lines)
 3. **Add model ID**: Add to `cosmos_curator/models/vllm_model_ids.py` (1 line)
 4. **Add model info**: Add to `cosmos_curator/configs/all_models.json` (7 lines)
@@ -29,8 +40,7 @@ Adding a new model touches 4 implementation files plus tests and ~260 lines of c
 
 ## Plugin Interface Overview
 
-Every plugin inherits from `VllmPlugin` and implements the 6 methods used by
-the current captioning flow:
+Every plugin inherits from `VllmPlugin` and implements these methods:
 
 ```python
 class VllmPlugin(ABC):
@@ -38,25 +48,34 @@ class VllmPlugin(ABC):
     @abstractmethod
     def model_variant() -> str:
         """Return unique identifier (e.g., "qwen", "nemotron")"""
-    
+
     @classmethod
     def model_id(cls) -> str:
         """Return HuggingFace model ID (inherited, no need to override)"""
-    
+
     @classmethod
     def model_path(cls, config: VllmConfig) -> Path:
         """Return local path to model weights (inherited, no need to override)"""
-    
+
     @classmethod
     @abstractmethod
     def processor(cls, config: VllmConfig) -> AutoProcessor:
         """Return HuggingFace processor for tokenization"""
-    
+
     @classmethod
     @abstractmethod
     def model(cls, config: VllmConfig) -> LLM:
-        """Instantiate vLLM model with configuration"""
-    
+        """Instantiate vLLM ``LLM`` (sync pipeline).
+        Reads per-variant module-scope constants on this plugin."""
+
+    @classmethod
+    @abstractmethod
+    def model_async(cls, config: VllmAsyncConfig) -> AsyncEngineArgs:
+        """Build ``AsyncEngineArgs`` for in-process ``AsyncLLM`` (async pipeline).
+        Reads the SAME per-variant module-scope constants as ``model()``.
+        Bakes async-only invariants such as
+        ``mm_processor_kwargs={"do_sample_frames": False, ...}``."""
+
     @staticmethod
     @abstractmethod
     def make_llm_input(
@@ -67,7 +86,7 @@ class VllmPlugin(ABC):
         config: VllmConfig,
     ) -> dict[str, Any]:
         """Convert prompt + frames + metadata to model-specific input format"""
-    
+
     @staticmethod
     @abstractmethod
     def make_refined_llm_request(
@@ -83,7 +102,9 @@ class VllmPlugin(ABC):
         """Extract caption string from vLLM output"""
 ```
 
-**Only need to implement 6 methods** - `model_id()` and `model_path()` are inherited.
+**Only need to implement 7 methods** - `model_id()` and `model_path()` are inherited.
+The plugin abstract surface is `model_variant`, `processor`, `model`, `model_async`,
+`make_llm_input`, `make_refined_llm_request`, and `decode`.
 `make_llm_input()` must accept both `metadata` and `config`. Plugins that support
 both image and video should use `config.use_image_input` to choose the modality.
 
@@ -96,7 +117,7 @@ both image and video should use `config.use_image_input` to choose the modality.
 Create `cosmos_curator/models/vllm_mymodel.py`:
 
 ```python
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -218,6 +239,93 @@ config = VllmConfig(model_variant="mymodel", num_gpus=1)
 llm = VllmMyModel.model(config)
 assert llm is not None
 assert llm.llm_engine is not None
+```
+
+### Step 3b: Implement `model_async()`
+
+Build the `AsyncEngineArgs` that the async pipeline passes to
+`vllm.v1.engine.async_llm.AsyncLLM`. The signature is
+
+```python
+@classmethod
+def model_async(cls, config: VllmAsyncConfig) -> AsyncEngineArgs: ...
+```
+
+Unlike `model()`, this method does NOT instantiate the engine - it
+only returns the **arguments** the async stage will use to construct
+one. All per-variant numeric tuning is read from the **same
+module-scope constants** as `model()`, which is the project's
+single-source-of-truth invariant: sync and async tunings must never
+drift.
+
+```python
+from vllm.config import CompilationConfig
+from vllm.engine.arg_utils import AsyncEngineArgs
+
+from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig
+
+
+@classmethod
+def model_async(cls, config: VllmAsyncConfig) -> AsyncEngineArgs:
+    """Build ``AsyncEngineArgs`` for in-process ``AsyncLLM`` (async pipeline).
+
+    Mirrors :meth:`model` - reads the SAME module-scope constants
+    (single source of truth, no sync/async drift).
+    """
+    return AsyncEngineArgs(
+        # cls.model_path() takes a sync VllmConfig; bridge with to_vllm_config().
+        model=str(cls.model_path(config.to_vllm_config())),
+        served_model_name=[config.model_variant],
+
+        # --- Same module-scope constants as model() ---
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        trust_remote_code=TRUST_REMOTE_CODE,
+        limit_mm_per_prompt=LIMIT_MM_PER_PROMPT_VIDEO,
+
+        # --- Pass-through user knobs from VllmAsyncConfig ---
+        tensor_parallel_size=int(config.num_gpus),
+        data_parallel_size=max(1, config.data_parallel_size),
+        max_num_seqs=config.max_num_seqs if config.max_num_seqs > 0 else None,
+        enforce_eager=config.enforce_eager,
+        kv_cache_dtype=config.kv_cache_dtype,
+        async_scheduling=config.async_scheduling,
+        enable_chunked_prefill=config.enable_chunked_prefill,
+        long_prefill_token_threshold=config.long_prefill_token_threshold,
+        stream_interval=config.stream_interval,
+        distributed_executor_backend=config.distributed_executor_backend,
+        skip_mm_profiling=config.skip_mm_profiling,
+        disable_log_stats=config.disable_log_stats,
+        enable_log_requests=config.enable_log_requests,
+        mm_encoder_tp_mode=config.mm_encoder_tp_mode or None,
+        mm_processor_cache_type=config.mm_processor_cache_type or None,
+        disable_chunked_mm_input=config.disable_chunked_mm_input,
+
+        # --- Mirror sync derivations of VllmConfig fields shared with
+        # VllmAsyncConfig (fp8, disable_mmcache) ---
+        quantization="fp8" if config.fp8 else None,
+        mm_processor_cache_gb=0.0 if config.disable_mmcache else 4.0,
+
+        # --- Async-only invariants ---
+        # Frames are CPU-pre-sampled by VllmPrepStage (reused verbatim by
+        # the async pipeline; the legacy VllmAsyncPrepStage class no
+        # longer exists), so the processor MUST NOT re-sample them.
+        # This flag is the contract between prep and engine; never set
+        # it elsewhere.  ``do_resize``/``do_rescale``/``do_normalize``
+        # are gated by ``config.preprocess`` so the single-owner
+        # contract (CPU vs vLLM) stays explicit.
+        mm_processor_kwargs={
+            "do_sample_frames": False,
+            "do_resize": config.preprocess,
+            "do_rescale": config.preprocess,
+            "do_normalize": config.preprocess,
+        },
+
+        compilation_config=CompilationConfig(cudagraph_mode="piecewise"),
+        enable_prefix_caching=True,
+        use_tqdm_on_load=False,
+    )
 ```
 
 ### Step 4: Implement `make_llm_input()`
@@ -913,7 +1021,7 @@ MAX_MODEL_LEN = 32768
 GPU_MEMORY_UTILIZATION = 0.85
 MAX_NUM_BATCHED_TOKENS = 32768
 TRUST_REMOTE_CODE = True
-LIMIT_MM_PER_PROMPT = {"video": 1}
+LIMIT_MM_PER_PROMPT_VIDEO = {"video": 1}
 
 _DEFAULT_REFINE_PROMPT = """
 Model-specific refinement prompt that works well with MyModel's training...

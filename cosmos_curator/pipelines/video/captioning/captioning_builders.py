@@ -23,10 +23,9 @@ from cosmos_curator.pipelines.video.captioning.captioning_stages import (
 )
 from cosmos_curator.pipelines.video.captioning.gemini_caption_stage import ApiPrepStage, GeminiCaptionStage
 from cosmos_curator.pipelines.video.captioning.openai_caption_stage import OpenAICaptionStage
-from cosmos_curator.pipelines.video.captioning.vllm_async_config import VllmAsyncConfig
 from cosmos_curator.pipelines.video.captioning.vllm_caption_stage import VllmCaptionStage, VllmPrepStage
 from cosmos_curator.pipelines.video.preview.preview_stages import PreviewStage
-from cosmos_curator.pipelines.video.utils.data_model import VllmConfig, WindowConfig
+from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig, VllmConfig, WindowConfig
 
 VLLM_CAPTION_ALGOS: frozenset[str] = frozenset(
     {"nemotron", "qwen", "qwen3_5_27b", "qwen3_vl_30b", "qwen3_vl_30b_fp8", "qwen3_vl_235b", "qwen3_vl_235b_fp8"}
@@ -172,25 +171,25 @@ def _require_vllm_async_serve_config(vsc: VllmAsyncCaptionConfig) -> VllmAsyncCo
 
 
 def _build_vllm_async_prep_stage(config: CaptioningConfig, vsc: VllmAsyncCaptionConfig) -> CuratorStageSpec:
-    """Build the vLLM async prep stage (windowing + decode + prompt build)."""
+    """Build the prep stage for the ``vllm_async`` backend.
+
+    Reuses sync's :class:`VllmPrepStage` verbatim so both pipelines run
+    identical deterministic resize + tokenization on the CPU side.  The
+    ``VllmAsyncConfig`` is translated to a ``VllmConfig`` carrying the
+    captioning prompt fields; ``copy_weights_to`` is cleared on the prep
+    stage because only the GPU caption stage owns weight transfer.
+    """
     serve_config = _require_vllm_async_serve_config(vsc)
-
-    from cosmos_curator.pipelines.video.captioning.vllm_async_config import VllmAsyncPrepConfig  # noqa: PLC0415
-    from cosmos_curator.pipelines.video.captioning.vllm_async_stage import VllmAsyncPrepStage  # noqa: PLC0415
-
-    prep_config = VllmAsyncPrepConfig(
-        model_variant=serve_config.model_variant,
-        sampling_config=serve_config.sampling_config,
+    vllm_config = attrs.evolve(
+        serve_config.to_vllm_config(),
         prompt_variant=vsc.prompt_variant,
         prompt_text=vsc.prompt_text,
-        sample_fps=config.window_config.sampling_fps,
-        window_size=config.window_config.window_size,
-        remainder_threshold=config.window_config.remainder_threshold,
-        keep_mp4=config.generate_previews or config.keep_mp4,
-        use_input_bit_rate=config.window_config.use_input_bit_rate,
+        copy_weights_to=None,
     )
-    stage = VllmAsyncPrepStage(
-        prep_config=prep_config,
+    stage = VllmPrepStage(
+        vllm_config=vllm_config,
+        window_config=config.window_config,
+        keep_mp4=config.generate_previews or config.keep_mp4,
         verbose=config.verbose,
         log_stats=config.perf_profile,
     )
@@ -261,6 +260,7 @@ def _build_vllm_async_caption_stage(config: CaptioningConfig, vsc: VllmAsyncCapt
         log_stats=config.perf_profile,
         stage2_caption=vsc.stage2_caption,
         stage2_prompt_text=vsc.stage2_prompt_text,
+        keep_mp4=config.keep_mp4,
     )
     if serve_config.data_parallel_size > 1:
         return CuratorStageSpec(stage, num_workers_per_node=1, worker_max_lifetime_m=0)
@@ -270,7 +270,7 @@ def _build_vllm_async_caption_stage(config: CaptioningConfig, vsc: VllmAsyncCapt
             num_workers_per_node=vsc.num_workers_per_node,
             worker_max_lifetime_m=0,
         )
-    return CuratorStageSpec(stage, worker_max_lifetime_m=0, over_provision_factor=2.0)
+    return CuratorStageSpec(stage)
 
 
 def build_captioning_stages(config: CaptioningConfig) -> list[CuratorStage | CuratorStageSpec]:

@@ -16,6 +16,7 @@
 """Data Model util."""
 
 import enum
+import json
 import pathlib
 import sys
 from collections import deque
@@ -986,6 +987,124 @@ class VllmConfig:
     performance_mode: Literal["balanced", "interactivity", "throughput"] | None = "throughput"
     debug_save_frames: bool = False
     debug_frames_output_dir: pathlib.Path | None = None
+
+
+def validate_optional_json_str_str_dict(
+    _: object,
+    attribute: "attrs.Attribute[str]",
+    value: str,
+) -> None:
+    """Reject string fields that, when non-empty, are not a JSON ``dict[str, str]``.
+
+    The empty string is treated as "field not set" and skips validation entirely,
+    so callers can leave the field at its default without paying a JSON parse.
+    """
+    if not value:
+        return
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        msg = f"{attribute.name} must be valid JSON, got {value!r}"
+        raise ValueError(msg) from exc
+    if not isinstance(parsed, dict):
+        msg = f"{attribute.name} must be a JSON object (dict), got {type(parsed).__name__}"
+        raise TypeError(msg)
+    for k, v in parsed.items():
+        if not isinstance(v, str):
+            msg = f"{attribute.name} values must be strings, got key={k!r}, value={v!r} ({type(v).__name__})"
+            raise TypeError(msg)
+
+
+@attrs.define(frozen=True)
+class VllmAsyncConfig:
+    """Configuration for the in-process ``AsyncLLM`` engine.
+
+    Mirrors sync's ``VllmConfig`` shape where overlapping (``fp8``,
+    ``disable_mmcache``, ``preprocess``, ``max_retries``).  Use
+    :meth:`to_vllm_config` when calling plugin methods that take a sync
+    ``VllmConfig`` (``model_path``, ``processor``, ``make_llm_input``).
+    Note: ``model_async`` takes ``VllmAsyncConfig`` directly (no
+    conversion needed) and reads async-only fields such as
+    ``async_scheduling`` and ``distributed_executor_backend``.
+
+    String-typed engine knobs (``distributed_executor_backend``, ``kv_cache_dtype``,
+    ``mm_encoder_tp_mode``, ``mm_processor_cache_type``) intentionally use plain
+    ``str``: vLLM is the source of truth for accepted values and rejects
+    unknown ones at engine init.  Cosmos-curator deliberately does NOT
+    duplicate that validation, so users can pass new vLLM-supported values
+    without waiting for a release.
+    """
+
+    model_variant: str
+    num_gpus: int = attrs.field(
+        default=1,
+        validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
+    )
+    data_parallel_size: int = attrs.field(
+        default=1,
+        validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
+    )
+    fp8: bool = False
+    disable_mmcache: bool = False
+    enforce_eager: bool = False
+    disable_log_stats: bool = True
+    enable_log_requests: bool = False
+    disable_chunked_mm_input: bool = False
+    skip_mm_profiling: bool = True
+    stream_interval: int = 9999
+
+    # When False (default), CPU prep stage owns the deterministic resize and
+    # tokenization and vLLM's processor only does rescale + normalize; this
+    # mirrors sync's VllmConfig.preprocess=False (vLLM's mm_processor_kwargs
+    # set do_resize/do_rescale/do_normalize to False).  Set True to let
+    # vLLM's processor re-run resize + rescale + normalize on top of the
+    # CPU-prepared frames (rarely needed; matches sync's behaviour).
+    preprocess: bool = False
+
+    # Per-request retry budget around engine.generate (mirrors sync's
+    # VllmConfig.max_retries).  EngineDeadError is never retried - it
+    # escalates so Xenna restarts the actor.
+    max_retries: int = attrs.field(default=3, validator=attrs.validators.ge(1))
+
+    max_num_seqs: int = 0
+    long_prefill_token_threshold: int = 0
+    mm_processor_cache_type: str = ""
+    mm_encoder_tp_mode: str = "data"
+    extra_env_vars: str = attrs.field(default="", validator=validate_optional_json_str_str_dict)
+
+    distributed_executor_backend: str = "ray"
+    kv_cache_dtype: str = "auto"
+
+    gpu_memory_utilization: float | None = attrs.field(
+        default=None,
+        validator=attrs.validators.optional(
+            attrs.validators.and_(
+                attrs.validators.gt(0.0),
+                attrs.validators.le(1.0),
+            ),
+        ),
+    )
+
+    async_scheduling: bool | None = None
+    enable_chunked_prefill: bool | None = None
+    sampling_config: VllmSamplingConfig = attrs.Factory(VllmSamplingConfig)
+
+    @property
+    def total_gpus(self) -> int:
+        """Total GPU footprint across data-parallel replicas: ``num_gpus * data_parallel_size``."""
+        return self.num_gpus * self.data_parallel_size
+
+    def to_vllm_config(self) -> "VllmConfig":
+        """Translate to ``VllmConfig`` for plugin methods that require it."""
+        return VllmConfig(
+            model_variant=self.model_variant,
+            use_image_input=False,
+            copy_weights_to=None,
+            fp8=self.fp8,
+            disable_mmcache=self.disable_mmcache,
+            preprocess=self.preprocess,
+            max_retries=self.max_retries,
+        )
 
 
 @attrs.define

@@ -71,7 +71,6 @@ from cosmos_curator.pipelines.video.captioning.per_event_cli_args import (
     resolve_event_caption_prompt,
 )
 from cosmos_curator.pipelines.video.captioning.vllm_async_config import (
-    VllmAsyncConfig,
     add_vllm_async_cli_args,
     build_vllm_async_config,
 )
@@ -133,6 +132,7 @@ from cosmos_curator.pipelines.video.tracking.tracking_builders import (
 from cosmos_curator.pipelines.video.utils import data_model_compare  # noqa: F401  # registers SplitPipeTaskComparator
 from cosmos_curator.pipelines.video.utils.data_model import (
     SplitPipeTask,
+    VllmAsyncConfig,
     VllmConfig,
     VllmSamplingConfig,
     WindowConfig,
@@ -699,8 +699,13 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             if caption_algo == "cosmos_r2":
                 vllm_config.preprocess = True
                 window_config.model_does_preprocess = True
-        elif caption_algo in {"gemini", "openai", "vllm_async"}:
+        elif caption_algo in {"gemini", "openai"}:
             pass
+        elif caption_algo == "vllm_async":
+            # vllm_async unifies with sync by reusing VllmPrepStage. The CPU
+            # prep stage is authoritative for deterministic preprocessing
+            # unless the user opts in to vLLM-side preprocessing.
+            window_config.model_does_preprocess = bool(args.vllm_async_preprocess)
         elif caption_algo == "nemotron":
             vllm_config.stage2_caption = args.nemotron_stage2_caption
 
@@ -843,9 +848,8 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             # reads num_gpus off the namespace; harmless because the same
             # CLI args are not reused after this point.
             event_variant = args.event_caption_vllm_async_model_name
-            current_num_gpus = args.event_caption_vllm_async_num_gpus or 1.0
-            clamped = _clamp_num_gpus_for_qwen3_235b(event_variant, int(current_num_gpus))
-            args.event_caption_vllm_async_num_gpus = float(clamped)
+            current_num_gpus = args.event_caption_vllm_async_num_gpus or 1
+            args.event_caption_vllm_async_num_gpus = _clamp_num_gpus_for_qwen3_235b(event_variant, current_num_gpus)
 
             # Build a sampling config from the same global --vllm-sampling-*
             # flags used by the per-window captioner so per-event vllm_async

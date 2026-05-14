@@ -60,13 +60,19 @@ from cosmos_curator.pipelines.common.api_caption_utils import (
     openai_error_result_from_exception,
 )
 from cosmos_curator.pipelines.common.api_stage_async_utils import destroy_api_clients
-from cosmos_curator.pipelines.video.captioning.vllm_async_config import VllmAsyncConfig
 
 # ``_VllmAsyncModel`` is a thin ``ModelInterface`` wrapper with no heavy deps,
 # so it must be importable from the driver (default env) where ``__init__``
 # runs. The vLLM-touching helpers stay inside the gated block below.
 from cosmos_curator.pipelines.video.captioning.vllm_async_stage import _VllmAsyncModel
-from cosmos_curator.pipelines.video.utils.data_model import CaptionOutcome, CaptionResult, Clip, SplitPipeTask
+from cosmos_curator.pipelines.video.utils.data_model import (
+    CaptionOutcome,
+    CaptionResult,
+    Clip,
+    SplitPipeTask,
+    VllmAsyncConfig,
+    WindowConfig,
+)
 
 # Type-checking imports for symbols used purely as annotations.  The
 # corresponding runtime imports live in the ``conda_utils.is_running_in_env``
@@ -76,31 +82,22 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine.async_llm import AsyncLLM
 
+    from cosmos_curator.models.vllm_plugin import VllmPlugin
+
 # Heavy ML / API SDKs only live in the ``unified`` env; guard imports so this
 # module loads elsewhere (e.g. CPU-only test collection environments).
 if conda_utils.is_running_in_env("unified"):
-    import numpy as np
     import openai
     import tenacity
     from google import genai
     from google.genai import types as genai_types
-    from transformers import AutoProcessor
     from vllm.v1.engine.async_llm import AsyncLLM
 
     from cosmos_curator.core.utils.infra.gpu_start_helper import gpu_stage_cleanup, gpu_stage_startup
+    from cosmos_curator.models.vllm_interface import _get_vllm_plugin, make_metadata
     from cosmos_curator.models.vllm_interface import sampling_params as build_sampling_params
-    from cosmos_curator.models.vllm_model_ids import get_vllm_model_id
-    from cosmos_curator.pipelines.video.captioning.vllm_async_stage import (
-        _build_engine_args,
-        _build_render_payload,
-        resolve_model_path,
-    )
-    from cosmos_curator.pipelines.video.utils.decoder_utils import (
-        decode_video_cpu_frame_ids,
-        get_avg_frame_rate,
-        get_frame_count,
-    )
-    from cosmos_curator.pipelines.video.utils.vision_process import fetch_video, read_video_cpu, smart_nframes
+    from cosmos_curator.pipelines.video.utils.decoder_utils import get_frame_count
+    from cosmos_curator.pipelines.video.utils.vision_process import fetch_video, read_video_cpu
     from cosmos_curator.pipelines.video.utils.windowing_types import WindowFrameInfo
 
 
@@ -393,6 +390,10 @@ class PerEventCaptionStage(CuratorStage):
         self._vllm_async_runner: asyncio.Runner | None = None
         self._vllm_async_request_counter: int = 0
         self._vllm_async_model_iface: _VllmAsyncModel | None = None
+        # Plugin instance owns chat-template + multimodal payload assembly,
+        # engine-args construction, and per-variant model_path resolution
+        # (mirrors VllmAsyncCaptionStage.stage_setup).
+        self._vllm_async_plugin: VllmPlugin | None = None
         if backend == "vllm_async":
             assert vllm_async_config is not None
             self._vllm_async_model_iface = _VllmAsyncModel(vllm_async_config.model_variant)
@@ -814,11 +815,17 @@ class PerEventCaptionStage(CuratorStage):
         gpu_stage_startup(self.__class__.__name__, self.resources.gpus, pre_setup=True)
         self._configure_vllm_async_environment()
 
-        model_id = get_vllm_model_id(config.model_variant)
-        model_path = resolve_model_path(model_id)
-        self._vllm_async_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)  # type: ignore[no-untyped-call]
+        # Plugin owns variant-specific model_path resolution, processor
+        # construction (with use_fast=True where appropriate), engine-args
+        # assembly, and chat-template + multimodal payload shape.  Mirrors
+        # VllmAsyncCaptionStage.stage_setup so per-event captioning stays in
+        # lockstep with the per-window stage's behaviour for every registered
+        # variant (Qwen2.5-VL, Qwen3-VL, Nemotron, Cosmos Reason, ...).
+        self._vllm_async_plugin = _get_vllm_plugin(config.model_variant)
+        vllm_config = config.to_vllm_config()
+        self._vllm_async_processor = self._vllm_async_plugin.processor(vllm_config)
 
-        engine_args = _build_engine_args(config, model_path)
+        engine_args = self._vllm_async_plugin.model_async(config)
         logger.info(
             f"[PerEventCaptionStage] booting AsyncLLM engine "
             f"variant={config.model_variant!r} num_gpus={config.num_gpus} "
@@ -835,88 +842,102 @@ class PerEventCaptionStage(CuratorStage):
 
         gpu_stage_startup(self.__class__.__name__, self.resources.gpus, pre_setup=False)
 
-    def _build_vllm_async_prompt(self, prompt: str) -> str:
-        """Render the chat-template prompt for one clip via the AutoProcessor."""
-        processor = self._vllm_async_processor
-        if processor is None:
-            msg = "vllm_async processor not initialised; call stage_setup first."
-            raise RuntimeError(msg)
-        messages: list[dict[str, str | list[dict[str, str]]]] = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "video"},
-                    {"type": "text", "text": prompt.strip()},
-                ],
-            },
-        ]
-        prompt_text: str = processor.apply_chat_template(  # type: ignore[attr-defined]
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        return prompt_text
-
-    def _decode_vllm_async_frames(self, clip_mp4_bytes: bytes) -> "np.ndarray[Any, np.dtype[np.uint8]]":
-        """Decode the annotated mp4 to a uint8 [T, H, W, 3] frame stack.
-
-        Mirrors ``VllmAsyncPrepStage._create_windows_and_decode`` for a
-        single window covering the whole clip.
-        """
-        total_native = get_frame_count(clip_mp4_bytes)
-        if total_native <= 0:
-            msg = "clip has 0 decodable frames"
-            raise RuntimeError(msg)
-
-        with buffer_as_memfd_path(clip_mp4_bytes, name="per-event-vllm-async-clip") as video_path:
-            native_fps = get_avg_frame_rate(video_path)
-            n_sampled = smart_nframes(self._vllm_async_sampling_fps, total_native, native_fps)
-            indices = np.linspace(0, total_native - 1, n_sampled, dtype=np.int32)
-            return decode_video_cpu_frame_ids(video_path, indices, num_threads=2)
-
     async def _generate_vllm_async_caption(
         self,
-        rendered_prompt: object,
+        llm_input: dict[str, Any],
         request_id: str,
     ) -> str:
-        """Drive a single ``engine.generate`` async iterator to completion."""
+        """Drive a single ``engine.generate`` async iterator to completion.
+
+        ``llm_input`` is the sync-shaped LLM-input dict produced by the
+        plugin's ``make_llm_input``.  Concrete shapes depend on the plugin:
+
+        - Qwen / Nemotron / Qwen3-VL plugins emit
+          ``{"prompt_token_ids": [...], "multi_modal_data": {...}}``
+          (chat template applied to token IDs on the prep side).
+        - Cosmos-Reason1 emits
+          ``{"prompt": <chat-template string>, "multi_modal_data": {...}}``
+          (vLLM tokenises the string-form prompt at engine time).
+
+        Both forms are accepted by ``AsyncLLM.generate(prompt=...)``; the
+        engine consumes them directly without a separate renderer pass,
+        matching the unified async/sync prep contract used by
+        ``VllmAsyncCaptionStage``.
+        """
         engine = self._vllm_async_engine
         params = self._vllm_async_sampling_params
-        if engine is None or params is None:
+        plugin = self._vllm_async_plugin
+        if engine is None or params is None or plugin is None:
             msg = "vllm_async engine not initialised; call stage_setup first."
             raise RuntimeError(msg)
         final_output = None
         async for output in engine.generate(
-            prompt=rendered_prompt,  # type: ignore[arg-type]
+            prompt=llm_input,  # type: ignore[arg-type]
             sampling_params=params,
             request_id=request_id,
         ):
             final_output = output
+
         if final_output is None or not final_output.outputs:
             msg = "AsyncLLM engine returned no outputs."
             raise RuntimeError(msg)
-        text = final_output.outputs[0].text
+
+        text = plugin.decode(final_output)
         if not text or not text.strip():
             msg = f"AsyncLLM engine returned empty caption (finish_reason={final_output.outputs[0].finish_reason!r})"
             raise RuntimeError(msg)
         return str(text).strip()
 
     def _call_vllm_async(self, clip_mp4_bytes: bytes, prompt: str) -> str:
-        """Generate one per-event caption via the in-process AsyncLLM engine."""
-        if self._vllm_async_runner is None or self._vllm_async_engine is None:
+        """Generate one per-event caption via the in-process AsyncLLM engine.
+
+        Mirrors sync's ``VllmPrepStage._prep_windows`` for a single clip --
+        one whole-clip "window" produced via :func:`fetch_video`,
+        :func:`make_metadata`, and ``plugin.make_llm_input`` -- and feeds
+        the resulting LLM-input dict directly into ``engine.generate``.
+        The renderer pass that the old async-only path used is gone;
+        ``mm_processor_kwargs`` (built by the plugin's ``model_async``) now
+        gates rescale/normalize the same way the per-window caption stage
+        does.
+        """
+        runner = self._vllm_async_runner
+        engine = self._vllm_async_engine
+        plugin = self._vllm_async_plugin
+        processor = self._vllm_async_processor
+        config = self._vllm_async_config
+        if runner is None or engine is None or plugin is None or processor is None or config is None:
             msg = "vllm_async backend not initialised; call stage_setup first."
             raise RuntimeError(msg)
-        config = self._vllm_async_config
-        assert config is not None
 
-        prompt_text = self._build_vllm_async_prompt(prompt)
-        frames = self._decode_vllm_async_frames(clip_mp4_bytes)
-        payload = _build_render_payload(prompt_text, frames, config.mm_processor_kwargs)
-        rendered_list = self._vllm_async_engine.renderer.render_cmpl([payload])
-        rendered_prompt = rendered_list[0]
+        total_native = get_frame_count(clip_mp4_bytes)
+        if total_native <= 0:
+            msg = "clip has 0 decodable frames"
+            raise RuntimeError(msg)
+
+        window_config = WindowConfig(sampling_fps=self._vllm_async_sampling_fps)
+        do_preprocess = not config.preprocess
+        preprocess_dtype = "float16" if not config.preprocess else "uint8"
+        with buffer_as_memfd_path(clip_mp4_bytes, name="per-event-vllm-async-clip") as video_path:
+            frames, _ = fetch_video(
+                str(video_path),
+                sampling_fps=window_config.sampling_fps,
+                window_range=[WindowFrameInfo(start=0, end=total_native)],
+                do_preprocess=do_preprocess,
+                preprocess_dtype=preprocess_dtype,
+            )
+
+        metadata = make_metadata([frames], window_config)[0]
+        llm_input = plugin.make_llm_input(
+            prompt,
+            frames,
+            metadata,
+            processor,
+            config.to_vllm_config(),
+        )
+
         self._vllm_async_request_counter += 1
         request_id = f"per-event-{self._vllm_async_request_counter}"
-        return self._vllm_async_runner.run(self._generate_vllm_async_caption(rendered_prompt, request_id))
+        return runner.run(self._generate_vllm_async_caption(llm_input, request_id))
 
     # ------------------------------------------------------------------
     # Qwen backend
@@ -1088,6 +1109,7 @@ class PerEventCaptionStage(CuratorStage):
                     self._vllm_async_engine.shutdown()  # type: ignore[no-untyped-call]
                     self._vllm_async_engine = None
                 self._vllm_async_processor = None
+                self._vllm_async_plugin = None
                 if self._vllm_async_runner is not None:
                     self._vllm_async_runner.close()
                     self._vllm_async_runner = None

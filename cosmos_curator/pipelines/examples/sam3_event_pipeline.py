@@ -60,7 +60,6 @@ from cosmos_curator.pipelines.video.captioning.per_event_cli_args import (
     resolve_event_caption_prompt,
 )
 from cosmos_curator.pipelines.video.captioning.vllm_async_config import (
-    VllmAsyncConfig,
     build_vllm_async_config,
 )
 from cosmos_curator.pipelines.video.tracking.cli_args import add_sam3_args
@@ -74,7 +73,13 @@ from cosmos_curator.pipelines.video.tracking.tracking_builders import (
     SAM3TrackingConfig,
     build_sam3_tracking_stages,
 )
-from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask, Video, VllmSamplingConfig
+from cosmos_curator.pipelines.video.utils.data_model import (
+    Clip,
+    SplitPipeTask,
+    Video,
+    VllmAsyncConfig,
+    VllmSamplingConfig,
+)
 
 # Per-event vllm_async clamps to >=4 GPUs for both Qwen3-VL-235B variants. We
 # replicate just the warning here (the actual clamp helper lives in the
@@ -235,7 +240,7 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
         event_vllm_async_config: VllmAsyncConfig | None = None
         if args.event_caption_backend == "vllm_async":
             variant = args.event_caption_vllm_async_model_name
-            num_gpus = args.event_caption_vllm_async_num_gpus or 1.0
+            num_gpus = args.event_caption_vllm_async_num_gpus or 1
             if variant in _QWEN3_VL_235B_VARIANTS and num_gpus < _QWEN3_VL_235B_MIN_GPUS:
                 logger.warning(
                     "Per-event vllm_async variant {!r} typically needs at least {} GPUs; "

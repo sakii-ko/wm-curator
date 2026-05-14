@@ -32,6 +32,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     SplitPipeTask,
     Video,
     VideoMetadata,
+    VllmAsyncConfig,
     _add_children_to_queue,
     _get_object_size,
     assert_time_alignment,
@@ -820,3 +821,19 @@ class TestVideoPopulateTimestamps:
         else:
             # None timestamps add nothing to size
             assert size == base_size
+
+
+class TestVllmAsyncConfigGpuMemoryUtilization:
+    """Validator for ``VllmAsyncConfig.gpu_memory_utilization`` (must be in (0.0, 1.0])."""
+
+    @pytest.mark.parametrize("value", [0.5, 0.85, 1.0, None])
+    def test_accepts_valid_values(self, value: float | None) -> None:
+        """Accept ``None`` (use plugin default) and any float in ``(0.0, 1.0]``."""
+        cfg = VllmAsyncConfig(model_variant="qwen", gpu_memory_utilization=value)
+        assert cfg.gpu_memory_utilization == value
+
+    @pytest.mark.parametrize("value", [0.0, -0.1, 1.5, 2.0])
+    def test_rejects_out_of_range_values(self, value: float) -> None:
+        """Reject 0.0, negatives, and any value strictly greater than 1.0."""
+        with pytest.raises(ValueError, match="gpu_memory_utilization"):
+            VllmAsyncConfig(model_variant="qwen", gpu_memory_utilization=value)

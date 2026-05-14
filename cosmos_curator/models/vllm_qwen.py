@@ -21,9 +21,11 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 import torch
 from transformers import AutoProcessor
 from vllm import LLM, RequestOutput
+from vllm.config import CompilationConfig
+from vllm.engine.arg_utils import AsyncEngineArgs
 
 from cosmos_curator.models.vllm_plugin import VllmPlugin
-from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, VllmConfig
+from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig, VllmCaptionRequest, VllmConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -181,6 +183,52 @@ class VllmQwen(VllmPlugin):
         )
 
     @classmethod
+    def model_async(cls, config: VllmAsyncConfig) -> AsyncEngineArgs:
+        """Build ``AsyncEngineArgs`` for in-process ``AsyncLLM`` (async pipeline).
+
+        Mirrors :meth:`model` - reads from module-scope constants.
+        """
+        gpu_mem_util = (
+            config.gpu_memory_utilization if config.gpu_memory_utilization is not None else GPU_MEMORY_UTILIZATION
+        )
+        return AsyncEngineArgs(
+            model=str(cls.model_path(config.to_vllm_config())),
+            served_model_name=[config.model_variant],
+            tensor_parallel_size=int(config.num_gpus),
+            data_parallel_size=max(1, config.data_parallel_size),
+            gpu_memory_utilization=gpu_mem_util,
+            max_model_len=MAX_MODEL_LEN,
+            max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+            trust_remote_code=TRUST_REMOTE_CODE,
+            limit_mm_per_prompt=LIMIT_MM_PER_PROMPT_VIDEO,  # type: ignore[arg-type]
+            max_num_seqs=config.max_num_seqs if config.max_num_seqs > 0 else None,
+            enforce_eager=config.enforce_eager,
+            kv_cache_dtype=config.kv_cache_dtype,  # type: ignore[arg-type]
+            mm_encoder_tp_mode=config.mm_encoder_tp_mode or None,  # type: ignore[arg-type]
+            mm_processor_cache_type=config.mm_processor_cache_type or None,  # type: ignore[arg-type]
+            async_scheduling=config.async_scheduling,
+            enable_chunked_prefill=config.enable_chunked_prefill,
+            disable_chunked_mm_input=config.disable_chunked_mm_input,
+            long_prefill_token_threshold=config.long_prefill_token_threshold,
+            stream_interval=config.stream_interval,
+            distributed_executor_backend=config.distributed_executor_backend,
+            skip_mm_profiling=config.skip_mm_profiling,
+            disable_log_stats=config.disable_log_stats,
+            enable_log_requests=config.enable_log_requests,
+            quantization="fp8" if config.fp8 else None,
+            mm_processor_cache_gb=0.0 if config.disable_mmcache else 4.0,
+            mm_processor_kwargs={
+                "do_sample_frames": False,
+                "do_resize": config.preprocess,
+                "do_rescale": config.preprocess,
+                "do_normalize": config.preprocess,
+            },
+            compilation_config=CompilationConfig(cudagraph_mode="piecewise"),  # type: ignore[arg-type]
+            enable_prefix_caching=True,
+            use_tqdm_on_load=False,
+        )
+
+    @classmethod
     def processor(cls, config: VllmConfig) -> AutoProcessor:
         """Return the AutoProcessor for the model."""
         processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
@@ -303,6 +351,50 @@ class VllmQwen3VL(VllmQwen):
             trust_remote_code=TRUST_REMOTE_CODE,
             compilation_config={"cudagraph_mode": "piecewise"},
             performance_mode=config.performance_mode,
+        )
+
+    @classmethod
+    def model_async(cls, config: VllmAsyncConfig) -> AsyncEngineArgs:
+        """Build ``AsyncEngineArgs`` for Qwen3-VL in-process ``AsyncLLM``.
+
+        Mirrors :meth:`model` - reads from module-scope constants.
+        """
+        extra_kwargs: dict[str, Any] = {}
+        if config.gpu_memory_utilization is not None:
+            extra_kwargs["gpu_memory_utilization"] = config.gpu_memory_utilization
+        return AsyncEngineArgs(
+            model=str(cls.model_path(config.to_vllm_config())),
+            served_model_name=[config.model_variant],
+            tensor_parallel_size=config.num_gpus,
+            data_parallel_size=config.data_parallel_size,
+            max_model_len=MAX_MODEL_LEN,
+            trust_remote_code=TRUST_REMOTE_CODE,
+            limit_mm_per_prompt=LIMIT_MM_PER_PROMPT_VIDEO,  # type: ignore[arg-type]
+            max_num_seqs=config.max_num_seqs if config.max_num_seqs > 0 else None,
+            enforce_eager=config.enforce_eager,
+            kv_cache_dtype=config.kv_cache_dtype,  # type: ignore[arg-type]
+            mm_encoder_tp_mode=config.mm_encoder_tp_mode or None,  # type: ignore[arg-type]
+            mm_processor_cache_type=config.mm_processor_cache_type or None,  # type: ignore[arg-type]
+            async_scheduling=config.async_scheduling,
+            enable_chunked_prefill=config.enable_chunked_prefill,
+            disable_chunked_mm_input=config.disable_chunked_mm_input,
+            long_prefill_token_threshold=config.long_prefill_token_threshold,
+            stream_interval=config.stream_interval,
+            distributed_executor_backend=config.distributed_executor_backend,
+            skip_mm_profiling=config.skip_mm_profiling,
+            disable_log_stats=config.disable_log_stats,
+            enable_log_requests=config.enable_log_requests,
+            mm_processor_cache_gb=0.0 if config.disable_mmcache else 4.0,
+            mm_processor_kwargs={
+                "do_sample_frames": False,
+                "do_resize": config.preprocess,
+                "do_rescale": config.preprocess,
+                "do_normalize": config.preprocess,
+            },
+            compilation_config=CompilationConfig(cudagraph_mode="piecewise"),  # type: ignore[arg-type]
+            enable_prefix_caching=True,
+            use_tqdm_on_load=False,
+            **extra_kwargs,
         )
 
     @staticmethod

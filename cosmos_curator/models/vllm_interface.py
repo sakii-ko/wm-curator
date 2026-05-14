@@ -82,10 +82,14 @@ DEBUG TIP: Set breakpoint in vllm_caption() and step through for complete flow
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+import asyncio
+import contextlib
 import secrets
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import (  # noqa: UP035, remove noqa when we drop support for python 3.10
+    TYPE_CHECKING,
     Any,
     Deque,
     Iterable,
@@ -95,13 +99,16 @@ from typing import (  # noqa: UP035, remove noqa when we drop support for python
 
 import attrs
 import numpy as np
+import tenacity
 import torch
 from loguru import logger
 from PIL import Image
 from transformers import AutoProcessor
 from vllm import LLM, PoolingOutput, PoolingRequestOutput, RequestOutput, SamplingParams
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.engine.exceptions import EngineDeadError
 
+from cosmos_curator.core.utils.infra.tracing import traced_span
 from cosmos_curator.core.utils.misc import grouping
 from cosmos_curator.models.vllm_cosmos_reason1_vl import VllmCosmosReason1VL
 from cosmos_curator.models.vllm_cosmos_reason2_vl import VllmCosmosReason2VL
@@ -123,6 +130,9 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     VllmSamplingConfig,
     WindowConfig,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.async_llm import AsyncLLM
 
 # Add new vLLM plugins to _VLLM_PLUGINS
 _VLLM_PLUGINS = {
@@ -681,12 +691,7 @@ def vllm_caption(  # noqa: PLR0913
         msg = f"{max_inflight_requests=} must be >= 0"
         raise ValueError(msg)
 
-    if stage2_prompts is None:
-        stage2_prompts = [None] * len(model_inputs)
-
-    if len(stage2_prompts) != len(model_inputs):
-        msg = f"{len(stage2_prompts)=} != {len(model_inputs)=}, must be same length"
-        raise ValueError(msg)
+    stage2_prompts = _resolve_stage2_prompts(stage2_prompts, len(model_inputs))
 
     if inflight_batching:
         return _caption_inflight_batching(
@@ -701,3 +706,326 @@ def vllm_caption(  # noqa: PLR0913
         vllm_config,
         stage2_prompts,
     )
+
+
+def _resolve_stage2_prompts(
+    stage2_prompts: list[str | None] | None,
+    n: int,
+) -> list[str | None]:
+    """Return per-input stage-2 prompts, padding with ``None`` when omitted."""
+    if stage2_prompts is None:
+        return [None] * n
+    if len(stage2_prompts) != n:
+        msg = f"{len(stage2_prompts)=} != {n=}, must be same length"
+        raise ValueError(msg)
+    return stage2_prompts
+
+
+def _fresh_prompt_payload(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the outer mutable shell of a vLLM prompt payload.
+
+    vLLM/HF/Transformers may mutate the outer dict (e.g. resolve relative
+    paths, attach derived fields).  Across retries or stage-2 refinement the
+    same ``inputs`` dict can be reused, so we rebuild the outer dict and any
+    ``multi_modal_data`` lists here while preserving the underlying tensor
+    references (zero-copy by reference) so the payload itself remains
+    immutable from the caller's perspective.
+    """
+    fresh: dict[str, Any] = dict(inputs)
+    mm_data = fresh.get("multi_modal_data")
+    if isinstance(mm_data, dict):
+        fresh["multi_modal_data"] = {
+            key: (list(value) if isinstance(value, list) else value) for key, value in mm_data.items()
+        }
+    return fresh
+
+
+@attrs.define
+class _AsyncCaptioner:
+    """Concurrent captioning runner for an in-process ``AsyncLLM`` engine.
+
+    Mirrors sync's ``_caption_inflight_batching`` semantics: ordered
+    results, accumulated stage-1 + stage-2 token counts, two-stage
+    refinement loop, and ``EngineDeadError`` propagation.
+
+    Concurrency is gated by a caller-owned ``asyncio.Semaphore``.
+    The semaphore is held only while ``engine.generate`` iterates,
+    not during retry backoff or result decoding, so a slow request
+    (or one in tenacity backoff) never starves healthy siblings.
+    """
+
+    engine: "AsyncLLM"
+    processor: AutoProcessor
+    plugin: VllmPlugin
+    semaphore: asyncio.Semaphore
+    sampling_params: SamplingParams
+    max_retries: int
+    request_id_factory: Callable[[], str]
+    on_window_done: Callable[[int, VllmWindowResult], None] | None = None
+    on_window_error: Callable[[int, str, Exception], None] | None = None
+    _request_id_to_index: dict[str, int] = attrs.field(factory=dict, init=False)
+    _results: dict[int, VllmWindowResult] = attrs.field(factory=dict, init=False)
+    _token_counts: dict[int, TokenCounts] = attrs.field(factory=dict, init=False)
+    _pending: dict[asyncio.Task[VllmCaptionRequest], VllmCaptionRequest] = attrs.field(factory=dict, init=False)
+    # Tracks which dispatch generation each in-flight task belongs to so
+    # ``on_window_error`` reports an accurate phase tag.
+    _phase: dict[asyncio.Task[VllmCaptionRequest], str] = attrs.field(factory=dict, init=False)
+
+    async def run(self, requests: Iterable[VllmCaptionRequest]) -> list[VllmWindowResult]:
+        """Dispatch every request concurrently and return results in input order.
+
+        Raises:
+            EngineDeadError: Re-raised so the caller can restart the actor.
+
+        """
+        # Track the total count locally so the final result list can be
+        # ordered without re-materializing the iterable.  ``idx`` is bound
+        # only when ``requests`` is non-empty; ``count`` stays at ``0``
+        # otherwise, which short-circuits the trailing range correctly.
+        count = 0
+        try:
+            for idx, request in enumerate(requests):
+                self._request_id_to_index[request.request_id] = idx
+                if not request.inputs:
+                    # Per-slot sentinel: an empty ``inputs`` dict means the
+                    # request builder (e.g. ``VllmAsyncCaptionStage._iter_requests``)
+                    # detected a missing model input upstream and already
+                    # logged the cause.  Skip ``engine.generate`` and emit
+                    # ``VLLM_UNKNOWN_CAPTION`` so siblings continue running.
+                    self._emit_unknown(idx)
+                else:
+                    self._spawn(request)
+                count = idx + 1
+            while self._pending:
+                done, _ = await asyncio.wait(self._pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    self._handle_completed(task)
+        finally:
+            await self._cancel_pending()
+        return [self._results[i] for i in range(count)]
+
+    def _spawn(self, request: VllmCaptionRequest, *, phase: str = "stage1") -> None:
+        """Create the asyncio.Task driving ``request`` and register it as pending.
+
+        Args:
+            request: The captioning request to dispatch.
+            phase: Dispatch generation tag (``"stage1"`` for initial
+                requests, ``"stage2"`` for refined requests).  Recorded
+                on the task so ``on_window_error`` can attribute
+                failures accurately.
+
+        """
+        task = asyncio.create_task(self._drive_request(request))
+        self._pending[task] = request
+        self._phase[task] = phase
+
+    def _handle_completed(self, task: asyncio.Task[VllmCaptionRequest]) -> None:
+        """Route one completed task to stage-2 dispatch, final emit, or sentinel on failure."""
+        req = self._pending.pop(task)
+        phase = self._phase.pop(task)
+        # task.result() re-raises EngineDeadError so the caller restarts the actor.
+        try:
+            req = task.result()
+        except EngineDeadError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - per-window containment
+            idx = self._request_id_to_index[req.request_id]
+            self._emit_unknown(idx)
+            if self.on_window_error is not None:
+                self.on_window_error(idx, phase, exc)
+            req.inputs = None  # type: ignore[assignment]
+            return
+
+        idx = self._request_id_to_index[req.request_id]
+        # Accumulate stage-1 + stage-2 tokens, matching sync.
+        prev = self._token_counts.get(idx, TokenCounts())
+        self._token_counts[idx] = TokenCounts(
+            prev.prompt_tokens + req.prompt_tokens,
+            prev.output_tokens + req.output_tokens,
+        )
+
+        if req.stage2_prompt is None:
+            self._emit_final(idx, req)
+            req.inputs = None  # type: ignore[assignment]
+            return
+
+        # Build refined request for stage-2 refinement.
+        try:
+            refined = self.plugin.make_refined_llm_request(req, self.processor, req.stage2_prompt)
+        except Exception as exc:  # noqa: BLE001 - per-window containment
+            self._emit_unknown(idx)
+            if self.on_window_error is not None:
+                self.on_window_error(idx, "stage2_build", exc)
+            # stage-2 build failed, no further reads.
+            req.inputs = None  # type: ignore[assignment]
+            return
+
+        self._request_id_to_index[refined.request_id] = idx
+        self._spawn(refined, phase="stage2")
+        req.inputs = None  # type: ignore[assignment]
+
+    async def _drive_request(self, request: VllmCaptionRequest) -> VllmCaptionRequest:
+        """Drive one request through ``engine.generate`` and populate output fields.
+
+        Returns the same ``VllmCaptionRequest`` with ``caption``,
+        ``prompt_tokens``, ``output_tokens`` and ``finish_reason``
+        populated.  Raises :class:`EngineDeadError` unchanged (never
+        retried).  Other exceptions are retried up to ``max_retries``
+        attempts (mirroring sync's ``stop_after_attempt`` shape) and
+        then re-raised.
+        """
+
+        @tenacity.retry(  # type: ignore[misc]
+            stop=tenacity.stop_after_attempt(self.max_retries),
+            reraise=True,
+            retry=tenacity.retry_if_not_exception_type(EngineDeadError),
+        )
+        async def _attempt() -> RequestOutput:
+            # vLLM rejects reusing a request_id whose state is still pending in
+            # the engine if the previous attempt failed mid-stream.
+            attempt_id = self.request_id_factory()
+            payload = _fresh_prompt_payload(request.inputs)
+            async with self.semaphore:
+                with traced_span(
+                    "VllmAsyncCaptionStage.generate",
+                    attributes={"vllm.request_id": attempt_id},
+                ) as gen_span:
+                    final_output: RequestOutput | None = None
+                    async for output in self.engine.generate(
+                        prompt=cast("Any", payload),
+                        sampling_params=self.sampling_params,
+                        request_id=attempt_id,
+                    ):
+                        final_output = output
+                    if final_output is None or not final_output.outputs:
+                        msg = f"AsyncLLM engine returned no outputs for request_id={attempt_id!r}"
+                        raise RuntimeError(msg)
+
+                    gen_out0 = final_output.outputs[0]
+                    gen_span.set_attributes(
+                        {
+                            "vllm.prompt_tokens": (
+                                len(final_output.prompt_token_ids) if final_output.prompt_token_ids else 0
+                            ),
+                            "vllm.output_tokens": (len(gen_out0.token_ids) if gen_out0.token_ids else 0),
+                            "vllm.finish_reason": gen_out0.finish_reason or "",
+                        },
+                    )
+                    return final_output
+
+        final_output = await _attempt()
+        out0 = final_output.outputs[0]
+        request.caption = self.plugin.decode(final_output)
+        request.prompt_tokens = len(final_output.prompt_token_ids) if final_output.prompt_token_ids else 0
+        request.output_tokens = len(out0.token_ids) if out0.token_ids else 0
+        request.finish_reason = out0.finish_reason
+        return request
+
+    def _emit_final(self, idx: int, request: VllmCaptionRequest) -> None:
+        """Record the terminal result for one window and fire the per-window callback."""
+        result = _make_window_result(request, self._token_counts[idx])
+        self._results[idx] = result
+        if self.on_window_done is not None:
+            self.on_window_done(idx, result)
+
+    def _emit_unknown(self, idx: int) -> None:
+        """Record a sentinel ``VLLM_UNKNOWN_CAPTION`` result for a failed window."""
+        tc = self._token_counts.get(idx, TokenCounts())
+        result = VllmWindowResult(text=VLLM_UNKNOWN_CAPTION, finish_reason=None, token_counts=tc)
+        self._results[idx] = result
+        if self.on_window_done is not None:
+            self.on_window_done(idx, result)
+
+    async def _cancel_pending(self) -> None:
+        """Cancel any in-flight tasks and consume their exceptions on teardown.
+
+        Called from :meth:`run` ``finally`` so that on early exit
+        (cancellation, engine death, etc.) every outstanding task is
+        cancelled and its exception is consumed.  Without this drain
+        the event loop logs "Task exception was never retrieved" at GC.
+        """
+        if not self._pending:
+            return
+        for task in self._pending:
+            task.cancel()
+        for task in self._pending:
+            # Drain-only: we already cancelled, and we just need to consume
+            # the exception so asyncio doesn't log it at GC.  Both regular
+            # exceptions and CancelledError are expected and discarded.
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await task
+
+        self._pending.clear()
+        self._phase.clear()
+
+
+async def vllm_caption_async(  # noqa: PLR0913
+    requests: Iterable[VllmCaptionRequest],
+    engine: "AsyncLLM",
+    processor: AutoProcessor,
+    sampling_params: SamplingParams,
+    vllm_config: VllmConfig,
+    *,
+    semaphore: asyncio.Semaphore,
+    max_retries: int = 1,
+    request_id_factory: Callable[[], str] = lambda: secrets.token_hex(8),
+    on_window_done: Callable[[int, VllmWindowResult], None] | None = None,
+    on_window_error: Callable[[int, str, Exception], None] | None = None,
+) -> list[VllmWindowResult]:
+    """Caption an iterable of pre-built ``VllmCaptionRequest`` objects via ``AsyncLLM``.
+
+    Async sibling of :func:`vllm_caption`.  Thin module-level entry
+    point: resolves the plugin and delegates orchestration (concurrent
+    ``engine.generate``, stage-2 refinement, retry, per-window
+    callbacks) to :class:`_AsyncCaptioner`.
+
+    Args:
+        requests: Iterable of pre-built per-window caption requests
+            (each carrying its own LLM input dict and optional stage-2
+            prompt).  A request whose ``inputs`` is an empty mapping
+            ``{}`` is treated as the per-slot "missing model input"
+            sentinel defined on :class:`VllmCaptionRequest`: the slot
+            is short-circuited to ``VLLM_UNKNOWN_CAPTION`` without
+            invoking ``engine.generate`` and without firing
+            ``on_window_error`` (the caller is expected to have already
+            logged the underlying cause when constructing the
+            sentinel).
+        engine: In-process ``AsyncLLM`` engine owned by the caller stage.
+        processor: HuggingFace processor used for stage-2 refinement.
+        sampling_params: Shared sampling configuration applied to every
+            request.
+        vllm_config: ``VllmConfig`` describing the model variant and
+            stage-2 settings.
+        semaphore: Concurrency budget shared across all in-flight
+            invocations on the same actor.
+        max_retries: Per-request retry bound for transient
+            ``engine.generate`` failures.  ``EngineDeadError`` is never
+            retried.
+        request_id_factory: Builds the request_id for each engine call.
+            Callers that need monotonic IDs inject a counter-backed factory.
+        on_window_done: Optional callback fired as each window's final
+            caption is known, enabling per-window scatter and cleanup.
+        on_window_error: Optional callback fired when a request fails
+            before it can be represented as a normal result.
+
+    Returns:
+        Final per-window results in the order in which ``requests``
+        yielded its elements.
+
+    Raises:
+        EngineDeadError: Re-raised so the caller can restart the actor.
+
+    """
+    plugin = _get_vllm_plugin(vllm_config.model_variant)
+    captioner = _AsyncCaptioner(
+        engine=engine,
+        processor=processor,
+        plugin=plugin,
+        semaphore=semaphore,
+        sampling_params=sampling_params,
+        max_retries=max_retries,
+        request_id_factory=request_id_factory,
+        on_window_done=on_window_done,
+        on_window_error=on_window_error,
+    )
+    return await captioner.run(requests)

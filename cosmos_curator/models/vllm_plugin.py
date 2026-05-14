@@ -35,17 +35,25 @@ from typing import Any
 import torch
 from transformers import AutoProcessor
 from vllm import LLM, RequestOutput
+from vllm.engine.arg_utils import AsyncEngineArgs
 
 from cosmos_curator.core.utils.model import model_utils
 from cosmos_curator.models.vllm_model_ids import get_vllm_model_id
 from cosmos_curator.pipelines.video.utils.data_model import (
+    VllmAsyncConfig,
     VllmCaptionRequest,
     VllmConfig,
 )
 
 
 class VllmPlugin(ABC):
-    """vLLM plugin interface."""
+    """vLLM plugin interface.
+
+    Adapter between cosmos-curator pipeline data (``VllmConfig`` for sync,
+    ``VllmAsyncConfig`` for async) and per-model request format / engine
+    construction.  Subclasses keep per-variant numeric tuning as module-scope
+    constants so ``model()`` and ``model_async()`` consume the same values.
+    """
 
     @staticmethod
     @abstractmethod
@@ -96,13 +104,29 @@ class VllmPlugin(ABC):
     @classmethod
     @abstractmethod
     def model(cls, config: VllmConfig) -> LLM:
-        """Instantiate the vLLM model.
+        """Instantiate the vLLM model (synchronous pipeline).
 
         Args:
             config: Configuration for the model.
 
         Returns:
             The vLLM model.
+
+        """
+
+    @classmethod
+    @abstractmethod
+    def model_async(cls, config: VllmAsyncConfig) -> AsyncEngineArgs:
+        """Build ``AsyncEngineArgs`` for the in-process ``AsyncLLM`` engine (async pipeline).
+
+        Mirror of :meth:`model` for the asynchronous captioning pipeline.
+
+        Args:
+            config: User-tunable knobs for the async engine.
+
+        Returns:
+            Fully-constructed ``AsyncEngineArgs`` ready for
+            ``AsyncLLM.from_engine_args``.
 
         """
 

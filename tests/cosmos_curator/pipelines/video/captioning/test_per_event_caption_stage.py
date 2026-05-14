@@ -365,3 +365,171 @@ def test_process_data_iterates_all_clips(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(calls) == 2
     for clip in task.videos[0].clips:
         assert clip.sam3_events == [{"event_id": "e0"}]
+
+
+# ---------------------------------------------------------------------------
+# PerEventCaptionStage._call_vllm_async parity with the unified prep contract
+# ---------------------------------------------------------------------------
+#
+# These tests build a minimally-initialised stage and inject stubs for the
+# heavy collaborators (``fetch_video``, ``make_metadata``, ``plugin``,
+# ``processor``, ``asyncio.Runner``).  This keeps the per-event vllm_async
+# path testable in the default CPU env without dragging in vLLM / torch.
+
+
+from types import SimpleNamespace  # noqa: E402  (kept near the section it serves)
+from typing import Any  # noqa: E402
+
+from cosmos_curator.pipelines.video.captioning import per_event_caption_stage as pe_mod  # noqa: E402
+from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig  # noqa: E402
+
+
+def _bare_vllm_async_stage(monkeypatch: pytest.MonkeyPatch, *, preprocess: bool) -> PerEventCaptionStage:
+    """Build a ``PerEventCaptionStage`` and pre-populate its vllm_async state.
+
+    The constructor never reads the vllm_async backend when ``backend="gemini"``
+    is supplied (cheapest construction path), so we instantiate via Gemini
+    and then attach the vllm_async collaborators by hand.  This keeps the
+    test focused on ``_call_vllm_async`` -- the unit under test -- without
+    booting an AsyncLLM engine.
+
+    ``monkeypatch`` patches ``load_config`` so Gemini construction does not
+    touch ``~/.config``; the patch is local to the requesting test.
+    """
+    _patch_gemini_config(monkeypatch)
+    stage = PerEventCaptionStage(backend="gemini")  # type: ignore[arg-type]
+    stage._vllm_async_config = VllmAsyncConfig(model_variant="qwen", preprocess=preprocess)
+    stage._vllm_async_sampling_fps = 2.0
+    stage._vllm_async_sampling_params = SimpleNamespace(max_tokens=128)
+    stage._vllm_async_engine = SimpleNamespace()
+    stage._vllm_async_processor = SimpleNamespace()
+    stage._vllm_async_runner = SimpleNamespace(run=lambda _coro: "decoded-caption")
+    stage._vllm_async_plugin = SimpleNamespace(
+        make_llm_input=lambda prompt, _frames, _metadata, _processor, _vllm_cfg: {"prompt": prompt},
+    )
+    return stage
+
+
+def _capture_fetch_video_args(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace ``fetch_video`` (and friends) with stubs that record the calls.
+
+    The real symbols are imported inside ``per_event_caption_stage`` only
+    when the ``unified`` conda env is active (see the conditional import
+    block) -- in the default CPU env we inject stub references with
+    ``raising=False`` so the names resolve when ``_call_vllm_async`` runs.
+    ``WindowFrameInfo`` is also stubbed for the same reason.
+    """
+
+    class _StubWindowFrameInfo:
+        def __init__(self, *, start: int, end: int) -> None:
+            self.start = start
+            self.end = end
+
+    captured: dict[str, Any] = {}
+
+    def _stub_fetch_video(
+        path: str,
+        *,
+        sampling_fps: float,
+        window_range: list,
+        do_preprocess: bool,
+        preprocess_dtype: str,
+    ) -> tuple[object, list[int]]:
+        captured["path"] = path
+        captured["sampling_fps"] = sampling_fps
+        captured["window_range"] = window_range
+        captured["do_preprocess"] = do_preprocess
+        captured["preprocess_dtype"] = preprocess_dtype
+        return SimpleNamespace(shape=(8, 3, 16, 16)), [8]
+
+    monkeypatch.setattr(pe_mod, "fetch_video", _stub_fetch_video, raising=False)
+    monkeypatch.setattr(pe_mod, "make_metadata", lambda _frames, _wc: [SimpleNamespace()], raising=False)
+    monkeypatch.setattr(pe_mod, "get_frame_count", lambda _b: 100, raising=False)
+    monkeypatch.setattr(pe_mod, "WindowFrameInfo", _StubWindowFrameInfo, raising=False)
+    return captured
+
+
+def test_call_vllm_async_cpu_preprocess_when_config_preprocess_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``VllmAsyncConfig.preprocess=False`` -> CPU prep owns resize/rescale/normalize.
+
+    Mirrors the per-window vllm_async path where ``VllmPrepStage`` handles
+    preprocessing on CPU (``do_preprocess=True``, ``preprocess_dtype="float16"``)
+    so the plugin's ``mm_processor_kwargs`` can disable in-engine resize.
+    """
+    stage = _bare_vllm_async_stage(monkeypatch, preprocess=False)
+    captured = _capture_fetch_video_args(monkeypatch)
+
+    stage._call_vllm_async(b"fake-mp4", "describe")
+
+    assert captured["do_preprocess"] is True
+    assert captured["preprocess_dtype"] == "float16"
+
+
+def test_call_vllm_async_skips_cpu_preprocess_when_config_preprocess_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``VllmAsyncConfig.preprocess=True`` -> vLLM owns resize/rescale/normalize.
+
+    When the user opts the plugin's processor into preprocessing, CPU prep
+    passes raw uint8 frames through unchanged.
+    """
+    stage = _bare_vllm_async_stage(monkeypatch, preprocess=True)
+    captured = _capture_fetch_video_args(monkeypatch)
+
+    stage._call_vllm_async(b"fake-mp4", "describe")
+
+    assert captured["do_preprocess"] is False
+    assert captured["preprocess_dtype"] == "uint8"
+
+
+def test_call_vllm_async_whole_clip_window_uses_inclusive_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whole-clip window passes ``end=total_native`` (not ``total_native - 1``).
+
+    ``read_video_cpu`` treats ``WindowFrameInfo.end`` as EXCLUSIVE; the
+    sync Qwen backend in the same module already passes ``total_frames``
+    unchanged.  ``total_native - 1`` would silently drop the last frame.
+    """
+    stage = _bare_vllm_async_stage(monkeypatch, preprocess=False)
+    captured = _capture_fetch_video_args(monkeypatch)
+
+    stage._call_vllm_async(b"fake-mp4", "describe")
+
+    window_range = captured["window_range"]
+    assert len(window_range) == 1
+    assert window_range[0].start == 0
+    assert window_range[0].end == 100, "whole-clip window must include the final frame"
+
+
+def test_generate_vllm_async_caption_invokes_plugin_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_generate_vllm_async_caption`` must route output through ``plugin.decode``.
+
+    Bypassing decode (e.g. reading ``.outputs[0].text`` directly) leaks
+    model-specific artefacts: Qwen3-VL emits ``<think>...</think>`` wrappers
+    and Cosmos-Reason1 wraps its answer in ``<answer>``.  The per-window
+    path and the sync path both go through ``plugin.decode``.
+    """
+    stage = _bare_vllm_async_stage(monkeypatch, preprocess=False)
+
+    decode_calls: list[Any] = []
+
+    def _decode_stub(vllm_output: Any) -> str:  # noqa: ANN401  # mirrors VllmPlugin.decode signature
+        decode_calls.append(vllm_output)
+        return "DECODED-CAPTION"
+
+    stage._vllm_async_plugin = SimpleNamespace(decode=_decode_stub)
+
+    final_output = SimpleNamespace(
+        outputs=[SimpleNamespace(text="raw <think>noise</think> answer", finish_reason="stop")]
+    )
+
+    async def _fake_generate(*, prompt: Any, sampling_params: Any, request_id: str) -> Any:  # noqa: ANN401
+        del prompt, sampling_params, request_id
+        yield final_output
+
+    stage._vllm_async_engine = SimpleNamespace(generate=_fake_generate)
+
+    import asyncio  # noqa: PLC0415  -- only this test needs asyncio.run
+
+    result = asyncio.run(stage._generate_vllm_async_caption({"prompt": "p"}, request_id="req-0"))
+
+    assert result == "DECODED-CAPTION"
+    assert len(decode_calls) == 1
+    assert decode_calls[0] is final_output
