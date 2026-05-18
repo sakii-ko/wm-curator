@@ -87,6 +87,7 @@ from cosmos_curator.core.utils.misc.logging_utils import make_tagged_logger
 from cosmos_curator.core.utils.model import conda_utils
 from cosmos_curator.core.utils.pixi_runtime_envs import PixiRuntimeEnv
 from cosmos_curator.models.vllm_model_ids import get_vllm_model_id
+from cosmos_curator.pipelines.video.captioning.single_inference import SingleInferenceCaptionStage
 from cosmos_curator.pipelines.video.utils.data_model import (
     CaptionOutcome,
     Clip,
@@ -107,6 +108,7 @@ from cosmos_xenna.utils.gpu import get_gpu_ids_from_cuda_env_vars
 
 if TYPE_CHECKING:
     from transformers import AutoProcessor
+    from vllm import SamplingParams
     from vllm.v1.engine.async_llm import AsyncLLM
 
     from cosmos_curator.models.vllm_interface import VllmWindowResult
@@ -117,8 +119,11 @@ if conda_utils.is_running_in_env("unified"):
     from vllm.v1.engine.async_llm import AsyncLLM
     from vllm.v1.engine.exceptions import EngineDeadError
 
+    from cosmos_curator.core.utils.misc.memfd import buffer_as_memfd_path
+    from cosmos_curator.models.qwen_vl import QWEN_VARIANTS_NEED_RAW_FRAMES
     from cosmos_curator.models.vllm_interface import (
         _get_vllm_plugin,
+        make_model_inputs,
         vllm_caption_async,
     )
     from cosmos_curator.models.vllm_interface import (
@@ -130,6 +135,9 @@ if conda_utils.is_running_in_env("unified"):
         _get_windows_from_tasks,
         _normalize_vllm_result,
     )
+    from cosmos_curator.pipelines.video.utils.decoder_utils import get_frame_count
+    from cosmos_curator.pipelines.video.utils.vision_process import fetch_video, read_video_cpu
+    from cosmos_curator.pipelines.video.utils.windowing_types import WindowFrameInfo
 else:
 
     def freeze_gc_heap() -> None:  # type: ignore[misc]
@@ -275,7 +283,27 @@ def _vllm_async_collect_gpu_trace_attributes(stage: CuratorStage) -> dict[str, s
     return out
 
 
-class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[misc]
+@dataclasses.dataclass(frozen=True)
+class CaptionSingleOptions:
+    """Sampling overrides applied only by ``VllmAsyncCaptionStage.caption_single``.
+
+    All fields default to ``None`` so the in-process AsyncLLM engine
+    keeps the per-window batch path's ``SamplingParams`` derived from
+    ``serve_config.sampling_config``. ``sampling_fps`` falls back to
+    ``2.0`` (the historical per-event Qwen default) when ``None``.
+    """
+
+    sampling_fps: float | None = None
+    max_tokens: int | None = None
+
+
+# Module-level singleton used as the constructor default. Frozen
+# dataclasses are safe to share across instances; using a singleton
+# satisfies ruff B008 (no mutable function-call defaults).
+_DEFAULT_CAPTION_SINGLE_OPTIONS = CaptionSingleOptions()
+
+
+class VllmAsyncCaptionStage(SingleInferenceCaptionStage, ContinuousInterface):  # type: ignore[misc]
     """GPU stage that runs an in-process ``AsyncLLM`` engine for video captioning.
 
     The stage is a thin :class:`ContinuousInterface` shell:
@@ -300,8 +328,28 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
         stage2_caption: bool = False,
         stage2_prompt_text: str | None = None,
         keep_mp4: bool = False,
+        caption_single_options: CaptionSingleOptions = _DEFAULT_CAPTION_SINGLE_OPTIONS,
     ) -> None:
-        """Initialize stage with engine config."""
+        """Initialize stage with engine config.
+
+        Args:
+            serve_config: vLLM async-engine configuration.
+            model_name: Human-readable model identifier (used in logs).
+            max_concurrent_requests: ``asyncio.Semaphore`` ceiling for
+                ``engine.generate``. ``0`` selects mode-based default.
+            stage_batch_size: Tasks per ``process_data`` call. ``0``
+                selects mode-based default.
+            log_stats: Record stage performance statistics on tasks.
+            verbose: Verbose vLLM and stage logging.
+            stage2_caption: Enable stage-2 caption refinement.
+            stage2_prompt_text: Override prompt for stage-2 refinement.
+            keep_mp4: Retain ``window.mp4_bytes`` after captioning.
+            caption_single_options: Sampling overrides applied only by
+                :meth:`caption_single`. The default empty struct keeps
+                the per-window batch path's ``SamplingParams`` and the
+                historical 2.0 fps decode fallback.
+
+        """
         super().__init__()
         self._model_name = model_name
         # Sync's VllmPrepStage stores per-window LLM inputs under
@@ -330,6 +378,16 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
         self._plugin: VllmPlugin | None = None
         self._processor: AutoProcessor | None = None
         self._gpu_trace_attributes: dict[str, str | int | float | bool] = {}
+        # caption_single state (one-shot consumers like PerEventCaptionStage).
+        # The dataclass is the public surface; helpers read the unpacked
+        # private fields so per-call code paths stay readable.
+        self._caption_single_sampling_fps: float = (
+            caption_single_options.sampling_fps if caption_single_options.sampling_fps is not None else 2.0
+        )
+        self._caption_single_max_tokens = caption_single_options.max_tokens
+        self._caption_single_sampling_params: SamplingParams | None = None
+        self._caption_single_runner: asyncio.Runner | None = None
+        self._caption_single_request_counter: int = 0
 
     def __getstate__(self) -> dict[str, Any]:
         """Exclude non-serializable and derived objects from pickling."""
@@ -340,6 +398,8 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
         state.pop("_sampling_params", None)  # rebuilt in stage_setup from _serve_config
         state.pop("_processor", None)  # loaded in stage_setup
         state.pop("_plugin", None)  # resolved in stage_setup
+        state.pop("_caption_single_sampling_params", None)  # rebuilt in stage_setup
+        state.pop("_caption_single_runner", None)  # asyncio.Runner not picklable
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -350,6 +410,9 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
         self._request_counter = itertools.count()
         self._processor = None  # loaded in stage_setup
         self._plugin = None  # resolved in stage_setup
+        self._caption_single_sampling_params = None  # built in stage_setup
+        self._caption_single_runner = None  # built lazily in caption_single
+        self._caption_single_request_counter = getattr(self, "_caption_single_request_counter", 0)
         if not hasattr(self, "_gpu_trace_attributes"):
             self._gpu_trace_attributes = {}
 
@@ -521,6 +584,13 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
 
         self._sampling_params = build_sampling_params(self._serve_config.sampling_config)
         self._logger.info("SamplingParams: {}", self._sampling_params)
+
+        # Build a separate SamplingParams instance for caption_single so
+        # per-call overrides (max_tokens) don't pollute the per-window
+        # batch params used by run_continuous.
+        self._caption_single_sampling_params = build_sampling_params(self._serve_config.sampling_config)
+        if self._caption_single_max_tokens is not None:
+            self._caption_single_sampling_params.max_tokens = int(self._caption_single_max_tokens)
 
         self._logger.info(
             "Engine config: prefix_caching={} mm_cache_type={} chunked_prefill={}",
@@ -756,6 +826,133 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
                 # the same downstream contract so preview / persistence
                 # stages can still consume the clip bytes.
                 _free_vllm_inputs(windows, self._input_key, keep_mp4=self._keep_mp4)
+
+    def _decode_video_for_caption_single(self, video_bytes: bytes) -> tuple[Any, dict[str, Any]]:
+        """Decode whole-clip mp4 bytes into a frame tensor + HF video metadata.
+
+        Mirrors :meth:`VllmCaptionStage._decode_video_for_caption_single`:
+        Qwen3-VL needs raw uint8 TCHW frames + HF's video processor;
+        everything else uses the 28-aligned float16 ``fetch_video`` path.
+        """
+        total_frames = get_frame_count(video_bytes)
+        if total_frames <= 0:
+            msg = "video bytes contain 0 decodable frames"
+            raise RuntimeError(msg)
+        sampling_fps = self._caption_single_sampling_fps
+        # ``WindowFrameInfo.end`` is inclusive (see windowing_types.py and
+        # ``windowing_utils.make_windows_for_video``); ``end=total_frames``
+        # would request a frame at out-of-range index ``total_frames``.
+        window_range = [WindowFrameInfo(start=0, end=total_frames - 1)]
+        needs_raw_frames = self._serve_config.model_variant in QWEN_VARIANTS_NEED_RAW_FRAMES
+        with buffer_as_memfd_path(video_bytes, name="vllm-async-caption-single") as path:
+            if needs_raw_frames:
+                video_tensor, _frame_counts = read_video_cpu(
+                    path,
+                    sampling_fps,
+                    0,
+                    window_range,
+                )
+            else:
+                video_tensor, _frame_counts = fetch_video(
+                    path,
+                    sampling_fps=sampling_fps,
+                    window_range=window_range,
+                    do_preprocess=True,
+                    preprocess_dtype="float16",
+                )
+
+        num_sampled_frames = int(video_tensor.shape[0]) if video_tensor.ndim >= 1 else 0
+        duration_s = float(num_sampled_frames) / sampling_fps if sampling_fps > 0 else 0.0
+        video_metadata: dict[str, Any] = {
+            "total_num_frames": num_sampled_frames,
+            "fps": float(sampling_fps),
+            "duration": duration_s,
+            "video_backend": "opencv_dynamic",
+            "frames_indices": list(range(num_sampled_frames)),
+            "do_sample_frames": False,
+        }
+        return video_tensor, video_metadata
+
+    async def _generate_caption_single_async(
+        self,
+        prompt_payload: dict[str, Any],
+        request_id: str,
+    ) -> str:
+        """Drive a single ``engine.generate`` async iterator to completion.
+
+        Lighter than :class:`_AsyncCaptioner._drive_request` (no traced
+        span, no token-count plumbing, no stage-2 refinement, no retry)
+        because per-event callers don't need the per-window observability.
+        """
+        engine = self._engine
+        params = self._caption_single_sampling_params
+        if engine is None or params is None:
+            msg = "vllm_async engine not initialised; call stage_setup first."
+            raise RuntimeError(msg)
+        final_output = None
+        async for output in engine.generate(
+            prompt=prompt_payload,  # type: ignore[arg-type]
+            sampling_params=params,
+            request_id=request_id,
+        ):
+            final_output = output
+        if final_output is None or not final_output.outputs:
+            msg = "AsyncLLM engine returned no outputs for caption_single."
+            raise RuntimeError(msg)
+        text = final_output.outputs[0].text
+        if not text or not str(text).strip():
+            finish = final_output.outputs[0].finish_reason
+            msg = f"AsyncLLM engine returned empty caption (finish_reason={finish!r})"
+            raise RuntimeError(msg)
+        return str(text).strip()
+
+    def caption_single(self, prompt: str, video_bytes: bytes) -> str:
+        """Implement :class:`SingleInferenceCaptionStage` for one-shot consumers.
+
+        Synchronous wrapper around the async engine: decodes the clip,
+        builds a per-window LLM input dict via the same plugin path as
+        the per-window batch, and drives one ``engine.generate`` call to
+        completion via a lazily-created ``asyncio.Runner``. Raises
+        ``RuntimeError`` on engine / decode failures or empty responses;
+        callers (typically :class:`PerEventCaptionStage`) catch and
+        record on ``clip.errors``.
+
+        Note: continuous-mode state (``_register_task`` / trackers /
+        in-flight semaphore) is not used here. ``caption_single`` is
+        only safe to call when the per-window pipeline is *not*
+        actively driving ``run_continuous`` on the same engine; per-event
+        consumers always own their own actor instance.
+        """
+        if self._engine is None:
+            msg = "vllm_async engine not initialised; call stage_setup before caption_single."
+            raise RuntimeError(msg)
+        if self._processor is None:
+            msg = "Processor not initialised; call stage_setup before caption_single."
+            raise RuntimeError(msg)
+        if self._caption_single_sampling_params is None:
+            msg = "caption_single sampling params not built; call stage_setup first."
+            raise RuntimeError(msg)
+        if self._caption_single_runner is None:
+            self._caption_single_runner = asyncio.Runner()
+
+        video_tensor, video_metadata = self._decode_video_for_caption_single(video_bytes)
+        vllm_config = self._serve_config.to_vllm_config()
+        llm_inputs = make_model_inputs(
+            videos=[video_tensor],
+            metadata=[video_metadata],
+            config=vllm_config,
+            processor=self._processor,
+            prompt=prompt,
+        )
+        if not llm_inputs:
+            msg = "make_model_inputs produced no inputs for caption_single."
+            raise RuntimeError(msg)
+
+        self._caption_single_request_counter += 1
+        request_id = f"caption-single-{self._caption_single_request_counter}"
+        return self._caption_single_runner.run(
+            self._generate_caption_single_async(llm_inputs[0], request_id),
+        )
 
     def _register_task(
         self,
@@ -1020,5 +1217,8 @@ class VllmAsyncCaptionStage(CuratorStage, ContinuousInterface):  # type: ignore[
                 self._engine = None
             self._processor = None
             self._plugin = None
+            if self._caption_single_runner is not None:
+                self._caption_single_runner.close()
+                self._caption_single_runner = None
         finally:
             gpu_stage_cleanup(self.__class__.__name__)

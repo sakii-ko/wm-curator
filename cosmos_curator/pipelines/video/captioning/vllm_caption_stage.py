@@ -28,6 +28,7 @@ the tasks must have these attributes/methods:
 """
 
 import contextlib
+import dataclasses
 import gc
 import logging
 import time
@@ -51,6 +52,7 @@ from cosmos_curator.models.prompts import get_prompt, get_stage2_prompt
 from cosmos_curator.models.vllm_model_ids import get_vllm_model_id
 from cosmos_curator.models.vllm_sentinels import VLLM_UNKNOWN_CAPTION
 from cosmos_curator.pipelines.video.captioning.caption_quality_flags import apply_caption_quality_flags
+from cosmos_curator.pipelines.video.captioning.single_inference import SingleInferenceCaptionStage
 from cosmos_curator.pipelines.video.utils import windowing_utils
 from cosmos_curator.pipelines.video.utils.data_model import (
     CaptionOutcome,
@@ -68,6 +70,8 @@ if conda_utils.is_running_in_env("unified"):
         from transformers import AutoProcessor
         from vllm import LLM, SamplingParams
 
+    from cosmos_curator.core.utils.misc.memfd import buffer_as_memfd_path
+    from cosmos_curator.models.qwen_vl import QWEN_VARIANTS_NEED_RAW_FRAMES
     from cosmos_curator.models.vllm_interface import (
         VllmWindowResult,
         auto_processor,
@@ -77,6 +81,9 @@ if conda_utils.is_running_in_env("unified"):
         vllm_caption,
         vllm_model,
     )
+    from cosmos_curator.pipelines.video.utils.decoder_utils import get_frame_count
+    from cosmos_curator.pipelines.video.utils.vision_process import fetch_video, read_video_cpu
+    from cosmos_curator.pipelines.video.utils.windowing_types import WindowFrameInfo
 
     vllm_logger = logging.getLogger("vllm")
     vllm_logger.setLevel(logging.ERROR)  # Suppress warnings and info from vLLM
@@ -92,6 +99,30 @@ T = TypeVar("T", bound=PipelineTask)
 # above ~0.95, this threshold itself becomes the looser of the two and you can
 # safely leave it; bump it only if you see false positives from healthy GPUs.
 _VLLM_REQUIRED_FREE_FRACTION = 0.98
+
+
+@dataclasses.dataclass(frozen=True)
+class CaptionSingleOptions:
+    """Sampling overrides applied only by ``VllmCaptionStage.caption_single``.
+
+    All fields default to ``None``; ``None`` means "keep the value derived
+    from ``vllm_config.sampling_config``" so the per-window batch path is
+    untouched. One-shot consumers (typically ``PerEventCaptionStage``)
+    pass overrides via this struct so the per-window
+    ``self._sampling_params`` is never mutated.
+    """
+
+    sampling_fps: float | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens: int | None = None
+
+
+# Module-level singleton used as the constructor default. Frozen
+# dataclasses are safe to share across instances; using a singleton
+# satisfies ruff B008 (no mutable function-call defaults).
+_DEFAULT_CAPTION_SINGLE_OPTIONS = CaptionSingleOptions()
 
 
 def _get_windows_from_tasks[T: PipelineTask](tasks: list[T]) -> tuple[list[Window], list[str]]:
@@ -424,7 +455,7 @@ class VllmPrepStage(CuratorStage):
         return tasks
 
 
-class VllmCaptionStage(CuratorStage):
+class VllmCaptionStage(SingleInferenceCaptionStage):
     """Stage that prepares video windows for vLLM multimodal model processing.
 
     This stage handles the preparation of video windows and prompts for vLLM-based models.
@@ -441,6 +472,7 @@ class VllmCaptionStage(CuratorStage):
         log_stats: bool = False,
         use_filter_windows: bool = False,
         caption_quality_flags_enabled: bool = True,
+        caption_single_options: CaptionSingleOptions = _DEFAULT_CAPTION_SINGLE_OPTIONS,
     ) -> None:
         """Initialize the vLLM caption stage.
 
@@ -457,6 +489,13 @@ class VllmCaptionStage(CuratorStage):
                 of clip.windows. Use this when paired with VllmPrepStage(use_filter_windows=True).
             caption_quality_flags_enabled: Whether to annotate subject-caption windows
                 with heuristic caption quality flags.
+            caption_single_options: Sampling overrides applied only by
+                :meth:`caption_single`. The default empty struct keeps
+                the per-window batch path's ``SamplingParams`` and the
+                historical 2.0 fps decode fallback. One-shot consumers
+                (e.g. ``PerEventCaptionStage``) pass populated fields to
+                widen the per-event sampling without disturbing the
+                per-window defaults.
 
         """
         super().__init__()
@@ -475,6 +514,15 @@ class VllmCaptionStage(CuratorStage):
         self._inflight_batching = inflight_batching
         self._use_filter_windows = use_filter_windows
         self._caption_quality_flags_enabled = caption_quality_flags_enabled
+        # caption_single overrides — unpacked to private fields so helper
+        # methods can read them without ``self._caption_single_options.<field>``
+        # bookkeeping. The dataclass is just a tidy constructor surface.
+        self._caption_single_sampling_fps = caption_single_options.sampling_fps
+        self._caption_single_temperature = caption_single_options.temperature
+        self._caption_single_top_p = caption_single_options.top_p
+        self._caption_single_top_k = caption_single_options.top_k
+        self._caption_single_max_tokens = caption_single_options.max_tokens
+        self._caption_single_sampling_params: SamplingParams | None = None
 
     def stage_setup_on_node(self) -> None:
         """Set up on a node by copying model weights if configured.
@@ -526,6 +574,7 @@ class VllmCaptionStage(CuratorStage):
             )
             self._llm = vllm_model(self._vllm_config)
         self._sampling_params = sampling_params(self._vllm_config.sampling_config)
+        self._caption_single_sampling_params = self._build_caption_single_sampling_params()
         self._processor = auto_processor(self._vllm_config)
         gpu_stage_startup(self.__class__.__name__, self.resources.gpus, pre_setup=False)
 
@@ -668,6 +717,125 @@ class VllmCaptionStage(CuratorStage):
 
         window_groups = [clip.windows for task in tasks for clip in get_video_from_task(task).clips if clip.windows]
         apply_caption_quality_flags(window_groups, self._vllm_config.model_variant)
+
+    def _build_caption_single_sampling_params(self) -> "SamplingParams":
+        """Return a fresh ``SamplingParams`` for ``caption_single`` with overrides applied.
+
+        Uses ``vllm_config.sampling_config`` as the base and clones the
+        result so the per-window ``self._sampling_params`` is unaffected
+        by per-call overrides. ``None`` overrides leave the base value
+        untouched.
+        """
+        base = sampling_params(self._vllm_config.sampling_config)
+        if self._caption_single_temperature is not None:
+            base.temperature = float(self._caption_single_temperature)
+        if self._caption_single_top_p is not None:
+            base.top_p = float(self._caption_single_top_p)
+        if self._caption_single_top_k is not None:
+            base.top_k = int(self._caption_single_top_k)
+        if self._caption_single_max_tokens is not None:
+            base.max_tokens = int(self._caption_single_max_tokens)
+        return base
+
+    def _decode_video_for_caption_single(self, video_bytes: bytes) -> tuple[Any, dict[str, Any]]:
+        """Decode whole-clip mp4 bytes into a frame tensor + HF video metadata.
+
+        Branches on :data:`QWEN_VARIANTS_NEED_RAW_FRAMES`: Qwen3-VL needs
+        raw uint8 TCHW frames + HF's own video processor; everything
+        else uses the 28-aligned float16 ``fetch_video`` path.
+        """
+        total_frames = get_frame_count(video_bytes)
+        if total_frames <= 0:
+            msg = "video bytes contain 0 decodable frames"
+            raise RuntimeError(msg)
+        # VllmConfig has no window_config — the per-window pipeline passes
+        # WindowConfig separately to VllmPrepStage. caption_single defaults to
+        # the same coarse fps as the historical per-event Qwen path (2.0); per-
+        # event callers usually override via ``caption_single_options.sampling_fps``.
+        sampling_fps = self._caption_single_sampling_fps if self._caption_single_sampling_fps is not None else 2.0
+        # ``WindowFrameInfo.end`` is inclusive (see windowing_types.py and
+        # ``windowing_utils.make_windows_for_video``); ``end=total_frames``
+        # would request a frame at out-of-range index ``total_frames``.
+        window_range = [WindowFrameInfo(start=0, end=total_frames - 1)]
+        needs_raw_frames = self._vllm_config.model_variant in QWEN_VARIANTS_NEED_RAW_FRAMES
+        with buffer_as_memfd_path(video_bytes, name="vllm-caption-single") as path:
+            if needs_raw_frames:
+                video_tensor, _frame_counts = read_video_cpu(
+                    path,
+                    sampling_fps,
+                    0,
+                    window_range,
+                )
+            else:
+                video_tensor, _frame_counts = fetch_video(
+                    path,
+                    sampling_fps=sampling_fps,
+                    window_range=window_range,
+                    do_preprocess=True,
+                    preprocess_dtype="float16",
+                )
+
+        num_sampled_frames = int(video_tensor.shape[0]) if video_tensor.ndim >= 1 else 0
+        duration_s = float(num_sampled_frames) / sampling_fps if sampling_fps > 0 else 0.0
+        # Qwen3-VL requires HF-style video metadata; Qwen2.5-VL ignores it.
+        # We pre-sample here so the processor skips its own sampling step.
+        video_metadata: dict[str, Any] = {
+            "total_num_frames": num_sampled_frames,
+            "fps": float(sampling_fps),
+            "duration": duration_s,
+            "video_backend": "opencv_dynamic",
+            "frames_indices": list(range(num_sampled_frames)),
+            "do_sample_frames": False,
+        }
+        return video_tensor, video_metadata
+
+    def caption_single(self, prompt: str, video_bytes: bytes) -> str:
+        """Implement :class:`SingleInferenceCaptionStage` for one-shot consumers.
+
+        Decodes ``video_bytes`` once, builds a single ``llm_input`` via
+        the same plugin path as the per-window batch, and invokes the
+        already-initialised ``self._llm`` engine. Sampling overrides
+        configured at construction time (temperature/top_p/top_k/
+        max_tokens) are applied via the cloned
+        ``_caption_single_sampling_params``; the per-window
+        ``_sampling_params`` is left intact.
+        """
+        if self._llm is None:
+            msg = "vLLM model not initialised; call stage_setup before caption_single."
+            raise RuntimeError(msg)
+        if self._processor is None:
+            msg = "Processor not initialised; call stage_setup before caption_single."
+            raise RuntimeError(msg)
+        if self._caption_single_sampling_params is None:
+            msg = "caption_single sampling params not built; call stage_setup first."
+            raise RuntimeError(msg)
+
+        video_tensor, video_metadata = self._decode_video_for_caption_single(video_bytes)
+        llm_inputs = make_model_inputs(
+            videos=[video_tensor],
+            metadata=[video_metadata],
+            config=self._vllm_config,
+            processor=self._processor,
+            prompt=prompt,
+        )
+        if not llm_inputs:
+            msg = "make_model_inputs produced no inputs for caption_single."
+            raise RuntimeError(msg)
+
+        outputs = self._llm.generate(  # type: ignore[arg-type]
+            llm_inputs,
+            sampling_params=self._caption_single_sampling_params,
+            use_tqdm=False,
+        )
+        if not outputs or not outputs[0].outputs:
+            msg = "vLLM engine returned no outputs for caption_single."
+            raise RuntimeError(msg)
+        text = outputs[0].outputs[0].text
+        if not text or not str(text).strip():
+            finish_reason = outputs[0].outputs[0].finish_reason
+            msg = f"vLLM engine returned empty caption (finish_reason={finish_reason!r})"
+            raise RuntimeError(msg)
+        return str(text).strip()
 
     @nvtx.annotate("VllmCaptionStage")  # type: ignore[untyped-decorator]
     def process_data(self, tasks: list[T]) -> list[T]:  # noqa: C901

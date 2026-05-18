@@ -59,6 +59,9 @@ from cosmos_curator.pipelines.video.captioning.per_event_cli_args import (
     add_event_caption_args,
     resolve_event_caption_prompt,
 )
+from cosmos_curator.pipelines.video.captioning.per_event_inner_builder import (
+    build_event_caption_inner_stage,
+)
 from cosmos_curator.pipelines.video.captioning.vllm_async_config import (
     build_vllm_async_config,
 )
@@ -254,28 +257,14 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
             event_vllm_async_config = build_vllm_async_config(
                 args, sampling_config=event_sampling_config, prefix="event-caption-"
             )
-        caption_stage = PerEventCaptionStage(
-            backend=args.event_caption_backend,
-            prompt_text=resolve_event_caption_prompt(args),
-            qwen_variant=args.event_caption_qwen_variant,
-            qwen_sampling_fps=args.event_caption_qwen_sampling_fps,
-            qwen_fp8=args.event_caption_qwen_fp8,
-            qwen_temperature=args.event_caption_qwen_temperature,
-            qwen_top_p=args.event_caption_qwen_top_p,
-            qwen_top_k=args.event_caption_qwen_top_k,
-            gemini_model_name=args.event_caption_gemini_model_name,
-            gemini_video_fps=args.event_caption_gemini_fps,
-            gemini_media_resolution=args.event_caption_gemini_media_resolution,
-            gemini_thinking_budget=args.event_caption_gemini_thinking_budget,
-            gemini_max_output_tokens=args.event_caption_gemini_max_output_tokens,
-            openai_model_name=args.event_caption_openai_model_name,
-            openai_max_output_tokens=args.event_caption_openai_max_output_tokens,
-            openai_max_retries=args.event_caption_openai_max_retries,
-            openai_retry_delay_seconds=args.event_caption_openai_retry_delay_seconds,
-            openai_endpoint_key=args.event_caption_openai_endpoint_key,
+        event_inner = build_event_caption_inner_stage(
+            args,
             vllm_async_config=event_vllm_async_config,
-            vllm_async_sampling_fps=args.event_caption_vllm_async_sampling_fps,
-            vllm_async_max_output_tokens=args.event_caption_vllm_async_max_output_tokens,
+            verbose=args.verbose,
+        )
+        caption_stage = PerEventCaptionStage(
+            inner=event_inner,
+            prompt_text=resolve_event_caption_prompt(args),
             verbose=args.verbose,
         )
         # Pin remote-API backends (Gemini, OpenAI) to 1 worker x 1 slot so we

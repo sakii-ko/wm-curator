@@ -15,19 +15,20 @@
 
 """Tests for the per-event VLM caption stage.
 
-These tests intentionally avoid loading a real Qwen or Gemini backend; the
-``_call_qwen`` / ``_call_gemini`` methods are monkeypatched so the suite stays
+After the protocol refactor, ``PerEventCaptionStage`` no longer owns
+backend dispatch — it consumes a :class:`SingleInferenceCaptionStage` and
+delegates inference. The tests below stub the inner stage (no real
+Qwen / Gemini / OpenAI / vLLM engines are exercised) so the suite stays
 CPU-only and runs in the default cosmos-curator environment.
 """
 
 import json
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
-import pytest
-
-from cosmos_curator.core.utils.config import config as config_module
-from cosmos_curator.core.utils.config.config import ConfigFileData, Gemini
+from cosmos_curator.core.interfaces.model_interface import ModelInterface
+from cosmos_curator.core.interfaces.stage_interface import CuratorStageResource
 from cosmos_curator.core.utils.data.bytes_transport import bytes_to_numpy
 from cosmos_curator.pipelines.video.captioning.per_event_caption_stage import (
     PerEventCaptionStage,
@@ -35,7 +36,90 @@ from cosmos_curator.pipelines.video.captioning.per_event_caption_stage import (
     _build_prompt,
     _extract_events_payload,
 )
+from cosmos_curator.pipelines.video.captioning.single_inference import SingleInferenceCaptionStage
 from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask, Video
+
+# ---------------------------------------------------------------------------
+# A pluggable fake ``SingleInferenceCaptionStage`` used as the ``inner=`` arg.
+# ---------------------------------------------------------------------------
+
+
+class _FakeInner(SingleInferenceCaptionStage):
+    """Minimal ``SingleInferenceCaptionStage`` stand-in for use as ``inner=``.
+
+    Subclasses the real ABC so the forwarding-property tests on
+    ``PerEventCaptionStage`` (resources, conda_env_name, model,
+    secondary_name, stage_setup_on_node, stage_setup, destroy) hit the
+    same straight-through call paths the per-event stage takes in
+    production.
+
+    Records every ``caption_single`` call (prompt + bytes) so tests can
+    assert the per-event stage built the prompt correctly. Returns a
+    canned ``response`` by default; tests can override per call by
+    setting ``responses`` to a list (popped left-to-right) or
+    ``side_effect`` to an exception.
+    """
+
+    def __init__(  # noqa: PLR0913 - test scaffolding; arg surface mirrors a real CuratorStage
+        self,
+        *,
+        response: str = '{"events": [{"event_id": "e0"}]}',
+        responses: list[str] | None = None,
+        side_effect: BaseException | None = None,
+        resources: CuratorStageResource | None = None,
+        conda_env_name: str | None = "fake-env",
+        secondary: str = "fake-inner",
+        last_finish_reasons: list[str] | None = None,
+        last_usage_metadata: object | None = None,
+    ) -> None:
+        super().__init__()
+        self.response = response
+        self.responses = list(responses) if responses is not None else []
+        self.side_effect = side_effect
+        self._resources = resources or CuratorStageResource(cpus=2.0, gpus=0)
+        self._conda_env_name = conda_env_name
+        self._secondary = secondary
+        self.calls: list[tuple[str, bytes]] = []
+        self.setup_on_node_called = False
+        self.setup_called = False
+        self.destroy_called = False
+        self.last_finish_reasons: list[str] = last_finish_reasons or []
+        self.last_usage_metadata: object | None = last_usage_metadata
+
+    @property
+    def resources(self) -> CuratorStageResource:
+        return self._resources
+
+    @property
+    def conda_env_name(self) -> str | None:
+        return self._conda_env_name
+
+    @property
+    def model(self) -> ModelInterface | None:  # type: ignore[override]
+        return None
+
+    def secondary_name(self) -> str:
+        return self._secondary
+
+    def caption_single(self, prompt: str, video_bytes: bytes) -> str:
+        self.calls.append((prompt, video_bytes))
+        if self.side_effect is not None:
+            raise self.side_effect
+        if self.responses:
+            return self.responses.pop(0)
+        return self.response
+
+    def stage_setup_on_node(self) -> None:
+        super().stage_setup_on_node()
+        self.setup_on_node_called = True
+
+    def stage_setup(self) -> None:
+        super().stage_setup()
+        self.setup_called = True
+
+    def destroy(self) -> None:
+        self.destroy_called = True
+
 
 # ---------------------------------------------------------------------------
 # _extract_events_payload — JSON-shape robustness
@@ -108,7 +192,7 @@ def test_extract_events_payload_tolerates_unescaped_newlines() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_clip(span: tuple[float, float] = (0.0, 5.0), instances: list[dict] | None = None) -> Clip:
+def _make_clip(span: tuple[float, float] = (0.0, 5.0), instances: list[dict[str, Any]] | None = None) -> Clip:
     clip = Clip(uuid=uuid4(), source_video="src.mp4", span=span)
     clip.sam3_instances = instances
     return clip
@@ -177,53 +261,80 @@ def test_looks_truncated_empty_string() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PerEventCaptionStage construction-time validation
+# PerEventCaptionStage construction / lifecycle forwarding
 # ---------------------------------------------------------------------------
 
 
-def _patch_gemini_config(monkeypatch: pytest.MonkeyPatch, *, api_key: str | None = "key-xyz") -> None:
-    """Stub ``load_config`` so Gemini construction doesn't read ~/.config."""
-    config = ConfigFileData(gemini=Gemini(api_key=api_key)) if api_key is not None else ConfigFileData()
-    monkeypatch.setattr(config_module, "load_config", lambda: config)
+def test_per_event_construction_uses_default_prompt_when_unset() -> None:
+    """``prompt_text=None`` falls through to the bundled traffic-surveillance default."""
+    stage = PerEventCaptionStage(inner=_FakeInner())
+    # The packaged default contains the literal string from the resource file.
+    assert "events" in stage._prompt_template.lower()
 
 
-def test_invalid_backend_raises() -> None:
-    """An unknown backend name fails fast with ``ValueError``."""
-    with pytest.raises(ValueError, match="backend"):
-        PerEventCaptionStage(backend="bogus")  # type: ignore[arg-type]
+def test_per_event_construction_uses_explicit_prompt() -> None:
+    """A non-None ``prompt_text`` overrides the default."""
+    stage = PerEventCaptionStage(inner=_FakeInner(), prompt_text="MY CUSTOM PROMPT")
+    assert stage._prompt_template == "MY CUSTOM PROMPT"
 
 
-def test_invalid_media_resolution_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``gemini_media_resolution`` outside {low,medium,high} raises ``ValueError``."""
-    _patch_gemini_config(monkeypatch)
-    with pytest.raises(ValueError, match="media_resolution"):
-        PerEventCaptionStage(backend="gemini", gemini_media_resolution="ultra")
+def test_per_event_stage_setup_on_node_forwards_to_inner() -> None:
+    """``stage_setup_on_node`` runs the inner stage's per-node hook.
+
+    Load-bearing on multi-node Slurm where ``VllmCaptionStage`` copies
+    weights to local SSD in this hook only.
+    """
+    inner = _FakeInner()
+    stage = PerEventCaptionStage(inner=inner)
+    stage.stage_setup_on_node()
+    assert inner.setup_on_node_called is True
 
 
-def test_gemini_backend_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Constructing the gemini backend without a configured key raises ``RuntimeError``."""
-    _patch_gemini_config(monkeypatch, api_key=None)
-    with pytest.raises(RuntimeError, match="Gemini API key missing"):
-        PerEventCaptionStage(backend="gemini")
+def test_per_event_stage_setup_forwards_to_inner() -> None:
+    """``stage_setup`` initialises the inner stage."""
+    inner = _FakeInner()
+    stage = PerEventCaptionStage(inner=inner)
+    stage.stage_setup()
+    assert inner.setup_called is True
 
 
-def test_gemini_backend_loads_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the config contains a key, the gemini backend records it and stays CPU-only."""
-    _patch_gemini_config(monkeypatch)
-    stage = PerEventCaptionStage(backend="gemini")
-    assert stage._gemini_api_key == "key-xyz"
-    assert stage.resources.gpus == 0
-    assert stage.resources.cpus >= 1.0
-    assert stage._qwen_model is None
+def test_per_event_destroy_forwards_to_inner() -> None:
+    """``destroy`` shuts the inner stage down."""
+    inner = _FakeInner()
+    stage = PerEventCaptionStage(inner=inner)
+    stage.destroy()
+    assert inner.destroy_called is True
+
+
+def test_per_event_resources_forward_from_inner() -> None:
+    """``resources`` reflects the inner stage's footprint, not a hardcoded value."""
+    custom = CuratorStageResource(cpus=4.0, gpus=1)
+    inner = _FakeInner(resources=custom)
+    stage = PerEventCaptionStage(inner=inner)
+    assert stage.resources is custom
+
+
+def test_per_event_conda_env_forwards_from_inner() -> None:
+    """``conda_env_name`` propagates from the inner stage so weights download in the right env."""
+    inner = _FakeInner(conda_env_name="unified")
+    stage = PerEventCaptionStage(inner=inner)
+    assert stage.conda_env_name == "unified"
+
+
+def test_per_event_secondary_name_includes_inner() -> None:
+    """``secondary_name`` is namespaced with ``per_event:`` and the inner secondary."""
+    inner = _FakeInner(secondary="qwen3_vl_30b")
+    stage = PerEventCaptionStage(inner=inner)
+    assert stage.secondary_name() == "per_event:qwen3_vl_30b"
 
 
 # ---------------------------------------------------------------------------
-# _process_clip orchestration (Gemini-backed for cheap construction)
+# _process_clip orchestration via the fake inner.
 # ---------------------------------------------------------------------------
 
 
 def _make_clip_with_annotated(
-    instances: list[dict] | None,
+    instances: list[dict[str, Any]] | None,
     annotated_bytes: bytes | None,
 ) -> tuple[SplitPipeTask, Clip]:
     """Build a ``SplitPipeTask`` whose only clip optionally carries SAM3 outputs."""
@@ -237,38 +348,32 @@ def _make_clip_with_annotated(
     return task, clip
 
 
-def _gemini_stage(monkeypatch: pytest.MonkeyPatch) -> PerEventCaptionStage:
-    """Construct a Gemini-backed stage with a stubbed API key."""
-    _patch_gemini_config(monkeypatch)
-    return PerEventCaptionStage(backend="gemini", verbose=True)
-
-
-def _stub_call_gemini(stage: PerEventCaptionStage, monkeypatch: pytest.MonkeyPatch, response: str) -> None:
-    """Replace ``_call_gemini`` with a stub returning ``response`` regardless of args."""
-    monkeypatch.setattr(stage, "_call_gemini", lambda _mp4, _prompt, _uuid: response)
-
-
-def test_process_clip_skips_when_no_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_clip_skips_when_no_instances() -> None:
     """Clips with ``sam3_instances=None`` are skipped silently (no errors recorded)."""
-    stage = _gemini_stage(monkeypatch)
+    inner = _FakeInner()
+    stage = PerEventCaptionStage(inner=inner, verbose=True)
     _, clip = _make_clip_with_annotated(instances=None, annotated_bytes=b"\x00")
     stage._process_clip(clip)
     assert clip.sam3_events is None
     assert clip.errors == {}
+    assert inner.calls == []
 
 
-def test_process_clip_skips_on_empty_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_clip_skips_on_empty_instances() -> None:
     """Clips with an empty instances list are skipped silently."""
-    stage = _gemini_stage(monkeypatch)
+    inner = _FakeInner()
+    stage = PerEventCaptionStage(inner=inner, verbose=True)
     _, clip = _make_clip_with_annotated(instances=[], annotated_bytes=b"\x00")
     stage._process_clip(clip)
     assert clip.sam3_events is None
     assert clip.errors == {}
+    assert inner.calls == []
 
 
-def test_process_clip_records_missing_annotated_video(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_clip_records_missing_annotated_video() -> None:
     """Instances without an annotated video record ``missing_annotated_video`` and skip."""
-    stage = _gemini_stage(monkeypatch)
+    inner = _FakeInner()
+    stage = PerEventCaptionStage(inner=inner)
     _, clip = _make_clip_with_annotated(
         instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
         annotated_bytes=None,
@@ -276,75 +381,75 @@ def test_process_clip_records_missing_annotated_video(monkeypatch: pytest.Monkey
     stage._process_clip(clip)
     assert clip.errors["per_event_caption"] == "missing_annotated_video"
     assert clip.sam3_events is None
+    assert inner.calls == []
 
 
-def test_process_clip_populates_events_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_clip_populates_events_on_success() -> None:
     """A well-formed VLM response populates ``clip.sam3_events`` and records no errors."""
-    stage = _gemini_stage(monkeypatch)
+    inner = _FakeInner(response='{"events": [{"event_id": "event_000000", "category": "collision"}]}')
+    stage = PerEventCaptionStage(inner=inner)
     _, clip = _make_clip_with_annotated(
         instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
         annotated_bytes=b"fake-mp4-bytes",
-    )
-    _stub_call_gemini(
-        stage,
-        monkeypatch,
-        '{"events": [{"event_id": "event_000000", "category": "collision"}]}',
     )
     stage._process_clip(clip)
     assert clip.sam3_events == [{"event_id": "event_000000", "category": "collision"}]
     assert clip.errors == {}
+    # The annotated mp4 bytes were forwarded verbatim.
+    assert len(inner.calls) == 1
+    sent_prompt, sent_bytes = inner.calls[0]
+    assert sent_bytes == b"fake-mp4-bytes"
+    # Prompt includes the rendered SAM3 instances block (object_id 1).
+    assert '"object_id": 1' in sent_prompt
+    assert "CLIP DURATION" in sent_prompt
 
 
-def test_process_clip_records_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_clip_records_empty_response() -> None:
     """A complete-but-eventless response records ``empty_or_unparseable_response``."""
-    stage = _gemini_stage(monkeypatch)
+    # Valid JSON dict that ends in ``}`` (not truncated) but has no ``events`` key.
+    inner = _FakeInner(response='{"foo": "bar"}')
+    stage = PerEventCaptionStage(inner=inner)
     _, clip = _make_clip_with_annotated(
         instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
         annotated_bytes=b"fake-mp4-bytes",
     )
-    # Valid JSON dict that ends in ``}`` (not truncated) but has no ``events`` key.
-    _stub_call_gemini(stage, monkeypatch, '{"foo": "bar"}')
     stage._process_clip(clip)
     assert clip.sam3_events == []
     assert clip.errors["per_event_caption"] == "empty_or_unparseable_response"
 
 
-def test_process_clip_records_truncated_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_clip_records_truncated_response() -> None:
     """A response chopped mid-JSON records ``truncated_response``."""
-    stage = _gemini_stage(monkeypatch)
+    # No closing brace — trips ``_looks_truncated``.
+    inner = _FakeInner(response='{"events": [{"x":')
+    stage = PerEventCaptionStage(inner=inner)
     _, clip = _make_clip_with_annotated(
         instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
         annotated_bytes=b"fake-mp4-bytes",
     )
-    # No closing brace — trips ``_looks_truncated``.
-    _stub_call_gemini(stage, monkeypatch, '{"events": [{"x":')
     stage._process_clip(clip)
     assert clip.sam3_events == []
     assert clip.errors["per_event_caption"] == "truncated_response"
 
 
-def test_process_clip_records_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exceptions from the backend bubble into ``clip.errors`` as ``api_error``."""
-    stage = _gemini_stage(monkeypatch)
+def test_process_clip_records_api_error() -> None:
+    """Exceptions from the inner stage bubble into ``clip.errors`` as ``api_error``."""
+    inner = _FakeInner(side_effect=RuntimeError("kaboom"))
+    stage = PerEventCaptionStage(inner=inner)
     _, clip = _make_clip_with_annotated(
         instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
         annotated_bytes=b"fake-mp4-bytes",
     )
-
-    def _boom(_mp4: bytes, _prompt: str, _uuid: str) -> str:
-        msg = "kaboom"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(stage, "_call_gemini", _boom)
     stage._process_clip(clip)
     assert "api_error" in clip.errors["per_event_caption"]
     assert "kaboom" in clip.errors["per_event_caption"]
     assert clip.sam3_events is None
 
 
-def test_process_data_iterates_all_clips(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``process_data`` should call ``_process_clip`` once per clip across all tasks."""
-    stage = _gemini_stage(monkeypatch)
+def test_process_data_iterates_all_clips() -> None:
+    """``process_data`` should call ``caption_single`` once per clip across all tasks."""
+    inner = _FakeInner(responses=['{"events": [{"event_id": "e0"}]}', '{"events": [{"event_id": "e1"}]}'])
+    stage = PerEventCaptionStage(inner=inner)
     task, _ = _make_clip_with_annotated(
         instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
         annotated_bytes=b"fake-mp4-bytes",
@@ -354,182 +459,27 @@ def test_process_data_iterates_all_clips(monkeypatch: pytest.MonkeyPatch) -> Non
     second_clip.sam3_annotated_video = bytes_to_numpy(b"second")  # type: ignore[assignment]
     task.videos[0].clips.append(second_clip)
 
-    calls: list[str] = []
-
-    def _stub(_mp4: bytes, _prompt: str, uuid: str) -> str:
-        calls.append(uuid)
-        return '{"events": [{"event_id": "e0"}]}'
-
-    monkeypatch.setattr(stage, "_call_gemini", _stub)
     stage.process_data([task])
-    assert len(calls) == 2
-    for clip in task.videos[0].clips:
-        assert clip.sam3_events == [{"event_id": "e0"}]
+    assert len(inner.calls) == 2
+    expected_events = [[{"event_id": "e0"}], [{"event_id": "e1"}]]
+    assert [c.sam3_events for c in task.videos[0].clips] == expected_events
 
 
-# ---------------------------------------------------------------------------
-# PerEventCaptionStage._call_vllm_async parity with the unified prep contract
-# ---------------------------------------------------------------------------
-#
-# These tests build a minimally-initialised stage and inject stubs for the
-# heavy collaborators (``fetch_video``, ``make_metadata``, ``plugin``,
-# ``processor``, ``asyncio.Runner``).  This keeps the per-event vllm_async
-# path testable in the default CPU env without dragging in vLLM / torch.
+def test_per_event_stage_propagates_inner_diagnostics() -> None:
+    """``last_finish_reasons`` / ``last_usage_metadata`` from the inner stage are surfaced.
 
-
-from types import SimpleNamespace  # noqa: E402  (kept near the section it serves)
-from typing import Any  # noqa: E402
-
-from cosmos_curator.pipelines.video.captioning import per_event_caption_stage as pe_mod  # noqa: E402
-from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig  # noqa: E402
-
-
-def _bare_vllm_async_stage(monkeypatch: pytest.MonkeyPatch, *, preprocess: bool) -> PerEventCaptionStage:
-    """Build a ``PerEventCaptionStage`` and pre-populate its vllm_async state.
-
-    The constructor never reads the vllm_async backend when ``backend="gemini"``
-    is supplied (cheapest construction path), so we instantiate via Gemini
-    and then attach the vllm_async collaborators by hand.  This keeps the
-    test focused on ``_call_vllm_async`` -- the unit under test -- without
-    booting an AsyncLLM engine.
-
-    ``monkeypatch`` patches ``load_config`` so Gemini construction does not
-    touch ``~/.config``; the patch is local to the requesting test.
+    ``PerEventCaptionStage`` peeks at these duck-typed attrs on the
+    inner when logging an empty-events warning, so the contract is part
+    of the stage's behaviour even when the inner isn't a real
+    ``GeminiCaptionStage``.
     """
-    _patch_gemini_config(monkeypatch)
-    stage = PerEventCaptionStage(backend="gemini")  # type: ignore[arg-type]
-    stage._vllm_async_config = VllmAsyncConfig(model_variant="qwen", preprocess=preprocess)
-    stage._vllm_async_sampling_fps = 2.0
-    stage._vllm_async_sampling_params = SimpleNamespace(max_tokens=128)
-    stage._vllm_async_engine = SimpleNamespace()
-    stage._vllm_async_processor = SimpleNamespace()
-    stage._vllm_async_runner = SimpleNamespace(run=lambda _coro: "decoded-caption")
-    stage._vllm_async_plugin = SimpleNamespace(
-        make_llm_input=lambda prompt, _frames, _metadata, _processor, _vllm_cfg: {"prompt": prompt},
+    inner = _FakeInner(response='{"foo": "bar"}', last_finish_reasons=["MAX_TOKENS"], last_usage_metadata="usage-blob")
+    stage = PerEventCaptionStage(inner=inner)
+    _, clip = _make_clip_with_annotated(
+        instances=[{"object_id": 1, "prompt": "a car", "start_time_s": 0.0, "end_time_s": 1.0}],
+        annotated_bytes=b"fake-mp4-bytes",
     )
-    return stage
-
-
-def _capture_fetch_video_args(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Replace ``fetch_video`` (and friends) with stubs that record the calls.
-
-    The real symbols are imported inside ``per_event_caption_stage`` only
-    when the ``unified`` conda env is active (see the conditional import
-    block) -- in the default CPU env we inject stub references with
-    ``raising=False`` so the names resolve when ``_call_vllm_async`` runs.
-    ``WindowFrameInfo`` is also stubbed for the same reason.
-    """
-
-    class _StubWindowFrameInfo:
-        def __init__(self, *, start: int, end: int) -> None:
-            self.start = start
-            self.end = end
-
-    captured: dict[str, Any] = {}
-
-    def _stub_fetch_video(
-        path: str,
-        *,
-        sampling_fps: float,
-        window_range: list,
-        do_preprocess: bool,
-        preprocess_dtype: str,
-    ) -> tuple[object, list[int]]:
-        captured["path"] = path
-        captured["sampling_fps"] = sampling_fps
-        captured["window_range"] = window_range
-        captured["do_preprocess"] = do_preprocess
-        captured["preprocess_dtype"] = preprocess_dtype
-        return SimpleNamespace(shape=(8, 3, 16, 16)), [8]
-
-    monkeypatch.setattr(pe_mod, "fetch_video", _stub_fetch_video, raising=False)
-    monkeypatch.setattr(pe_mod, "make_metadata", lambda _frames, _wc: [SimpleNamespace()], raising=False)
-    monkeypatch.setattr(pe_mod, "get_frame_count", lambda _b: 100, raising=False)
-    monkeypatch.setattr(pe_mod, "WindowFrameInfo", _StubWindowFrameInfo, raising=False)
-    return captured
-
-
-def test_call_vllm_async_cpu_preprocess_when_config_preprocess_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``VllmAsyncConfig.preprocess=False`` -> CPU prep owns resize/rescale/normalize.
-
-    Mirrors the per-window vllm_async path where ``VllmPrepStage`` handles
-    preprocessing on CPU (``do_preprocess=True``, ``preprocess_dtype="float16"``)
-    so the plugin's ``mm_processor_kwargs`` can disable in-engine resize.
-    """
-    stage = _bare_vllm_async_stage(monkeypatch, preprocess=False)
-    captured = _capture_fetch_video_args(monkeypatch)
-
-    stage._call_vllm_async(b"fake-mp4", "describe")
-
-    assert captured["do_preprocess"] is True
-    assert captured["preprocess_dtype"] == "float16"
-
-
-def test_call_vllm_async_skips_cpu_preprocess_when_config_preprocess_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``VllmAsyncConfig.preprocess=True`` -> vLLM owns resize/rescale/normalize.
-
-    When the user opts the plugin's processor into preprocessing, CPU prep
-    passes raw uint8 frames through unchanged.
-    """
-    stage = _bare_vllm_async_stage(monkeypatch, preprocess=True)
-    captured = _capture_fetch_video_args(monkeypatch)
-
-    stage._call_vllm_async(b"fake-mp4", "describe")
-
-    assert captured["do_preprocess"] is False
-    assert captured["preprocess_dtype"] == "uint8"
-
-
-def test_call_vllm_async_whole_clip_window_uses_inclusive_end(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Whole-clip window passes ``end=total_native`` (not ``total_native - 1``).
-
-    ``read_video_cpu`` treats ``WindowFrameInfo.end`` as EXCLUSIVE; the
-    sync Qwen backend in the same module already passes ``total_frames``
-    unchanged.  ``total_native - 1`` would silently drop the last frame.
-    """
-    stage = _bare_vllm_async_stage(monkeypatch, preprocess=False)
-    captured = _capture_fetch_video_args(monkeypatch)
-
-    stage._call_vllm_async(b"fake-mp4", "describe")
-
-    window_range = captured["window_range"]
-    assert len(window_range) == 1
-    assert window_range[0].start == 0
-    assert window_range[0].end == 100, "whole-clip window must include the final frame"
-
-
-def test_generate_vllm_async_caption_invokes_plugin_decode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_generate_vllm_async_caption`` must route output through ``plugin.decode``.
-
-    Bypassing decode (e.g. reading ``.outputs[0].text`` directly) leaks
-    model-specific artefacts: Qwen3-VL emits ``<think>...</think>`` wrappers
-    and Cosmos-Reason1 wraps its answer in ``<answer>``.  The per-window
-    path and the sync path both go through ``plugin.decode``.
-    """
-    stage = _bare_vllm_async_stage(monkeypatch, preprocess=False)
-
-    decode_calls: list[Any] = []
-
-    def _decode_stub(vllm_output: Any) -> str:  # noqa: ANN401  # mirrors VllmPlugin.decode signature
-        decode_calls.append(vllm_output)
-        return "DECODED-CAPTION"
-
-    stage._vllm_async_plugin = SimpleNamespace(decode=_decode_stub)
-
-    final_output = SimpleNamespace(
-        outputs=[SimpleNamespace(text="raw <think>noise</think> answer", finish_reason="stop")]
-    )
-
-    async def _fake_generate(*, prompt: Any, sampling_params: Any, request_id: str) -> Any:  # noqa: ANN401
-        del prompt, sampling_params, request_id
-        yield final_output
-
-    stage._vllm_async_engine = SimpleNamespace(generate=_fake_generate)
-
-    import asyncio  # noqa: PLC0415  -- only this test needs asyncio.run
-
-    result = asyncio.run(stage._generate_vllm_async_caption({"prompt": "p"}, request_id="req-0"))
-
-    assert result == "DECODED-CAPTION"
-    assert len(decode_calls) == 1
-    assert decode_calls[0] is final_output
+    # Should not raise — the diagnostic accessors are exercised inside
+    # ``_log_empty_events`` via getattr.
+    stage._process_clip(clip)
+    assert clip.errors["per_event_caption"] == "empty_or_unparseable_response"

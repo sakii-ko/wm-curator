@@ -23,7 +23,7 @@ import nvtx  # type: ignore[import-untyped]
 import tenacity
 from loguru import logger
 
-from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageResource
+from cosmos_curator.core.interfaces.stage_interface import CuratorStageResource
 from cosmos_curator.core.utils.config.config import maybe_load_config
 from cosmos_curator.core.utils.infra.performance_utils import StageTimer
 from cosmos_curator.core.utils.model import conda_utils
@@ -34,6 +34,7 @@ from cosmos_curator.pipelines.common.api_caption_utils import (
     openai_error_result_from_exception,
 )
 from cosmos_curator.pipelines.common.api_stage_async_utils import destroy_api_clients
+from cosmos_curator.pipelines.video.captioning.single_inference import SingleInferenceCaptionStage
 from cosmos_curator.pipelines.video.utils.data_model import (
     CaptionOutcome,
     CaptionResult,
@@ -59,7 +60,7 @@ class _WindowCaptionTask:
     window_index: int
 
 
-class OpenAICaptionStage(CuratorStage):
+class OpenAICaptionStage(SingleInferenceCaptionStage):
     """Caption video windows using an OpenAI-compatible vision API.
 
     Sends each window's MP4 bytes as a base64-encoded video to a remote
@@ -302,6 +303,78 @@ class OpenAICaptionStage(CuratorStage):
         semaphore = asyncio.Semaphore(max(1, self._batch_size))
         await asyncio.gather(*(self._process_task_async(task, semaphore) for task in tasks))
         return tasks
+
+    async def _generate_single_caption_async(
+        self,
+        prompt: str,
+        video_bytes: bytes,
+    ) -> tuple[CaptionResult, str | None]:
+        """Run one chat-completions request without window-level book-keeping.
+
+        Mirrors :meth:`_generate_caption_with_error_detail_async` (same
+        retry policy, same response normalization) but takes the prompt
+        and video bytes directly instead of pulling them off a ``Window``.
+        Used by :meth:`caption_single` for one-shot consumers like
+        ``PerEventCaptionStage``.
+        """
+        client = self._async_client
+        if client is None:
+            msg = "OpenAI async client not initialized; call stage_setup before generating captions."
+            raise RuntimeError(msg)
+
+        video_b64 = base64.b64encode(bytes(video_bytes)).decode("utf-8")
+        content_parts: list[dict[str, Any]] = [
+            {
+                "type": "video_url",
+                "video_url": {"url": f"data:video/mp4;base64,{video_b64}"},
+            },
+            {"type": "text", "text": prompt},
+        ]
+        request_kwargs: dict[str, Any] = {
+            "model": self._model_name,
+            "messages": [{"role": "user", "content": content_parts}],
+            "max_tokens": self._max_output_tokens,
+        }
+
+        async def _call() -> object:
+            async for attempt in tenacity.AsyncRetrying(
+                stop=tenacity.stop_after_attempt(self._max_caption_retries),
+                wait=tenacity.wait_fixed(self._retry_delay_seconds),
+                retry=tenacity.retry_if_not_exception_type(
+                    (openai.AuthenticationError, openai.NotFoundError, openai.BadRequestError),
+                ),
+                reraise=True,
+            ):
+                with attempt:
+                    return await client.chat.completions.create(**request_kwargs)
+            msg = "OpenAI async retry loop exited without a result."
+            raise RuntimeError(msg)
+
+        try:
+            response = await _call()
+        except Exception as exc:  # noqa: BLE001
+            timeout_error = getattr(openai, "APITimeoutError", None)
+            return openai_error_result_from_exception(exc, timeout_error_type=timeout_error)
+        return normalize_openai_response_with_detail(response)
+
+    def caption_single(self, prompt: str, video_bytes: bytes) -> str:
+        """Implement :class:`SingleInferenceCaptionStage` for one-shot consumers.
+
+        Drives :meth:`_generate_single_caption_async` synchronously via
+        the runner created in :meth:`stage_setup`. Returns the response
+        text or raises ``RuntimeError`` on blocked / empty responses.
+        """
+        if self._runner is None:
+            msg = "OpenAI async runner not initialized; call stage_setup before generating captions."
+            raise RuntimeError(msg)
+        result, detail = self._runner.run(self._generate_single_caption_async(prompt, video_bytes))
+        if result.outcome == CaptionOutcome.BLOCKED:
+            msg = "OpenAI request blocked by content filter."
+            raise RuntimeError(msg)
+        if result.text is None:
+            msg = detail or f"OpenAI request produced no caption text (outcome={result.outcome.value!r})."
+            raise RuntimeError(msg)
+        return result.text
 
     def destroy(self) -> None:
         """Close the async runner and any provider clients."""
