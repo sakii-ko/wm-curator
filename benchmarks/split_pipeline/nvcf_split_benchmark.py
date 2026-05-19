@@ -36,6 +36,18 @@ class RetryableBenchmarkAttemptError(RuntimeError):
     """Retryable benchmark-attempt failure."""
 
 
+def _split_image(image: str) -> tuple[str, str]:
+    """Split a full image reference into repository and tag."""
+    if image != image.strip() or any(ch.isspace() for ch in image):
+        msg = f"image must not contain whitespace: {image!r}"
+        raise ValueError(msg)
+    image_repository, sep, image_tag = image.rpartition(":")
+    if not sep or not image_repository or not image_tag or "/" in image_tag:
+        msg = f"image must be a full image reference with tag: {image}"
+        raise ValueError(msg)
+    return image_repository, image_tag
+
+
 def _log_retryable_attempt_failure(retry_state: tenacity.RetryCallState) -> None:
     """Log retryable attempt failures before the next retry."""
     if retry_state.outcome is None:
@@ -471,10 +483,19 @@ def _parse_args() -> argparse.Namespace:
         default="PERF_NGC_NVCF_API_KEY",
         help="NGC API key environment variable.",
     )
+    parser.add_argument("--image", type=str, required=False, help="Full image reference to use for the benchmark.")
     parser.add_argument(
-        "--image-repository", type=str, required=True, help="Image repository to use for the benchmark."
+        "--image-repository",
+        type=str,
+        required=False,
+        help="Image repository to use for the benchmark. Prefer --image for new callers.",
     )
-    parser.add_argument("--image-tag", type=str, required=True, help="Image tag to use for the benchmark.")
+    parser.add_argument(
+        "--image-tag",
+        type=str,
+        required=False,
+        help="Image tag to use for the benchmark. Prefer --image for new callers.",
+    )
     parser.add_argument(
         "--metrics-endpoint", type=str, required=True, help="Metrics endpoint to use for the benchmark."
     )
@@ -571,7 +592,17 @@ def _parse_args() -> argparse.Namespace:
         default=2,
         help="Maximum number of benchmark attempts with unique output paths.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.image:
+        if args.image_repository or args.image_tag:
+            parser.error("--image cannot be used with --image-repository or --image-tag.")
+        try:
+            args.image_repository, args.image_tag = _split_image(args.image)
+        except ValueError as e:
+            parser.error(str(e))
+    elif not args.image_repository or not args.image_tag:
+        parser.error("either --image or both --image-repository and --image-tag are required.")
+    return args
 
 
 def main() -> None:

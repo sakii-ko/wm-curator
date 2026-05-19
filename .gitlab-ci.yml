@@ -110,11 +110,14 @@ variables:
       - "True"
       - "False"
   RUN_BENCHMARK:
-    description: "Allow scheduled or web nvcf_split_benchmark (same STAGING_TAG dotenv as promote; skopeo dev→perf then NVCF on perf)"
+    description: "Allow scheduled or web nvcf_split_benchmark; set NVCF_SPLIT_BENCHMARK_SOURCE_REF to benchmark a dev image"
     value: "False"
     options:
       - "True"
       - "False"
+  NVCF_SPLIT_BENCHMARK_SOURCE_REF:
+    description: "Optional source image ref in NGC_NVCF_ORG for nvcf_split_benchmark, e.g. dev-cosmos-curator:main_2026-05-19_4b3727d9"
+    value: ""
   NVCF_SPLIT_BENCHMARK_MODELS:
     description: "Comma-separated captioning model(s) for nvcf_split_benchmark"
     value: "qwen"
@@ -859,6 +862,8 @@ resolve_nvcf_staging_tag:
   tags:
     - build-runner
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RUN_BENCHMARK == "True" && $NVCF_SPLIT_BENCHMARK_SOURCE_REF != ""'
+      when: never
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $RUN_PROMOTE_TO_PROD == "True"'
     - if: '($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web") && $RUN_BENCHMARK == "True"'
     - when: never
@@ -926,7 +931,11 @@ nvcf_split_benchmark:
     - build-runner
   needs:
     - job: resolve_nvcf_staging_tag
+      artifacts: true
+      optional: true
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $NVCF_SPLIT_BENCHMARK_SOURCE_REF != ""'
+      when: never
     - if: '($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web") && $RUN_BENCHMARK == "True"'
     - when: never   # fallback: never run otherwise
   id_tokens:

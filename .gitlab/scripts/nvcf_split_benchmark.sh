@@ -16,23 +16,44 @@ filter_empty_items() {
   items=("${filtered[@]}")
 }
 
-# STAGING_IMAGE_NAME/STAGING_TAG from resolve job dotenv.
-if [[ -z "${STAGING_IMAGE_NAME:-}" ]]; then
-  echo "ERROR: STAGING_IMAGE_NAME is unset (needs resolve_nvcf_staging_tag dotenv)" >&2
-  exit 1
-fi
-if [[ -z "${STAGING_TAG:-}" ]]; then
-  echo "ERROR: STAGING_TAG is unset (needs resolve_nvcf_staging_tag dotenv or explicit setting)" >&2
-  exit 1
+if [[ -n "${NVCF_SPLIT_BENCHMARK_SOURCE_REF:-}" ]]; then
+  if [[ "${NVCF_SPLIT_BENCHMARK_SOURCE_REF}" == *"/"* ]]; then
+    echo "ERROR: NVCF_SPLIT_BENCHMARK_SOURCE_REF must be an image ref without registry/org, e.g. dev-cosmos-curator:tag" >&2
+    exit 1
+  fi
+  if [[ "${NVCF_SPLIT_BENCHMARK_SOURCE_REF}" != *":"* ||
+    "${NVCF_SPLIT_BENCHMARK_SOURCE_REF%%:*}" == "" ||
+    "${NVCF_SPLIT_BENCHMARK_SOURCE_REF#*:}" == "" ||
+    "${NVCF_SPLIT_BENCHMARK_SOURCE_REF}" == *"@"* ||
+    "${NVCF_SPLIT_BENCHMARK_SOURCE_REF}" =~ [[:space:]] ||
+    "${NVCF_SPLIT_BENCHMARK_SOURCE_REF#*:}" == *":"* ]]; then
+    echo "ERROR: NVCF_SPLIT_BENCHMARK_SOURCE_REF must be exactly image:tag" >&2
+    exit 1
+  fi
+  SOURCE_IMAGE="nvcr.io/${NGC_NVCF_ORG}/${NVCF_SPLIT_BENCHMARK_SOURCE_REF}"
+  PERF_IMAGE="nvcr.io/${PERF_NGC_NVCF_ORG_ID}/${NVCF_SPLIT_BENCHMARK_SOURCE_REF}"
+else
+  if [[ -z "${STAGING_IMAGE:-}" ]]; then
+    echo "ERROR: STAGING_IMAGE is unset (needs resolve_nvcf_staging_tag dotenv or NVCF_SPLIT_BENCHMARK_SOURCE_REF)" >&2
+    exit 1
+  fi
+  staging_prefix="nvcr.io/${NGC_NVCF_ORG}/"
+  if [[ "${STAGING_IMAGE}" != "${staging_prefix}"* ]]; then
+    echo "ERROR: STAGING_IMAGE must start with ${staging_prefix}" >&2
+    exit 1
+  fi
+  SOURCE_IMAGE="${STAGING_IMAGE}"
+  staging_ref="${STAGING_IMAGE#"${staging_prefix}"}"
+  PERF_IMAGE="nvcr.io/${PERF_NGC_NVCF_ORG_ID}/${staging_ref}"
 fi
 
-echo "Skopeo copy nvcr.io/${NGC_NVCF_ORG}/${STAGING_IMAGE_NAME}:${STAGING_TAG} -> nvcr.io/${PERF_NGC_NVCF_ORG_ID}/${STAGING_IMAGE_NAME}:${STAGING_TAG}"
+echo "Skopeo copy ${SOURCE_IMAGE} -> ${PERF_IMAGE}"
 skopeo copy --all \
   --src-creds "\$oauthtoken:${NGC_REGISTRY_KEY}" \
   --dest-creds "\$oauthtoken:${PERF_REGISTRY_KEY}" \
-  "docker://nvcr.io/${NGC_NVCF_ORG}/${STAGING_IMAGE_NAME}:${STAGING_TAG}" \
-  "docker://nvcr.io/${PERF_NGC_NVCF_ORG_ID}/${STAGING_IMAGE_NAME}:${STAGING_TAG}"
-echo "Published nvcr.io/${PERF_NGC_NVCF_ORG_ID}/${STAGING_IMAGE_NAME}:${STAGING_TAG}"
+  "docker://${SOURCE_IMAGE}" \
+  "docker://${PERF_IMAGE}"
+echo "Published ${PERF_IMAGE}"
 
 date_str=$(date +%Y%m%d%H%M%S)
 LIMIT_INPUT_VIDEOS="${NVCF_SPLIT_BENCHMARK_LIMIT:-5000}"
@@ -75,8 +96,7 @@ for captioning_algorithm in "${_captioning_algorithm_list[@]}"; do
           --captioning-algorithm "${captioning_algorithm}" \
           --funcid "${PERF_NVCF_FUNC_ID}" \
           --version "${PERF_NVCF_FUNC_VERSION}" \
-          --image-repository "nvcr.io/${PERF_NGC_NVCF_ORG_ID}/${STAGING_IMAGE_NAME}" \
-          --image-tag "${STAGING_TAG}" \
+          --image "${PERF_IMAGE}" \
           --metrics-endpoint "${PERF_NVCF_METRICS_ENDPOINT}" \
           --backend "${PERF_NVCF_BACKEND}" \
           --gpu "${PERF_NVCF_GPU}" \
