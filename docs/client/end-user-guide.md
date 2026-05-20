@@ -611,28 +611,41 @@ rclone copyto -P ./$COSMOS_CURATOR_IMAGE_NAME ${RCLONE_REMOTE}${SLURM_IMAGE_DIR}
 
 ### Launch on Slurm
 
-Figure out the following information for your Slurm cluster
-- your user name on the slurm cluster, in case it is different than your local machine
-- slurm account you are in
-- slurm partition to use
-- GRES, e.g. `gpu:4` or `gpu:8`
+From a cluster checkout, `slurm submit` uses the same container defaults as the interactive Slurm launcher: the default
+image path, workspace path, cache path, local config file, AWS credentials when present, and live source mount from the
+current directory when it looks like a Cosmos Curator repo.
 
-Launch!
+If your cluster has default account, partition, and GPU settings, launch with:
+
+```bash
+cosmos-curator slurm submit -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+```
+
+If your cluster requires an account, either pass `--account` or set `SBATCH_ACCOUNT` before submitting:
+
+```bash
+export SBATCH_ACCOUNT=my_slurm_account
+cosmos-curator slurm submit -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+```
+
+Add only the remaining cluster-specific scheduling options your site requires, for example partition, QoS, GRES, or node
+count:
 
 ```bash
 cosmos-curator slurm submit \
-  --login-node my-slurm-login-01.my-cluster.com \
-  --username my_username_on_slurm_cluster_if_different_than_local_username \
   --account my_slurm_account \
   --partition my_slurm_gpu_partition \
+  --qos my_slurm_qos \
   --gres=my_slurm_cluster_gres \
   --num-nodes 1 \
   --job-name "hello-world" \
-  --remote-files-path "${SLURM_USER_DIR}/job_info" \
-  --container-image "${SLURM_IMAGE_DIR}/${COSMOS_CURATOR_IMAGE_NAME}" \
-  --container-mounts "${CONTAINER_MOUNTS}" \
-    -- python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+  -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
 ```
+
+When submitting from outside the Slurm login host, add `--login-node` and `--username` as needed. Container mount paths
+are still validated on the cluster, so pass `--container-image`, `--workspace-path`, `--cache-path`, `--curator-path`,
+or `--extra-mounts` when your cluster uses non-default paths.
+If an explicit container mount uses the same destination as an auto-detected default, the explicit mount is used.
 
 The command above will print the slurm job id like below
 ```bash
@@ -671,19 +684,15 @@ You can optionally receive email notifications about your SLURM jobs using the `
 
 ```bash
 cosmos-curator slurm submit \
-  --login-node my-slurm-login-01.my-cluster.com \
-  --username my_username_on_slurm_cluster_if_different_than_local_username \
   --account my_slurm_account \
   --partition my_slurm_gpu_partition \
+  --qos my_slurm_qos \
   --gres=my_slurm_cluster_gres \
   --num-nodes 1 \
   --job-name "hello-world" \
-  --remote-files-path "${SLURM_USER_DIR}/job_info" \
-  --container-image "${SLURM_IMAGE_DIR}/${COSMOS_CURATOR_IMAGE_NAME}" \
-  --container-mounts "${CONTAINER_MOUNTS}" \
   --mail-user your.email@example.com \
   --mail-type END,FAIL \
-    -- python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+  -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
 ```
 
 **⚠️ Cluster-Specific Considerations:**
@@ -744,16 +753,13 @@ NUM_BATCHES=1000
 for i in $(seq 0 $((NUM_BATCHES - 1))); do
   MANIFEST=$(printf "s3://bucket/manifests/batch_%04d.json" "$i")
   cosmos-curator slurm submit \
-    --login-node my-slurm-login-01.my-cluster.com \
     --account my_slurm_account \
     --partition my_slurm_gpu_partition \
+    --qos my_slurm_qos \
     --gres=gpu:8 \
     --num-nodes 1 \
     --job-name "split-batch-${i}" \
-    --remote-files-path "${SLURM_USER_DIR}/job_info" \
-    --container-image "${SLURM_IMAGE_DIR}/${COSMOS_CURATOR_IMAGE_NAME}" \
-    --container-mounts "${CONTAINER_MOUNTS}" \
-      -- python -m cosmos_curator.pipelines.video.run_pipeline split \
+    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline split \
       --input-video-path s3://bucket/videos \
       --input-video-list-json-path "$MANIFEST" \
       --output-clip-path s3://bucket/output

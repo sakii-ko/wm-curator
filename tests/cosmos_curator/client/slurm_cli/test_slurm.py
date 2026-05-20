@@ -24,6 +24,7 @@ import invoke
 import pytest
 
 from cosmos_curator.client.slurm_cli.slurm import (
+    _SLURM_ACCOUNT_ENV_VAR,
     _START_RAY,
     ContainerSpec,
     MountSpec,
@@ -40,6 +41,16 @@ from cosmos_curator.scripts.onto_slurm import SlurmEnv
 
 MODULE_NAME = "cosmos_curator.client.slurm_cli.slurm"
 GRES = "gpu:8"
+
+
+def _create_repo(root: pathlib.Path) -> pathlib.Path:
+    repo = root / "repo"
+    (repo / "cosmos_curator" / "pipelines").mkdir(parents=True)
+    (repo / "tests" / "cosmos_curator").mkdir(parents=True)
+    (repo / "tools").mkdir()
+    for filename in ("pixi.toml", "pixi.lock", "pyproject.toml", "pytest.ini", ".coveragerc"):
+        (repo / filename).write_text("test")
+    return repo
 
 
 @pytest.mark.parametrize(
@@ -118,6 +129,276 @@ def test_render_sbatch_script(exclude_nodes: list[str] | None) -> None:
     assert f'--comment="{job_spec.comment}"' in sbatch_script
     assert "COSMOS_S3_PROFILE_PATH" in sbatch_script
     assert "COSMOS_AZURE_PROFILE_PATH" in sbatch_script
+
+
+def test_render_sbatch_script_with_qos() -> None:
+    """Test that QoS is rendered into the sbatch script when provided."""
+    job_spec = SlurmJobSpec(
+        login_node="login_node",
+        container=ContainerSpec(
+            squashfs_path="test_path", command=[str(_START_RAY), "arg1", "arg2"], mounts=[], environment=[]
+        ),
+        job_name="test_job",
+        account="test_account",
+        partition="test_partition",
+        username="test_user",
+        num_nodes=1,
+        gres=GRES,
+        qos="normal",
+        exclusive=True,
+        remote_job_path=pathlib.Path("/remote/files") / "test_job.20260611",
+        time_limit="01:00:00",
+        log_dir=pathlib.Path("/logs"),
+        stop_retries_after=100,
+    )
+    sbatch_script = _render_sbatch_script(job_spec)
+    assert "#SBATCH --qos=normal" in sbatch_script
+
+
+def test_submit_uses_launch_defaults_for_container_runtime(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The batch submit path should inherit the interactive launch container defaults."""
+    repo = _create_repo(tmp_path)
+    workspace = tmp_path / "workspace"
+    cache = tmp_path / "cache"
+    config = tmp_path / "config.yaml"
+    aws_creds = tmp_path / "aws_credentials"
+    config.write_text("config")
+    aws_creds.write_text("creds")
+
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv(_SLURM_ACCOUNT_ENV_VAR, raising=False)
+    monkeypatch.setenv("HOST_ONLY", "host-value")
+    monkeypatch.setenv("SLURM_JOB_ID", "outer-allocation")
+
+    with (
+        patch("cosmos_curator.client.slurm_cli.slurm_local.LOCAL_COSMOS_CURATOR_CONFIG_FILE", config),
+        patch("cosmos_curator.client.slurm_cli.slurm_local.LOCAL_AWS_CREDENTIALS_FILE", aws_creds),
+        patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit,
+    ):
+        submit_cli(
+            command=[
+                "pixi",
+                "run",
+                "--as-is",
+                "python",
+                "-m",
+                "cosmos_curator.pipelines.examples.hello_world_pipeline",
+            ],
+            workspace_path=workspace,
+            cache_path=cache,
+            remote_files_path=tmp_path / "job_files",
+            environment="EXTRA=value,HOST_ONLY",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    assert job_spec.login_node == "localhost"
+    assert job_spec.account is None
+    assert job_spec.partition is None
+    assert job_spec.container.squashfs_path == str(
+        pathlib.Path("~/container_images/cosmos-curator+1.0.0.sqsh").expanduser()
+    )
+    assert job_spec.container.command == [
+        "pixi",
+        "run",
+        str(_START_RAY),
+        "pixi",
+        "run",
+        "--as-is",
+        "python",
+        "-m",
+        "cosmos_curator.pipelines.examples.hello_world_pipeline",
+    ]
+
+    mount_values = [str(mount) for mount in job_spec.container.mounts]
+    assert f"{workspace.resolve()}:/config:rw" in mount_values
+    assert f"{cache.resolve()}:/cache:rw" in mount_values
+    assert f"{repo.resolve()}:/src/cosmos-curator:rw" in mount_values
+    assert f"{config}:/cosmos_curator/config/cosmos_curator.yaml:ro" in mount_values
+    assert f"{aws_creds}:/creds/s3_creds:ro" in mount_values
+
+    env_vars = dict(entry.split("=", 1) for entry in job_spec.container.environment)
+    assert env_vars["COSMOS_CURATOR_RAY_SLURM_JOB"] == "True"
+    assert env_vars["PIXI_CACHE_DIR"] == "/cache/rattler/cache"
+    assert env_vars["UV_CACHE_DIR"] == "/cache/rattler/cache/uv-cache"
+    assert env_vars["TORCH_HOME"] == "/cache/torch"
+    assert env_vars["TRITON_HOME"] == "/cache/triton"
+    assert env_vars["CONDA_OVERRIDE_CUDA"] == "13.0.2"
+    assert env_vars["EXTRA"] == "value"
+    assert env_vars["HOST_ONLY"] == "host-value"
+    assert "SLURM_JOB_ID" not in env_vars
+
+    sbatch_script = _render_sbatch_script(job_spec)
+    assert "#SBATCH -A" not in sbatch_script
+    assert "#SBATCH -p" not in sbatch_script
+    assert "bash -c" in sbatch_script
+    assert 'exec "$@"' in sbatch_script
+    assert "SLURM_PROCID" in sbatch_script
+    assert "SLURM_JOB_ID" in sbatch_script
+
+
+def test_submit_container_mounts_override_default_targets(tmp_path: pathlib.Path) -> None:
+    """User-specified mount targets should not duplicate auto-detected defaults."""
+    workspace = tmp_path / "workspace"
+    cache = tmp_path / "cache"
+    explicit_workspace = tmp_path / "explicit_workspace"
+    explicit_cache = tmp_path / "explicit_cache"
+
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            container_image="test_image",
+            workspace_path=workspace,
+            cache_path=cache,
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+            container_mounts=f"{explicit_workspace}:/config:ro,{explicit_cache}:/cache:rw",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    mounts_by_destination = {mount.dest: mount for mount in job_spec.container.mounts}
+    assert [mount.dest for mount in job_spec.container.mounts].count("/config") == 1
+    assert [mount.dest for mount in job_spec.container.mounts].count("/cache") == 1
+    assert mounts_by_destination["/config"] == MountSpec(source=str(explicit_workspace), dest="/config", mode="ro")
+    assert mounts_by_destination["/cache"] == MountSpec(source=str(explicit_cache), dest="/cache", mode="rw")
+
+
+def test_submit_uses_sbatch_account_environment_default(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use the standard sbatch account environment variable without making account required."""
+    monkeypatch.setenv(_SLURM_ACCOUNT_ENV_VAR, "env_account")
+
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            container_image="test_image",
+            workspace_path=tmp_path / "workspace",
+            cache_path=tmp_path / "cache",
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    assert job_spec.account == "env_account"
+    assert "#SBATCH -A env_account" in _render_sbatch_script(job_spec)
+
+
+def test_submit_account_option_overrides_environment_default(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit account should win over the environment default."""
+    monkeypatch.setenv(_SLURM_ACCOUNT_ENV_VAR, "env_account")
+
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            account="cli_account",
+            container_image="test_image",
+            workspace_path=tmp_path / "workspace",
+            cache_path=tmp_path / "cache",
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    assert job_spec.account == "cli_account"
+    assert "#SBATCH -A cli_account" in _render_sbatch_script(job_spec)
+
+
+def test_submit_account_option_trims_whitespace(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trim an explicit account before using it in the sbatch script."""
+    monkeypatch.setenv(_SLURM_ACCOUNT_ENV_VAR, "env_account")
+
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            account=" cli_account ",
+            container_image="test_image",
+            workspace_path=tmp_path / "workspace",
+            cache_path=tmp_path / "cache",
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    assert job_spec.account == "cli_account"
+    assert "#SBATCH -A cli_account" in _render_sbatch_script(job_spec)
+
+
+def test_submit_blank_account_option_uses_environment_default(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Treat a blank account option the same as an omitted account option."""
+    monkeypatch.setenv(_SLURM_ACCOUNT_ENV_VAR, "env_account")
+
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            account="   ",
+            container_image="test_image",
+            workspace_path=tmp_path / "workspace",
+            cache_path=tmp_path / "cache",
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    assert job_spec.account == "env_account"
+    assert "#SBATCH -A env_account" in _render_sbatch_script(job_spec)
+
+
+def test_submit_trims_optional_slurm_directives(tmp_path: pathlib.Path) -> None:
+    """Trim optional Slurm directives before rendering the sbatch script."""
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            partition=" test_partition ",
+            qos=" high ",
+            container_image="test_image",
+            workspace_path=tmp_path / "workspace",
+            cache_path=tmp_path / "cache",
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    sbatch_script = _render_sbatch_script(job_spec)
+    assert job_spec.partition == "test_partition"
+    assert job_spec.qos == "high"
+    assert "#SBATCH -p test_partition" in sbatch_script
+    assert "#SBATCH --qos=high" in sbatch_script
+
+
+def test_submit_blank_optional_slurm_directives_are_omitted(tmp_path: pathlib.Path) -> None:
+    """Omit optional Slurm directives when only whitespace is provided."""
+    with patch(f"{MODULE_NAME}.curator_submit", return_value="12345") as mock_curator_submit:
+        submit_cli(
+            command=["echo", "test"],
+            partition="   ",
+            qos="   ",
+            container_image="test_image",
+            workspace_path=tmp_path / "workspace",
+            cache_path=tmp_path / "cache",
+            mount_s3_creds=False,
+            remote_files_path=tmp_path / "job_files",
+        )
+
+    mock_curator_submit.assert_called_once()
+    job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+    sbatch_script = _render_sbatch_script(job_spec)
+    assert job_spec.partition is None
+    assert job_spec.qos is None
+    assert "#SBATCH -p" not in sbatch_script
+    assert "#SBATCH --qos" not in sbatch_script
 
 
 @pytest.mark.parametrize(
@@ -379,6 +660,37 @@ class TestSubmitCurationJob:
         assert "mkdir -p '/remote/files/test job;touch bad'" in commands
         assert "sbatch '/remote/files/test job;touch bad/sbatch.sh'" in commands
 
+    def test_curator_submit_suggests_account_when_sbatch_requires_one(
+        self, mock_connection: Mock, job_spec: SlurmJobSpec
+    ) -> None:
+        """Make missing account failures actionable without requiring accounts everywhere."""
+        job_spec.account = None
+        conn = mock_connection.return_value
+
+        missing_dir_result = Mock()
+        missing_dir_result.exited = 1
+        missing_dir = invoke.exceptions.UnexpectedExit(result=missing_dir_result)
+
+        sbatch_result = Mock()
+        sbatch_result.exited = 1
+        sbatch_result.stderr = (
+            "sbatch: error: Batch job submission failed: Invalid account or account/partition combination specified"
+        )
+        sbatch_failure = invoke.exceptions.UnexpectedExit(result=sbatch_result)
+
+        conn.run.side_effect = [
+            Mock(),
+            missing_dir,
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            sbatch_failure,
+        ]
+
+        with pytest.raises(ValueError, match=f"Rerun with --account <slurm_account> or set {_SLURM_ACCOUNT_ENV_VAR}"):
+            curator_submit(job_spec)
+
 
 class TestMountSpec:
     """Test the mount spec class."""
@@ -595,6 +907,25 @@ class TestLaunch:
 
             assert job_spec.mail_user == mail_user
             assert job_spec.mail_type == expected_mail_type
+
+    def test_launch_with_qos(self, mock_curator_submit: Mock) -> None:
+        """Test that the submit command forwards QoS into the job spec."""
+        submit_cli(
+            command=[str(_START_RAY), "arg1", "arg2"],
+            login_node="login_node",
+            account="test_account",
+            partition="test_partition",
+            container_image="test_image",
+            num_nodes=1,
+            remote_files_path=pathlib.Path("/remote/files"),
+            gres=GRES,
+            qos="high",
+            exclusive=True,
+        )
+
+        mock_curator_submit.assert_called_once()
+        job_spec: SlurmJobSpec = mock_curator_submit.call_args.args[0]
+        assert job_spec.qos == "high"
 
 
 @pytest.mark.parametrize(

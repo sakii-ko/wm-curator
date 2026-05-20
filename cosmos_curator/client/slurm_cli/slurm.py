@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,7 +36,20 @@ from invoke.context import Context
 from invoke.runners import Result as InvokeResult
 from typer import Argument, Option
 
-from cosmos_curator.client.slurm_cli.slurm_local import launch_cli
+from cosmos_curator.client.slurm_cli.slurm_local import (
+    _DEFAULT_CACHE_PATH,
+    _DEFAULT_CONDA_OVERRIDE_CUDA,
+    _DEFAULT_CONTAINER_IMAGE,
+    LaunchSlurmLocal,
+    _get_source_link_command,
+    _get_srun_environment,
+    _get_srun_mounts,
+    _parse_environment,
+    _parse_pixi_envs,
+    _resolve_container_image,
+    launch_cli,
+)
+from cosmos_curator.client.utils.container_launch import SLIM_IMAGE_WARMUP_COMMAND, parse_extra_mounts
 from cosmos_curator.core.utils import environment
 
 logger = logging.getLogger(__name__)
@@ -46,6 +59,26 @@ _PROM_SVC_DISC_SCRIPT_PATH = Path("prometheus_service_discovery.py")
 _START_RAY = environment.CONTAINER_PATHS_CODE_DIR / "cosmos_curator" / "scripts" / "onto_slurm.py"
 _MAX_FILE_MODE = 0o7777
 _HOME_DIR = Path(os.getenv("REMOTE_HOME_DIR", Path.home()))
+_DEFAULT_LOGIN_NODE = "localhost"
+_SLURM_ACCOUNT_ENV_VAR = "SBATCH_ACCOUNT"
+_SBATCH_DYNAMIC_CONTAINER_ENV_KEYS = (
+    "HEAD_NODE_ADDR",
+    "HEAD_NODE_PORT",
+    "PRIMARY_NODE_HOSTNAME",
+    "PRIMARY_NODE_PORT",
+    "RAY_STOP_RETRIES_AFTER",
+    "SLURM_JOB_ID",
+    "SLURM_JOBID",
+    "SLURM_JOB_NODELIST",
+    "SLURM_JOB_NUM_NODES",
+    "SLURM_LOCALID",
+    "SLURM_NNODES",
+    "SLURM_NODEID",
+    "SLURM_NTASKS_PER_NODE",
+    "SLURM_PROCID",
+    "SLURMD_NODENAME",
+    "WORLD_SIZE",
+)
 
 
 def _quote_remote_path(path: Path) -> str:
@@ -168,6 +201,63 @@ def _get_remote_job_path(remote_files_path: Path, job_name: str) -> Path:
     return remote_files_path / f"{job_name}.{datetime.now().strftime('%Y%m%dT%H%M%S.%f')}"  # noqa: DTZ005
 
 
+def _infer_curator_path(curator_path: Path | None) -> Path | None:
+    """Use the current checkout by default when submit is run from a repo root."""
+    if curator_path is not None:
+        return curator_path
+
+    cwd = Path.cwd()
+    if (cwd / "cosmos_curator").is_dir() and (cwd / "pixi.toml").is_file():
+        return cwd
+    return None
+
+
+def _parse_mount_specs(raw: str | None) -> list["MountSpec"]:
+    if raw is None:
+        return []
+    return [MountSpec.from_str(entry.strip()) for entry in raw.split(",") if entry.strip()]
+
+
+def _mount_specs_from_strings(mounts: list[str]) -> list["MountSpec"]:
+    return [MountSpec.from_str(mount) for mount in mounts]
+
+
+def _merge_mount_specs_by_destination(mounts: list["MountSpec"]) -> list["MountSpec"]:
+    merged: dict[str, MountSpec] = {}
+    for mount in mounts:
+        if mount.dest in merged:
+            logger.warning(
+                "Replacing duplicate container mount destination %s: %s -> %s",
+                mount.dest,
+                merged[mount.dest],
+                mount,
+            )
+        merged[mount.dest] = mount
+    return list(merged.values())
+
+
+def _environment_entries_from_srun_defaults(opts: LaunchSlurmLocal) -> list[str]:
+    env, container_env_keys = _get_srun_environment(opts, include_slurm_env=False)
+    return [f"{key}={env[key]}" for key in container_env_keys if key in env]
+
+
+def _normalize_optional_slurm_directive(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _resolve_slurm_account(account: str | None) -> str | None:
+    """Resolve the account directive without making it mandatory for all clusters."""
+    account = _normalize_optional_slurm_directive(account)
+    if account is not None:
+        return account
+
+    env_account = os.getenv(_SLURM_ACCOUNT_ENV_VAR)
+    return _normalize_optional_slurm_directive(env_account)
+
+
 @attrs.define
 class MountSpec:
     """Represents a mount and its mount point."""
@@ -229,8 +319,8 @@ class SlurmJobSpec:
 
     login_node: str
     username: str
-    account: str
-    partition: str
+    account: str | None
+    partition: str | None
     job_name: str
     remote_job_path: Path
     log_dir: Path
@@ -238,6 +328,7 @@ class SlurmJobSpec:
     exclusive: bool
     container: ContainerSpec
     gres: str | None = None
+    qos: str | None = None
     time_limit: str | None = None
     stop_retries_after: int = 600
     exclude_nodes: list[str] | None = None
@@ -263,7 +354,12 @@ def _render_sbatch_script(spec: SlurmJobSpec) -> str:
 
     """
     container_mounts = ",".join(str(x) for x in spec.container.mounts) if spec.container.mounts is not None else None
-    command = " ".join(spec.container.command)
+    command = shlex.join(spec.container.command)
+    container_command = shlex.quote(
+        f"cd {shlex.quote(str(environment.CONTAINER_PATHS_CODE_DIR))} && "
+        f"{_get_source_link_command()} && "
+        f'{SLIM_IMAGE_WARMUP_COMMAND} && exec "$@"'
+    )
     template_dir = Path(__file__).parent
     sbatch_template = template_dir / _SBATCH_TEMPLATE_PATH
 
@@ -280,6 +376,7 @@ def _render_sbatch_script(spec: SlurmJobSpec) -> str:
             if value is None:
                 continue
             env_vars[key] = value
+    container_env_keys = list(dict.fromkeys([*env_vars, *_SBATCH_DYNAMIC_CONTAINER_ENV_KEYS]))
 
     return jinja2.Template(sbatch_template.read_text()).render(
         job_name=spec.job_name,
@@ -288,9 +385,12 @@ def _render_sbatch_script(spec: SlurmJobSpec) -> str:
         num_nodes=spec.num_nodes,
         command=command,
         gres=spec.gres,
+        qos=spec.qos,
         exclusive=spec.exclusive,
         container_image=spec.container.squashfs_path,
         container_mounts=container_mounts,
+        container_command=container_command,
+        container_env_keys=container_env_keys,
         env_vars=env_vars,
         time_limit_string=spec.time_limit,
         stop_retries_after=spec.stop_retries_after,
@@ -472,6 +572,44 @@ def create_remote_job_path(connection: ConnectionProtocol, job_spec: SlurmJobSpe
     create_remote_path(connection, job_spec.remote_job_path)
 
 
+def _unexpected_exit_output(error: invoke.exceptions.UnexpectedExit) -> str:
+    parts: list[str] = []
+    for stream in ("stderr", "stdout"):
+        value = getattr(error.result, stream, "")
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return "\n".join(parts)
+
+
+def _looks_like_missing_account_error(output: str) -> bool:
+    normalized = output.lower()
+    return "account" in normalized and any(
+        phrase in normalized
+        for phrase in (
+            "invalid account",
+            "missing account",
+            "no account",
+            "requires an account",
+            "specify an account",
+            "account is required",
+        )
+    )
+
+
+def _raise_helpful_sbatch_error(error: invoke.exceptions.UnexpectedExit, job_spec: SlurmJobSpec) -> None:
+    output = _unexpected_exit_output(error)
+    if job_spec.account is not None or not _looks_like_missing_account_error(output):
+        return
+
+    message = (
+        "Slurm rejected the submission because this cluster appears to require an account. "
+        f"Rerun with --account <slurm_account> or set {_SLURM_ACCOUNT_ENV_VAR}."
+    )
+    if output:
+        message = f"{message}\n\nsbatch output:\n{output}"
+    raise ValueError(message) from error
+
+
 def curator_submit(slurm_job_spec: SlurmJobSpec) -> str:
     """Submit a curator pipeline batch job to the cluster.
 
@@ -505,7 +643,9 @@ def curator_submit(slurm_job_spec: SlurmJobSpec) -> str:
 
         raise ValueError(error_message)
 
-    slurm_job_spec.container.mounts += [MountSpec(source=str(slurm_job_spec.remote_job_path), dest="/remote_files")]
+    slurm_job_spec.container.mounts = _merge_mount_specs_by_destination(
+        [*slurm_job_spec.container.mounts, MountSpec(source=str(slurm_job_spec.remote_job_path), dest="/remote_files")]
+    )
     logger.debug("Container mounts: %s", slurm_job_spec.container.mounts)
     remote_sbatch_path = slurm_job_spec.remote_job_path / "sbatch.sh"
 
@@ -523,7 +663,11 @@ def curator_submit(slurm_job_spec: SlurmJobSpec) -> str:
     ]
 
     upload_text(connection, remote_files)
-    out = connection.run(f"sbatch {_quote_remote_path(remote_sbatch_path)}")
+    try:
+        out = connection.run(f"sbatch {_quote_remote_path(remote_sbatch_path)}")
+    except invoke.exceptions.UnexpectedExit as e:
+        _raise_helpful_sbatch_error(e, slurm_job_spec)
+        raise
     return _parse_job_id(out.stdout)
 
 
@@ -613,24 +757,27 @@ def submit_cli(  # noqa: PLR0913
     login_node: Annotated[
         str,
         Option(
-            help="Hostname of SLURM login node to run command on",
+            help="Hostname of SLURM login node to run command on. Defaults to local sbatch submission.",
             rich_help_panel="cluster",
         ),
-    ],
+    ] = _DEFAULT_LOGIN_NODE,
     account: Annotated[
-        str,
+        str | None,
         Option(
-            help="Name of account for billing",
+            help=(
+                f"Name of account for billing. Defaults to ${_SLURM_ACCOUNT_ENV_VAR} when set; "
+                "otherwise omit to use the cluster default."
+            ),
             rich_help_panel="cluster",
         ),
-    ],
+    ] = None,
     partition: Annotated[
-        str,
+        str | None,
         Option(
-            help=("The slurm partition to use"),
+            help=("The slurm partition to use. Omit to use the cluster default."),
             rich_help_panel="cluster",
         ),
-    ],
+    ] = None,
     remote_files_path: Annotated[
         Path,
         Option(
@@ -641,18 +788,93 @@ def submit_cli(  # noqa: PLR0913
     container_image: Annotated[
         str,
         Option(help=("Canonical path to the .sqsh container image"), rich_help_panel="container"),
-    ],
-    container_mounts: Annotated[
-        str | None,
+    ] = _DEFAULT_CONTAINER_IMAGE,
+    curator_path: Annotated[
+        Path | None,
         Option(
-            help="Comma separated container mounts, `src0:dst0[:ro|rw],src1:dst1[:ro|rw]`",
+            help=(
+                "Path to the cosmos-curator repo directory; defaults to the current directory when it looks like "
+                "a checkout."
+            ),
             rich_help_panel="container",
         ),
     ] = None,
+    workspace_path: Annotated[
+        Path,
+        Option(
+            help="Host workspace directory to mount as /config inside the container.",
+            rich_help_panel="container",
+        ),
+    ] = environment.LOCAL_WORKSPACE_PATH,
+    cache_path: Annotated[
+        Path,
+        Option(
+            help="Host cache directory to mount as /cache for Pixi/rattler, uv, Torch, Triton, pip, and CUDA caches.",
+            rich_help_panel="container",
+        ),
+    ] = _DEFAULT_CACHE_PATH,
+    mount_s3_creds: Annotated[
+        bool,
+        Option(
+            "--mount-s3-creds/--no-mount-s3-creds",
+            help="Mount the host AWS credentials file into the container when present.",
+            rich_help_panel="container",
+        ),
+    ] = True,
+    mount_azure_creds: Annotated[
+        bool,
+        Option(
+            "--mount-azure-creds/--no-mount-azure-creds",
+            help="Mount the host Azure credentials file into the container when present.",
+            rich_help_panel="container",
+        ),
+    ] = False,
+    container_mounts: Annotated[
+        str | None,
+        Option(
+            help=(
+                "Comma-separated container mounts in HOST_PATH:CONTAINER_PATH[:ro|rw] format. Mounts are merged "
+                "by CONTAINER_PATH with later entries overriding earlier ones; for example, "
+                "/tmp/work:/config:ro replaces the default /config mount."
+            ),
+            rich_help_panel="container",
+        ),
+    ] = None,
+    extra_mounts: Annotated[
+        str,
+        Option(
+            "--extra-mounts",
+            "--extra-volumes",
+            help=(
+                "Comma-separated container mounts in HOST_PATH:CONTAINER_PATH[:ro|rw] format. Mounts are merged "
+                "by CONTAINER_PATH with later entries overriding earlier defaults; for example, "
+                "/data/config:/config:ro replaces the default /config mount."
+            ),
+            rich_help_panel="container",
+        ),
+    ] = "",
     environment: Annotated[
         str | None,
         Option(
             help="Comma separated list of environment variables to set in the container", rich_help_panel="container"
+        ),
+    ] = None,
+    conda_override_cuda: Annotated[
+        str | None,
+        Option(
+            help="Set CONDA_OVERRIDE_CUDA during Pixi warmup. Use an empty value to omit it.",
+            rich_help_panel="container",
+        ),
+    ] = _DEFAULT_CONDA_OVERRIDE_CUDA,
+    pixi_envs: Annotated[
+        str | None,
+        Option(
+            "--pixi-envs",
+            help=(
+                "Comma-separated Pixi environments to install during slim-image warmup, overriding "
+                "COSMOS_CURATOR_SLIM_ENVS from the image."
+            ),
+            rich_help_panel="container",
         ),
     ] = None,
     username: Annotated[
@@ -680,6 +902,14 @@ def submit_cli(  # noqa: PLR0913
         str | None,
         Option(
             help="Optional GPU specification, e.g. 'gpu:8'",
+            rich_help_panel="cluster",
+        ),
+    ] = None,
+    qos: Annotated[
+        str | None,
+        Option(
+            "--qos",
+            help="Optional Slurm quality of service to request.",
             rich_help_panel="cluster",
         ),
     ] = None,
@@ -754,16 +984,35 @@ def submit_cli(  # noqa: PLR0913
         error_message = "If --mail-type is provided, --mail-user must also be provided"
         raise ValueError(error_message)
 
-    container_mount_specs: list[MountSpec] = []
-    if container_mounts is not None:
-        container_mount_specs = [MountSpec.from_str(x) for x in container_mounts.split(",")]
-
-    env_list = environment.split(",") if environment is not None else []
+    cuda_override = conda_override_cuda if conda_override_cuda else None
+    submit_opts = LaunchSlurmLocal(
+        container_image=container_image,
+        curator_path=_infer_curator_path(curator_path),
+        command=command,
+        workspace_path=workspace_path,
+        cache_path=cache_path,
+        mount_s3_creds=mount_s3_creds,
+        mount_azure_creds=mount_azure_creds,
+        extra_mounts=parse_extra_mounts(extra_mounts, description="extra mount"),
+        environment=_parse_environment(environment),
+        require_slurm_allocation=False,
+        conda_override_cuda=cuda_override,
+        pixi_envs=_parse_pixi_envs(pixi_envs),
+        overlap=False,
+        interactive=False,
+    )
+    container_mount_specs = _merge_mount_specs_by_destination(
+        [
+            *_mount_specs_from_strings(_get_srun_mounts(submit_opts)),
+            *_parse_mount_specs(container_mounts),
+        ]
+    )
+    env_list = _environment_entries_from_srun_defaults(submit_opts)
     exclude_nodes_list = exclude_nodes.split(",") if exclude_nodes is not None else None
 
     container_spec = ContainerSpec(
         command=["pixi", "run", str(_START_RAY), *command],
-        squashfs_path=container_image,
+        squashfs_path=_resolve_container_image(container_image),
         environment=env_list,
         mounts=container_mount_specs,
     )
@@ -774,11 +1023,12 @@ def submit_cli(  # noqa: PLR0913
         log_dir=_get_log_dir(log_dir),
         job_name=job_name,
         remote_job_path=_get_remote_job_path(remote_files_path, job_name),
-        account=account,
-        partition=partition,
+        account=_resolve_slurm_account(account),
+        partition=_normalize_optional_slurm_directive(partition),
         num_nodes=num_nodes,
         container=container_spec,
         gres=gres,
+        qos=_normalize_optional_slurm_directive(qos),
         exclusive=exclusive,
         time_limit=time,
         stop_retries_after=stop_retries_after,

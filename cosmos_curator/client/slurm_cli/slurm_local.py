@@ -242,7 +242,9 @@ def _get_source_link_command() -> str:
     return " && ".join(commands)
 
 
-def _get_srun_environment(opts: LaunchSlurmLocal) -> tuple[dict[str, str], list[str]]:
+def _get_srun_environment(
+    opts: LaunchSlurmLocal, *, include_slurm_env: bool = True
+) -> tuple[dict[str, str], list[str]]:
     env = os.environ.copy()
     container_env = {
         SLURM_RAY_ENV_VAR_NAME: "True",
@@ -272,7 +274,8 @@ def _get_srun_environment(opts: LaunchSlurmLocal) -> tuple[dict[str, str], list[
         env["COSMOS_CURATOR_SLIM_ENVS"] = ",".join(opts.pixi_envs)
         container_env_keys.append("COSMOS_CURATOR_SLIM_ENVS")
 
-    container_env_keys.extend(env_var for env_var in _SLURM_ENV_VARS_TO_FORWARD if env_var in env)
+    if include_slurm_env:
+        container_env_keys.extend(env_var for env_var in _SLURM_ENV_VARS_TO_FORWARD if env_var in env)
     return env, _dedupe(container_env_keys)
 
 
