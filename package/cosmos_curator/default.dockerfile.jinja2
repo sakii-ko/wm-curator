@@ -164,12 +164,10 @@ RUN mkdir -p /tmp && chmod 1777 /tmp && \
     xz-utils \
     yasm \
     zlib1g-dev && \
-{% if not redistributable %}
-    curl -fsSL -o /tmp/nv-codec-headers.tar.gz https://github.com/FFmpeg/nv-codec-headers/releases/download/n${NVCODEC_VERSION}/nv-codec-headers-${NVCODEC_VERSION}.tar.gz && \
+{% if not redistributable %}    curl -fsSL -o /tmp/nv-codec-headers.tar.gz https://github.com/FFmpeg/nv-codec-headers/releases/download/n${NVCODEC_VERSION}/nv-codec-headers-${NVCODEC_VERSION}.tar.gz && \
     tar xzf /tmp/nv-codec-headers.tar.gz -C /tmp/ && \
     make -C /tmp/nv-codec-headers-${NVCODEC_VERSION} install && \
-{% endif %}
-    curl -fsSL -o /tmp/ffmpeg.tar.xz https://www.ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+{% endif %}    curl -fsSL -o /tmp/ffmpeg.tar.xz https://www.ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     tar xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
     cd /tmp/ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
@@ -349,6 +347,8 @@ RUN ln -sf /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas-blackwell
 COPY --from=wheels-builder /opt/pixi/bin/pixi /usr/local/bin/pixi
 
 # Common ENV variables needed by some ML libs
+# Declares an optional inherited value for Docker's UndefinedVar check.
+ARG PKG_CONFIG_PATH
 ENV AM_I_DOCKER=True \
     BUILD_WITH_CUDA=True \
     TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;10.0+PTX" \
