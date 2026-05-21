@@ -203,6 +203,7 @@ def test_submit_uses_launch_defaults_for_container_runtime(
     assert job_spec.container.command == [
         "pixi",
         "run",
+        "--as-is",
         str(_START_RAY),
         "pixi",
         "run",
