@@ -75,10 +75,14 @@ class TestCliFlag:
 
         assert args.captioning_setup_attempts == 3
 
-    def test_rejects_non_integer_value(self) -> None:
+    def test_rejects_non_integer_value(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Argparse's ``type=int`` must reject strings like ``3.5`` or ``foo``."""
         with pytest.raises(SystemExit):
             _parser().parse_args(["--captioning-setup-attempts", "not-a-number"])
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "argument --captioning-setup-attempts: invalid int value: 'not-a-number'" in captured.err
 
 
 # ---------------------------------------------------------------------------

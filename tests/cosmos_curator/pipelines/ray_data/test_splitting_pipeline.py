@@ -54,12 +54,15 @@ def test_vllm_max_num_seqs_cli_defaults_to_qwen_ray_data_default() -> None:
     assert _parse_args("--vllm-max-num-seqs", "256").vllm_max_num_seqs == 256
 
 
-def test_vllm_max_num_seqs_cli_rejects_non_positive_values() -> None:
+def test_vllm_max_num_seqs_cli_rejects_non_positive_values(capsys: pytest.CaptureFixture[str]) -> None:
     """VLLM max_num_seqs must be positive."""
-    with pytest.raises(SystemExit):
-        _parse_args("--vllm-max-num-seqs", "0")
-    with pytest.raises(SystemExit):
-        _parse_args("--vllm-max-num-seqs", "-1")
+    for invalid_value in ("0", "-1"):
+        with pytest.raises(SystemExit):
+            _parse_args("--vllm-max-num-seqs", invalid_value)
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert f"argument --vllm-max-num-seqs: '{invalid_value}' must be positive" in captured.err
 
 
 def test_configure_ray_data_progress_sets_all_progress_flags() -> None:
