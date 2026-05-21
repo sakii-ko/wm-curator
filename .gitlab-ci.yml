@@ -146,8 +146,11 @@ variables:
     description: "Helm chart version for the CICD pipeline"
     value: "2.2.2"
   XENNA_REF:
-    description: "cosmos-xenna git ref (branch/tag/SHA) to build when the 'use-local-xenna-build' MR label is set"
-    value: "main"
+    # No default value: when unset, build_xenna_wheel.sh builds the
+    # cosmos-xenna submodule's currently-checked-out commit (i.e. the SHA
+    # pinned by the MR). Set this to override that pin without touching the
+    # submodule, e.g. to point at an in-flight cosmos-xenna branch.
+    description: "cosmos-xenna git ref (branch/tag/SHA) override; defaults to the submodule's pinned commit when empty"
 
   # Vault integration
   VAULT_ADDR: "$VAULT_ADDR"
@@ -323,9 +326,15 @@ stages:
     micromamba deactivate || true
     micromamba env remove -n curator -y || true
 
-  # Install curator full requirements
+  # Install curator full requirements. When the build_xenna_wheels matrix job
+  # has produced a wheel (i.e. on MR pipelines with the 'use-local-xenna-build'
+  # label), pip-install the host-arch wheel over the poetry-resolved
+  # cosmos-xenna so lint/test jobs run against XENNA_REF instead of the
+  # PyPI-pinned release. The helper is a no-op when no wheel artifact is
+  # present.
   setup_curator: &setup_curator |
     poetry install --extras=local --no-interaction
+    bash .gitlab/scripts/install_local_xenna_wheel_if_present.sh
 
   # Install curator CLI requirements
   setup_curator_cli: &setup_curator_cli |
@@ -348,12 +357,60 @@ ruff:
     - ruff format --check
     - ruff check
 
+# Build cosmos-xenna wheels (amd64 + arm64) once per pipeline and publish them
+# as artifacts so every downstream consumer can pick the arch they need:
+#   - mypy / unit_tests        -> install over PyPI-resolved cosmos-xenna
+#   - .build_curator_arch      -> bake into pixi envs at image build time
+#   - k8s_gpu_tests / gpu_tests -> install over pixi-installed cosmos-xenna at
+#                                  test runtime (slim images install pixi envs
+#                                  from pixi.lock, which still pins the PyPI
+#                                  release)
+# Only runs on MR pipelines that carry the 'use-local-xenna-build' label;
+# without the label, downstream consumers' `optional: true` needs entries
+# silently skip the artifact and the pipelines behave exactly as before.
+build_xenna_wheels:
+  stage: lint
+  parallel:
+    matrix:
+      - PLATFORM: amd64
+        RUNNER_TAG: vm-builder
+      - PLATFORM: arm64
+        RUNNER_TAG: vm-builder-arm64
+  tags:
+    - ${RUNNER_TAG}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_LABELS =~ /(^|,)use-local-xenna-build($|,)/'
+      when: on_success
+    - when: never
+  script:
+    - bash .gitlab/scripts/build_xenna_wheel.sh
+    - ls -la cosmos-xenna/target/wheels/
+  artifacts:
+    when: on_success
+    # maturin emits both an unrepaired `linux_<arch>.whl` and an auditwheel-
+    # repaired `manylinux_*_<arch>.whl`; publish only the manylinux variant so
+    # consumers see exactly one wheel per arch (matches the image build's
+    # Dockerfile glob cosmos_xenna-*manylinux*_${ARCH}.whl). When a downstream
+    # job `needs:` this matrix-parent, GitLab merges artifacts from both
+    # matrix children, so consumers get both arches in target/wheels/ and pick
+    # the one matching `uname -m`.
+    paths:
+      - cosmos-xenna/target/wheels/cosmos_xenna-*manylinux*.whl
+    expire_in: 1 day
+  retry:
+    max: 1
+    when: runner_system_failure
+
 mypy:
   stage: lint
   image: ${CI_BUILDER_IMAGE}
   tags:
     - build-runner  # Override to Docker executor
   rules: *pre_merge_rules
+  needs:
+    - job: build_xenna_wheels
+      optional: true
+      artifacts: true
   script:
     - *setup_ci_builder_env
     - *setup_curator
@@ -364,7 +421,10 @@ mypy:
 
 unit_tests:
   stage: test
-  needs: []
+  needs:
+    - job: build_xenna_wheels
+      optional: true
+      artifacts: true
   variables:
     PYTEST_ADDOPTS: >-
       --junitxml=report.xml
@@ -446,6 +506,13 @@ client_wheel_smoke:
   tags:
     - ${RUNNER_TAG}
   rules: *pre_post_merge_and_web_rules
+  # Pull pre-built cosmos-xenna wheels (amd64 + arm64) from the lint-stage
+  # build_xenna_wheels matrix when the 'use-local-xenna-build' MR label is
+  # set. `optional: true` keeps these jobs runnable without the label.
+  needs:
+    - job: build_xenna_wheels
+      optional: true
+      artifacts: true
   id_tokens:
     VAULT_JWT_TOKEN:
       aud: ${VAULT_ADDR}
@@ -466,17 +533,30 @@ client_wheel_smoke:
     - *setup_curator_cli
     - source .gitlab/scripts/common.sh
     - get_cache_refs "${BUILD_IMAGE_REPO}" "${PLATFORM}"
-    # When the MR carries the 'use-local-xenna-build' label, build a
-    # cosmos-xenna wheel from XENNA_REF (default: main) and let the image
-    # build consume it via --use-local-xenna-build. The slim build is
-    # skipped because slim images install pixi envs at runtime from the
-    # lockfile, which still pins the PyPI-released cosmos-xenna.
+    # When build_xenna_wheels produced a wheel for this arch, consume it via
+    # --use-local-xenna-build. The slim build skips this on purpose because
+    # slim images install pixi envs at runtime from the lockfile, which still
+    # pins the PyPI-released cosmos-xenna; the slim consumers (k8s_gpu_tests,
+    # gpu_tests) instead install the wheel into their pixi envs at test time
+    # via .gitlab/scripts/install_local_xenna_into_pixi.sh.
     - |
-      if [[ ",${CI_MERGE_REQUEST_LABELS:-}," == *",use-local-xenna-build,"* && "${BUILD_EXTRA_ARGS:-}" != *"--slim"* ]]; then
-        echo "MR label 'use-local-xenna-build' detected; building cosmos-xenna wheel from ref '${XENNA_REF:-main}'..."
-        bash .gitlab/scripts/build_xenna_wheel.sh
+      ARCH="$(uname -m)"
+      shopt -s nullglob
+      xenna_wheels=(cosmos-xenna/target/wheels/cosmos_xenna-*manylinux*_"${ARCH}".whl)
+      shopt -u nullglob
+      if [[ ${#xenna_wheels[@]} -gt 1 ]]; then
+        echo "ERROR: multiple cosmos-xenna ${ARCH} wheels found; expected exactly one:" >&2
+        printf '  %s\n' "${xenna_wheels[@]}" >&2
+        exit 1
+      fi
+      if [[ ${#xenna_wheels[@]} -gt 0 && "${BUILD_EXTRA_ARGS:-}" != *"--slim"* ]]; then
+        echo "Found prebuilt cosmos-xenna ${ARCH} wheel: ${xenna_wheels[0]}"
         BUILD_EXTRA_ARGS="${BUILD_EXTRA_ARGS:-} --use-local-xenna-build"
         echo "Will pass to cosmos-curator image build: ${BUILD_EXTRA_ARGS}"
+      elif [[ ",${CI_MERGE_REQUEST_LABELS:-}," == *",use-local-xenna-build,"* && "${BUILD_EXTRA_ARGS:-}" != *"--slim"* ]]; then
+        echo "WARNING: MR label 'use-local-xenna-build' is set but no cosmos-xenna ${ARCH} wheel artifact was found." >&2
+        echo "         Check the build_xenna_wheels job for this arch." >&2
+        exit 1
       fi
     # Build and push in a single step (BuildKit pushes directly to registry)
     - |
@@ -651,7 +731,15 @@ build_deploy_curator_distributable:
 gpu_tests:
   stage: end-to-end
   rules: *pre_post_merge_rules
-  needs: ["build_deploy_curator_slim"]
+  # `build_xenna_wheels` is `optional: true` so the job runs unchanged when
+  # the 'use-local-xenna-build' MR label is absent. When the artifact is
+  # present, run_env_tests.sh inside the container overrides the
+  # pixi-installed cosmos-xenna with the locally-built wheel before tests run.
+  needs:
+    - build_deploy_curator_slim
+    - job: build_xenna_wheels
+      optional: true
+      artifacts: true
   tags:
     - ${SLURM_RUNNER_TAG}
   variables:
@@ -995,7 +1083,15 @@ k8s_gpu_tests:
   stage: end-to-end
   tags:
     - k8s-gpu
-  needs: ["build_deploy_curator_slim"]
+  # `build_xenna_wheels` is `optional: true` so the job runs unchanged when
+  # the 'use-local-xenna-build' MR label is absent. When the artifact is
+  # present, the before_script overrides the pixi-installed cosmos-xenna with
+  # the locally-built wheel before tests run.
+  needs:
+    - build_deploy_curator_slim
+    - job: build_xenna_wheels
+      optional: true
+      artifacts: true
   image: ${CURATOR_SLIM_FULL_IMAGE}
   timeout: 45 minutes
   allow_failure: true
@@ -1018,6 +1114,11 @@ k8s_gpu_tests:
     - export CONDA_OVERRIDE_CUDA=13.0.2
     - pushd /opt/cosmos-curator
     - pixi install --frozen -e default -e unified -e legacy-transformers -e model-download
+    # If build_xenna_wheels uploaded an artifact, override the pixi-installed
+    # cosmos-xenna in each env with the locally-built wheel. No-op otherwise.
+    - WHEEL_DIR="${CI_PROJECT_DIR}/cosmos-xenna/target/wheels"
+      bash "${CI_PROJECT_DIR}/.gitlab/scripts/install_local_xenna_into_pixi.sh"
+      default unified legacy-transformers model-download
     - popd
   script:
     - .gitlab/scripts/k8s_gpu_tests.sh

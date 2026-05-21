@@ -6,21 +6,30 @@
 # subsequent `cosmos-curator image build --use-local-xenna-build` step has a
 # matching manylinux wheel in cosmos-xenna/target/wheels/.
 #
-# The ref to build is controlled by the XENNA_REF env var (default: main).
+# The ref to build is controlled by the XENNA_REF env var. When XENNA_REF is
+# unset/empty, the script builds whatever commit the cosmos-xenna submodule
+# is currently checked out at (i.e. the SHA pinned by the parent MR). Set
+# XENNA_REF to override that pin without touching the submodule, e.g. to
+# point at an in-flight cosmos-xenna branch/tag/SHA.
+#
 # The wheel is built natively for the host arch, so run this on a runner
 # whose arch matches the target image (amd64 wheel on amd64 runner,
 # aarch64 wheel on arm64 runner).
 
 set -euo pipefail
 
-XENNA_REF="${XENNA_REF:-main}"
+XENNA_REF="${XENNA_REF:-}"
 XENNA_DIR="${XENNA_DIR:-cosmos-xenna}"
 
-# XENNA_REF Guardrail: must be a non-empty git ref without a leading '-',
-if [[ -z "${XENNA_REF}" || "${XENNA_REF}" == -* || "${XENNA_REF}" =~ [[:space:][:cntrl:]] ]]; then
-    echo "ERROR: XENNA_REF must be a non-empty git ref without a leading '-'" \
-         "or whitespace/control chars (got: '${XENNA_REF}')"
-    exit 1
+# XENNA_REF Guardrail: when set, must be a non-empty git ref without a
+# leading '-' or whitespace/control chars. When unset/empty we use the
+# submodule's existing checkout, so no validation needed.
+if [[ -n "${XENNA_REF}" ]]; then
+    if [[ "${XENNA_REF}" == -* || "${XENNA_REF}" =~ [[:space:][:cntrl:]] ]]; then
+        echo "ERROR: XENNA_REF must not start with '-' or contain whitespace/" \
+             "control chars (got: '${XENNA_REF}')"
+        exit 1
+    fi
 fi
 
 if [ ! -d "${XENNA_DIR}" ]; then
@@ -29,12 +38,16 @@ if [ ! -d "${XENNA_DIR}" ]; then
     exit 1
 fi
 
-echo "=== Fetching cosmos-xenna ref: ${XENNA_REF} ==="
 pushd "${XENNA_DIR}" > /dev/null
-# The submodule is cloned with depth 1 in CI, so we need to fetch the
-# requested ref explicitly before we can check it out.
-git fetch --depth 1 origin "${XENNA_REF}"
-git checkout --detach FETCH_HEAD
+if [[ -n "${XENNA_REF}" ]]; then
+    echo "=== Fetching cosmos-xenna ref: ${XENNA_REF} ==="
+    # The submodule is cloned with depth 1 in CI, so we need to fetch the
+    # requested ref explicitly before we can check it out.
+    git fetch --depth 1 origin "${XENNA_REF}"
+    git checkout --detach FETCH_HEAD
+else
+    echo "=== XENNA_REF unset; building cosmos-xenna at the submodule's pinned commit ==="
+fi
 echo "cosmos-xenna now at: $(git --no-pager log -1 --oneline)"
 
 # Install uv and rust into user-local paths if missing. Both installers are

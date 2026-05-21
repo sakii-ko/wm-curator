@@ -9,6 +9,14 @@ for e in "${ENVS[@]}"; do ENV_ARGS+=(-e "$e"); done
 echo "Installing pixi environments: ${ENVS[*]}"
 pixi install --frozen "${ENV_ARGS[@]}"
 
+# If the build_xenna_wheels CI job uploaded a wheel artifact, override the
+# pixi-installed cosmos-xenna in each env with the locally-built wheel. The
+# CI job mounts ${CI_PROJECT_DIR} as /config/project inside the container, so
+# the artifact lives at /config/project/cosmos-xenna/target/wheels/. The
+# helper is a no-op when the artifact is absent.
+WHEEL_DIR="/config/project/cosmos-xenna/target/wheels" \
+    bash /config/project/.gitlab/scripts/install_local_xenna_into_pixi.sh "${ENVS[@]}"
+
 # Run tests for each environment with unique report files and coverage
 for env in "${ENVS[@]}"; do
   echo "Running tests for $env environment"
