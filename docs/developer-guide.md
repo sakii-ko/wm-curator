@@ -171,10 +171,10 @@ Tests under the [tests/](../tests/) directory can be categorized into 3 levels:
 
 ### Unit Tests
 
-Simply run `pytest` from the repository root:
+Run the CPU-only pytest suite from the repository root:
 
 ```bash
-pytest
+pixi run cputest
 
 ================ test session starts ================
 configfile: pytest.ini

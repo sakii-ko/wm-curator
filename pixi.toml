@@ -79,6 +79,7 @@ channels = ["conda-forge"]
 
 [feature.dev.dependencies]
 mypy = "==1.19.0"
+pytest-mock = "*"
 ruff = "==0.14.9"
 
 [feature.dev.pypi-dependencies]
@@ -98,6 +99,7 @@ types-toml = "*"
 types-tqdm = "*"
 
 [feature.dev.tasks]
+cputest = "PYTEST_ADDOPTS='--junitxml=report.xml --cov=cosmos_curator --cov-report=term --cov-report=xml:unit-coverage.xml --cov-report=html:unit-htmlcov' pytest -s"
 format = "ruff format"
 lint = "ruff format --check && ruff check && mypy --pretty"
 
