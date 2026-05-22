@@ -14,6 +14,8 @@
 # limitations under the License.
 """Public API for comparing split video pipeline outputs."""
 
+from math import isfinite
+
 import attrs
 
 from cosmos_curator.core.utils.storage import storage_utils
@@ -57,6 +59,10 @@ def compare_split_outputs(  # noqa: PLR0913
     profile_name: str | None = None,
     token_count_abs_tolerance: float = 0,
     token_count_rel_tolerance: float = 0.0,
+    motion_score_abs_tolerance: float = 1e-6,
+    motion_score_rel_tolerance: float = 1e-6,
+    aesthetic_score_abs_tolerance: float = 1e-6,
+    aesthetic_score_rel_tolerance: float = 1e-6,
     summary_policy: SummaryComparisonPolicy = DEFAULT_SUMMARY_POLICY,
     video_limit: int | None = None,
     selected_video_key: str | None = None,
@@ -70,6 +76,14 @@ def compare_split_outputs(  # noqa: PLR0913
             the default storage profile is resolved at call time.
         token_count_abs_tolerance: Absolute tolerance for token total comparisons.
         token_count_rel_tolerance: Relative tolerance for token total comparisons.
+        motion_score_abs_tolerance: Absolute tolerance for motion score value
+            comparisons.
+        motion_score_rel_tolerance: Relative tolerance for motion score value
+            comparisons.
+        aesthetic_score_abs_tolerance: Absolute tolerance for aesthetic score
+            value comparisons.
+        aesthetic_score_rel_tolerance: Relative tolerance for aesthetic score
+            value comparisons.
         summary_policy: Summary fields to compare and how to compare them.
         video_limit: Optional limit for video-level feature comparisons. When set,
             only the first N video keys from ``output_a`` are matched to ``output_b``.
@@ -83,6 +97,12 @@ def compare_split_outputs(  # noqa: PLR0913
     if video_limit is not None and selected_video_key is not None:
         error_msg = "video_limit and selected_video_key are mutually exclusive"
         raise ValueError(error_msg)
+    _validate_score_tolerances(
+        motion_score_abs_tolerance=motion_score_abs_tolerance,
+        motion_score_rel_tolerance=motion_score_rel_tolerance,
+        aesthetic_score_abs_tolerance=aesthetic_score_abs_tolerance,
+        aesthetic_score_rel_tolerance=aesthetic_score_rel_tolerance,
+    )
     if profile_name is None:
         profile_name = DEFAULT_PROFILE_NAME
     summary_comparison = SummaryComparison()
@@ -116,6 +136,10 @@ def compare_split_outputs(  # noqa: PLR0913
         profile_name=profile_name,
         video_limit=video_limit,
         selected_video_key=selected_video_key,
+        motion_score_abs_tolerance=motion_score_abs_tolerance,
+        motion_score_rel_tolerance=motion_score_rel_tolerance,
+        aesthetic_score_abs_tolerance=aesthetic_score_abs_tolerance,
+        aesthetic_score_rel_tolerance=aesthetic_score_rel_tolerance,
     )
 
     return ComparisonReport.from_issues(
@@ -150,6 +174,24 @@ def _load_summary(
 
 def _load_issues(*results: _SummaryLoadResult) -> list[Issue]:
     return [result.issue for result in results if isinstance(result, _SummaryLoadFailure)]
+
+
+def _validate_score_tolerances(
+    *,
+    motion_score_abs_tolerance: float,
+    motion_score_rel_tolerance: float,
+    aesthetic_score_abs_tolerance: float,
+    aesthetic_score_rel_tolerance: float,
+) -> None:
+    for name, value in (
+        ("motion_score_abs_tolerance", motion_score_abs_tolerance),
+        ("motion_score_rel_tolerance", motion_score_rel_tolerance),
+        ("aesthetic_score_abs_tolerance", aesthetic_score_abs_tolerance),
+        ("aesthetic_score_rel_tolerance", aesthetic_score_rel_tolerance),
+    ):
+        if not isfinite(value) or value < 0:
+            error_msg = f"{name} must be a finite number greater than or equal to 0: {value}"
+            raise ValueError(error_msg)
 
 
 def _summary_error_field(exc: Exception) -> str | None:

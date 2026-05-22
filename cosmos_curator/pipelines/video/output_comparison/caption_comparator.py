@@ -16,7 +16,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import Any, cast
+from typing import cast
 
 import attrs
 
@@ -37,7 +37,7 @@ from cosmos_curator.pipelines.video.output_comparison.caption_result import (
     CaptionComparisonResult,
 )
 from cosmos_curator.pipelines.video.output_comparison.caption_schema import CaptionComparisonCounts, ClipCaptionView
-from cosmos_curator.pipelines.video.output_comparison.compare_features import (
+from cosmos_curator.pipelines.video.output_comparison.feature_plan import (
     ClipFeaturePlan,
     FeatureComparisonContext,
     FeatureComparisonPlan,
@@ -46,9 +46,12 @@ from cosmos_curator.pipelines.video.output_comparison.compare_features import (
 )
 from cosmos_curator.pipelines.video.output_comparison.json_types import JsonDictObject, JsonValue
 from cosmos_curator.pipelines.video.output_comparison.summary_schema import OutputSummary, ProcessedVideoSummary
-from cosmos_curator.pipelines.video.output_comparison.video_artifacts import load_clip_artifacts
+from cosmos_curator.pipelines.video.output_comparison.video_artifacts import (
+    ClipArtifactsLoadWorker,
+    LoadedClipArtifacts,
+)
 from cosmos_curator.pipelines.video.output_comparison.video_planning import build_clip_comparison_specs
-from cosmos_curator.pipelines.video.output_comparison.video_schema import ClipComparisonSpec, VideoComparisonSpec
+from cosmos_curator.pipelines.video.output_comparison.video_schema import VideoComparisonSpec
 
 
 @attrs.define(frozen=True)
@@ -67,26 +70,6 @@ class _CaptionComparisonWorkload:
         """Return video specs that may contain caption records on either side."""
         caption_video_keys = self.video_keys_a | self.video_keys_b
         return tuple(spec for spec in specs if spec.video_key in caption_video_keys)
-
-
-class CaptionClipViewLoadWorker:
-    """Callable Ray actor worker that loads metadata and builds caption views."""
-
-    def __init__(self, profile_name: str, policy: CaptionComparisonPolicy = DEFAULT_CAPTION_POLICY) -> None:
-        """Create a caption-view loader with per-actor storage client caching."""
-        self._profile_name = profile_name
-        self._policy = policy
-        self._client_params_by_output_root: dict[tuple[str, str], Mapping[str, Any]] = {}
-
-    def __call__(self, row: Mapping[str, JsonValue]) -> JsonDictObject:
-        """Load one clip's metadata and return its normalized caption view row."""
-        artifacts = load_clip_artifacts(
-            ClipComparisonSpec.from_json_dict(row),
-            profile_name=self._profile_name,
-            metadata_version=self._policy.metadata_version,
-            client_params_by_output_root=self._client_params_by_output_root,
-        )
-        return caption_view_from_clip_artifacts(artifacts, policy=self._policy).to_json_dict()
 
 
 @attrs.define(frozen=True)
@@ -153,8 +136,11 @@ class CaptionFeatureComparator:
         return ClipFeaturePlan(
             feature_name=self.name,
             clip_specs=clip_specs,
-            load_worker_class=CaptionClipViewLoadWorker,
-            load_worker_constructor_kwargs={"profile_name": context.profile_name, "policy": self.policy},
+            load_worker_class=ClipArtifactsLoadWorker,
+            load_worker_constructor_kwargs={
+                "profile_name": context.profile_name,
+                "metadata_version": self.policy.metadata_version,
+            },
             compare_row=cast(
                 "Callable[[Mapping[str, JsonValue]], JsonDictObject]",
                 partial(self._compare_clip_row, caption_workload),
@@ -167,7 +153,9 @@ class CaptionFeatureComparator:
 
     def _compare_clip_row(self, workload: _CaptionComparisonWorkload, row: Mapping[str, JsonValue]) -> JsonDictObject:
         """Compare one normalized caption clip view row."""
-        return self.compare_clip_view(ClipCaptionView.from_json_dict(row), workload)
+        artifacts = LoadedClipArtifacts.from_json_dict(row)
+        view = caption_view_from_clip_artifacts(artifacts, policy=self.policy)
+        return self.compare_clip_view(view, workload)
 
     def compare_clip_view(self, view: ClipCaptionView, workload: _CaptionComparisonWorkload) -> JsonDictObject:
         """Compare caption structure for one normalized clip view."""

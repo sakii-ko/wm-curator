@@ -143,6 +143,33 @@ def test_compare_split_outputs_mutual_exclusion(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("score_tolerance_kwargs", "message"),
+    [
+        pytest.param({"motion_score_abs_tolerance": -1e-6}, "motion_score_abs_tolerance", id="motion-abs"),
+        pytest.param({"motion_score_rel_tolerance": float("nan")}, "motion_score_rel_tolerance", id="motion-rel"),
+        pytest.param(
+            {"aesthetic_score_abs_tolerance": float("inf")},
+            "aesthetic_score_abs_tolerance",
+            id="aesthetic-abs",
+        ),
+        pytest.param(
+            {"aesthetic_score_rel_tolerance": -1e-6},
+            "aesthetic_score_rel_tolerance",
+            id="aesthetic-rel",
+        ),
+    ],
+)
+def test_compare_split_outputs_rejects_invalid_score_tolerances(
+    tmp_path: Path,
+    score_tolerance_kwargs: dict[str, float],
+    message: str,
+) -> None:
+    """Public comparison API rejects invalid score tolerances before loading outputs."""
+    with pytest.raises(ValueError, match=message):
+        compare_split_outputs(tmp_path / "output-a", tmp_path / "output-b", **score_tolerance_kwargs)
+
+
+@pytest.mark.parametrize(
     ("selector_kwargs", "expected_video_limit", "expected_selected_video_key"),
     [
         pytest.param({}, None, None, id="no-selector"),
@@ -173,7 +200,17 @@ def test_compare_split_outputs_merges_feature_comparison(
         profile_name: str,
         video_limit: int | None,
         selected_video_key: str | None,
+        motion_score_abs_tolerance: float = 1e-6,
+        motion_score_rel_tolerance: float = 1e-6,
+        aesthetic_score_abs_tolerance: float = 1e-6,
+        aesthetic_score_rel_tolerance: float = 1e-6,
     ) -> VideoComparisonResult:
+        _ = (
+            motion_score_abs_tolerance,
+            motion_score_rel_tolerance,
+            aesthetic_score_abs_tolerance,
+            aesthetic_score_rel_tolerance,
+        )
         captured["args"] = (output_a_arg, output_b_arg, summary_a_arg, summary_b_arg)
         captured["profile_name"] = profile_name
         captured["video_limit"] = video_limit

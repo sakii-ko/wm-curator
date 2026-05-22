@@ -19,9 +19,11 @@ from typing import Any
 
 import pytest
 
-from cosmos_curator.pipelines.video.output_comparison.caption_comparator import CaptionClipViewLoadWorker
-from cosmos_curator.pipelines.video.output_comparison.caption_schema import ClipCaptionView
-from cosmos_curator.pipelines.video.output_comparison.video_artifacts import load_clip_artifacts
+from cosmos_curator.pipelines.video.output_comparison.video_artifacts import (
+    ClipArtifactsLoadWorker,
+    LoadedClipArtifacts,
+    load_clip_artifacts,
+)
 from cosmos_curator.pipelines.video.output_comparison.video_schema import ClipComparisonSpec
 
 
@@ -144,11 +146,11 @@ def test_load_clip_artifacts_marks_client_param_failure_invalid(
     assert artifacts.invalid_metadata_b is None
 
 
-def test_caption_clip_view_load_worker_reuses_client_params_by_output_root(
+def test_clip_artifacts_load_worker_reuses_client_params_by_output_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Persistent caption view workers create storage client params once per output root."""
+    """Persistent artifact workers create storage client params once per output root."""
     client_calls: list[str] = []
     client_param_calls: list[str] = []
     read_params: list[dict[str, Any]] = []
@@ -180,12 +182,12 @@ def test_caption_clip_view_load_worker_reuses_client_params_by_output_root(
         fake_read_json_object,
     )
 
-    worker = CaptionClipViewLoadWorker(profile_name="profile-a")
-    first = ClipCaptionView.from_json_dict(worker(_clip_spec(tmp_path, clip_id="clip-a").to_json_dict()))
-    second = ClipCaptionView.from_json_dict(worker(_clip_spec(tmp_path, clip_id="clip-b").to_json_dict()))
+    worker = ClipArtifactsLoadWorker(profile_name="profile-a")
+    first = LoadedClipArtifacts.from_json_dict(worker(_clip_spec(tmp_path, clip_id="clip-a").to_json_dict()))
+    second = LoadedClipArtifacts.from_json_dict(worker(_clip_spec(tmp_path, clip_id="clip-b").to_json_dict()))
 
-    assert first.clip_id == "clip-a"
-    assert second.clip_id == "clip-b"
+    assert first.spec.clip_id == "clip-a"
+    assert second.spec.clip_id == "clip-b"
     assert client_calls == [str(tmp_path / "output-a"), str(tmp_path / "output-b")]
     assert client_param_calls == [
         f"client:{tmp_path / 'output-a'}",

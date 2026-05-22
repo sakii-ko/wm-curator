@@ -138,10 +138,15 @@ def test_cli_forwards_video_limit(
         profile_name: str | None = None,
         token_count_abs_tolerance: float = 0,
         token_count_rel_tolerance: float = 0,
+        motion_score_abs_tolerance: float = 0,
+        motion_score_rel_tolerance: float = 0,
+        aesthetic_score_abs_tolerance: float = 0,
+        aesthetic_score_rel_tolerance: float = 0,
         video_limit: int | None = None,
         selected_video_key: str | None = None,
     ) -> ComparisonReport:
-        _ = profile_name, token_count_abs_tolerance, token_count_rel_tolerance
+        _ = profile_name, token_count_abs_tolerance, token_count_rel_tolerance, motion_score_abs_tolerance
+        _ = motion_score_rel_tolerance, aesthetic_score_abs_tolerance, aesthetic_score_rel_tolerance
         captured["args"] = (output_a, output_b)
         captured["video_limit"] = video_limit
         captured["selected_video_key"] = selected_video_key
@@ -178,10 +183,15 @@ def test_cli_forwards_video_key(
         profile_name: str | None = None,
         token_count_abs_tolerance: float = 0,
         token_count_rel_tolerance: float = 0,
+        motion_score_abs_tolerance: float = 0,
+        motion_score_rel_tolerance: float = 0,
+        aesthetic_score_abs_tolerance: float = 0,
+        aesthetic_score_rel_tolerance: float = 0,
         video_limit: int | None = None,
         selected_video_key: str | None = None,
     ) -> ComparisonReport:
-        _ = profile_name, token_count_abs_tolerance, token_count_rel_tolerance
+        _ = profile_name, token_count_abs_tolerance, token_count_rel_tolerance, motion_score_abs_tolerance
+        _ = motion_score_rel_tolerance, aesthetic_score_abs_tolerance, aesthetic_score_rel_tolerance
         captured["args"] = (output_a, output_b)
         captured["video_limit"] = video_limit
         captured["selected_video_key"] = selected_video_key
@@ -200,6 +210,95 @@ def test_cli_forwards_video_key(
     assert captured["selected_video_key"] == "NBA/video.mp4"
     assert json.loads(report_path.read_text(encoding="utf-8"))["passed"] is True
     assert "PASSED split output comparison" in capsys.readouterr().out
+
+
+def test_cli_forwards_score_tolerances(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CLI score tolerance flags are forwarded to the comparison API."""
+    captured: dict[str, object] = {}
+    report_path = tmp_path / "comparison.json"
+
+    def fake_compare_split_outputs(  # noqa: PLR0913
+        output_a: object,
+        output_b: object,
+        *,
+        profile_name: str | None = None,
+        token_count_abs_tolerance: float = 0,
+        token_count_rel_tolerance: float = 0,
+        motion_score_abs_tolerance: float = 0,
+        motion_score_rel_tolerance: float = 0,
+        aesthetic_score_abs_tolerance: float = 0,
+        aesthetic_score_rel_tolerance: float = 0,
+        video_limit: int | None = None,
+        selected_video_key: str | None = None,
+    ) -> ComparisonReport:
+        _ = (
+            output_a,
+            output_b,
+            profile_name,
+            token_count_abs_tolerance,
+            token_count_rel_tolerance,
+            video_limit,
+            selected_video_key,
+        )
+        captured["motion_score_abs_tolerance"] = motion_score_abs_tolerance
+        captured["motion_score_rel_tolerance"] = motion_score_rel_tolerance
+        captured["aesthetic_score_abs_tolerance"] = aesthetic_score_abs_tolerance
+        captured["aesthetic_score_rel_tolerance"] = aesthetic_score_rel_tolerance
+        return ComparisonReport.from_issues("output-a", "output-b", SummaryComparison(), [])
+
+    monkeypatch.setattr(
+        "cosmos_curator.pipelines.video.output_comparison.cli.compare_split_outputs",
+        fake_compare_split_outputs,
+    )
+
+    exit_code = main(
+        [
+            "output-a",
+            "output-b",
+            "--report-path",
+            str(report_path),
+            "--motion-score-abs-tolerance",
+            "0.01",
+            "--motion-score-rel-tolerance",
+            "0.02",
+            "--aesthetic-score-abs-tolerance",
+            "0.03",
+            "--aesthetic-score-rel-tolerance",
+            "0.04",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["motion_score_abs_tolerance"] == 0.01
+    assert captured["motion_score_rel_tolerance"] == 0.02
+    assert captured["aesthetic_score_abs_tolerance"] == 0.03
+    assert captured["aesthetic_score_rel_tolerance"] == 0.04
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        pytest.param("--motion-score-abs-tolerance", "-0.1", id="motion-abs-negative"),
+        pytest.param("--motion-score-rel-tolerance", "nan", id="motion-rel-nan"),
+        pytest.param("--aesthetic-score-abs-tolerance", "inf", id="aesthetic-abs-inf"),
+        pytest.param("--aesthetic-score-rel-tolerance", "-0.1", id="aesthetic-rel-negative"),
+    ],
+)
+def test_cli_rejects_invalid_score_tolerances(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+) -> None:
+    """CLI score tolerances reject negative and non-finite values during argument parsing."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["output-a", "output-b", "--report-path", str(tmp_path / "comparison.json"), flag, value])
+
+    assert exc_info.value.code == 2
+    assert "value must be a finite number greater than or equal to 0" in capsys.readouterr().err
 
 
 def test_format_stdout_summary_truncates_issues_and_formats_video_suffix() -> None:

@@ -18,6 +18,7 @@ import argparse
 import sys
 import time
 from collections.abc import Sequence
+from math import isfinite
 
 from cosmos_curator.core.utils.storage.storage_utils import StorageWriter
 from cosmos_curator.pipelines.video.output_comparison.comparison import compare_split_outputs
@@ -49,6 +50,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile_name=args.profile_name,
         token_count_abs_tolerance=args.token_count_abs_tolerance,
         token_count_rel_tolerance=args.token_count_rel_tolerance,
+        motion_score_abs_tolerance=args.motion_score_abs_tolerance,
+        motion_score_rel_tolerance=args.motion_score_rel_tolerance,
+        aesthetic_score_abs_tolerance=args.aesthetic_score_abs_tolerance,
+        aesthetic_score_rel_tolerance=args.aesthetic_score_rel_tolerance,
         video_limit=args.limit,
         selected_video_key=args.selected_video_key,
     )
@@ -98,6 +103,30 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.01,
         help="Relative tolerance for token total differences.",
     )
+    parser.add_argument(
+        "--motion-score-abs-tolerance",
+        type=_non_negative_float,
+        default=1e-6,
+        help="Absolute tolerance for per-clip motion score differences.",
+    )
+    parser.add_argument(
+        "--motion-score-rel-tolerance",
+        type=_non_negative_float,
+        default=1e-6,
+        help="Relative tolerance for per-clip motion score differences.",
+    )
+    parser.add_argument(
+        "--aesthetic-score-abs-tolerance",
+        type=_non_negative_float,
+        default=1e-6,
+        help="Absolute tolerance for per-clip aesthetic score differences.",
+    )
+    parser.add_argument(
+        "--aesthetic-score-rel-tolerance",
+        type=_non_negative_float,
+        default=1e-6,
+        help="Relative tolerance for per-clip aesthetic score differences.",
+    )
     return parser
 
 
@@ -107,6 +136,18 @@ def _non_negative_int(value: str) -> int:
         msg = "--limit must be greater than or equal to 0"
         raise argparse.ArgumentTypeError(msg)
     return limit
+
+
+def _non_negative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        msg = "value must be a finite number greater than or equal to 0"
+        raise argparse.ArgumentTypeError(msg) from exc
+    if not isfinite(parsed) or parsed < 0:
+        msg = "value must be a finite number greater than or equal to 0"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
 
 
 def _format_stdout_summary(

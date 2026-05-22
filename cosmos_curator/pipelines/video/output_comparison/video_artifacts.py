@@ -17,14 +17,14 @@
 import json
 import time
 from collections.abc import Mapping, MutableMapping
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import attrs
 import smart_open  # type: ignore[import-untyped]
 from loguru import logger
 
 from cosmos_curator.core.utils.storage import storage_utils
-from cosmos_curator.pipelines.video.output_comparison.json_types import JsonDictObject
+from cosmos_curator.pipelines.video.output_comparison.json_types import JsonDictObject, JsonValue
 from cosmos_curator.pipelines.video.output_comparison.summary_loader import OutputRoot
 from cosmos_curator.pipelines.video.output_comparison.video_schema import ClipComparisonSpec
 
@@ -63,6 +63,35 @@ class LoadedClipArtifacts:
     invalid_metadata_a: str | None
     invalid_metadata_b: str | None
 
+    def to_json_dict(self) -> JsonDictObject:
+        """Convert loaded artifacts to a JSON-compatible Ray Data row."""
+        return {
+            **self.spec.to_json_dict(),
+            "metadata_a": self.metadata_a,
+            "metadata_b": self.metadata_b,
+            "metadata_path_a": self.metadata_path_a,
+            "metadata_path_b": self.metadata_path_b,
+            "missing_metadata_a": self.missing_metadata_a,
+            "missing_metadata_b": self.missing_metadata_b,
+            "invalid_metadata_a": self.invalid_metadata_a,
+            "invalid_metadata_b": self.invalid_metadata_b,
+        }
+
+    @classmethod
+    def from_json_dict(cls, row: Mapping[str, JsonValue]) -> Self:
+        """Build loaded artifacts from a JSON-compatible Ray Data row."""
+        return cls(
+            spec=ClipComparisonSpec.from_json_dict(row),
+            metadata_a=_optional_json_object(row, "metadata_a"),
+            metadata_b=_optional_json_object(row, "metadata_b"),
+            metadata_path_a=_optional_str(row, "metadata_path_a"),
+            metadata_path_b=_optional_str(row, "metadata_path_b"),
+            missing_metadata_a=_required_bool(row, "missing_metadata_a"),
+            missing_metadata_b=_required_bool(row, "missing_metadata_b"),
+            invalid_metadata_a=_optional_str(row, "invalid_metadata_a"),
+            invalid_metadata_b=_optional_str(row, "invalid_metadata_b"),
+        )
+
 
 @attrs.define(frozen=True)
 class _LoadedClipMetadataSide:
@@ -79,6 +108,25 @@ class _ClipMetadataSideRequest:
     video_key: str
     clip_id: str
     metadata_version: str
+
+
+class ClipArtifactsLoadWorker:
+    """Callable Ray actor worker that loads reusable per-clip artifacts."""
+
+    def __init__(self, profile_name: str, metadata_version: str = "v0") -> None:
+        """Create an artifact loader with per-actor storage client caching."""
+        self._profile_name = profile_name
+        self._metadata_version = metadata_version
+        self._client_params_by_output_root: dict[tuple[str, str], Mapping[str, Any]] = {}
+
+    def __call__(self, row: Mapping[str, JsonValue]) -> JsonDictObject:
+        """Load one clip's artifacts and return a JSON-compatible artifact row."""
+        return load_clip_artifacts(
+            ClipComparisonSpec.from_json_dict(row),
+            profile_name=self._profile_name,
+            metadata_version=self._metadata_version,
+            client_params_by_output_root=self._client_params_by_output_root,
+        ).to_json_dict()
 
 
 def load_clip_artifacts(
@@ -240,3 +288,29 @@ def _read_json_object(path: OutputRoot, *, client_params: Mapping[str, Any]) -> 
         error_msg = "clip artifact metadata must contain a JSON object with string keys"
         raise ValueError(error_msg)
     return cast("JsonDictObject", data)
+
+
+def _optional_json_object(row: Mapping[str, JsonValue], field: str) -> JsonDictObject | None:
+    value = row[field]
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        error_msg = f"clip artifact row field {field!r} must be an object or null"
+        raise TypeError(error_msg)
+    return value
+
+
+def _required_bool(row: Mapping[str, JsonValue], field: str) -> bool:
+    value = row[field]
+    if not isinstance(value, bool):
+        error_msg = f"clip artifact row field {field!r} must be a boolean"
+        raise TypeError(error_msg)
+    return value
+
+
+def _optional_str(row: Mapping[str, JsonValue], field: str) -> str | None:
+    value = row[field]
+    if value is None or isinstance(value, str):
+        return value
+    error_msg = f"clip artifact row field {field!r} must be a string or null"
+    raise TypeError(error_msg)

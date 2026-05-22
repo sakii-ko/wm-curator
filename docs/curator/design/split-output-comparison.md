@@ -6,6 +6,10 @@ Split output comparison validates whether two runs of a split video pipeline pro
 starts from each output root's `summary.json`, then loads artifact evidence only for features that cannot be decided from
 summary accounting alone.
 
+The current metadata-backed feature path compares caption structure, motion scores, and aesthetic scores. Caption and
+score comparison share the same per-clip metadata load stage so `metas/<version>/<clip_uuid>.json` is read once per clip
+side when compatible features are enabled.
+
 The target architecture is a staged comparison pipeline with separate units of work for planning, artifact IO, model
 compute, and reporting:
 
@@ -63,6 +67,25 @@ missing/invalid metadata state, and enough identity fields to tie results back t
 Caption structure checks and future embedding-based checks should consume the same caption view. They should not
 each parse the raw metadata independently.
 
+### Loaded Clip Artifacts
+
+`LoadedClipArtifacts` is the reusable output of the clip metadata load stage. It carries the clip comparison spec, loaded
+metadata JSON for output A and output B, metadata paths, and missing/invalid metadata state.
+
+Feature comparators consume this row and build their own normalized views or observations. Captions turn it into
+`ClipCaptionView`; score comparison turns it into motion and aesthetic score observations. Keeping this boundary generic
+prevents each metadata-backed feature from re-reading the same per-clip JSON.
+
+### Score Features
+
+Score comparison reports motion and aesthetic scores as separate features:
+
+- `aesthetic_score` compares the scalar `aesthetic_score` metadata field.
+- `motion_score` compares `motion_score.global_mean` and `motion_score.per_patch_min_256`.
+
+The planner uses one clip plan named `scores` because both score features consume the same loaded metadata row. The
+reducer emits separate `feature_comparisons` entries so tolerances, metrics, and failures remain independent.
+
 ### Caption Pair
 
 A caption pair is a comparable caption/window pair derived from normalized caption views. Caption pairs are the natural
@@ -97,7 +120,7 @@ compare_split_outputs(...)
 |   |-- input: ClipComparisonSpec
 |   |-- resource shape: IO-bound, high concurrency
 |   |-- storage clients: persistent per actor or otherwise reused
-|   `-- output: ClipArtifactResult / normalized CaptionView input
+|   `-- output: LoadedClipArtifacts rows
 |
 |-- Ray stage: caption structure preparation and validation
 |   |
@@ -106,6 +129,13 @@ compare_split_outputs(...)
 |   |-- build normalized CaptionView once
 |   |-- emit structure issues/counts
 |   `-- emit comparable CaptionPair rows for model-backed checks
+|
+|-- Ray stage: score metadata validation and comparison
+|   |
+|   |-- input: loaded clip artifact rows
+|   |-- resource shape: cheap CPU
+|   |-- normalize motion/aesthetic score observations
+|   `-- emit score issues/counts
 |
 |-- Ray stage: embedding-based caption checks
 |   |
@@ -184,6 +214,12 @@ Caption example:
 - Both outputs have caption evidence. The comparison needs `metas/v0/{clip_uuid}.json` for relevant clips so it can
   compare caption windows and later build comparable caption pairs.
 
+Score example:
+
+- Selected clips may contain `motion_score`, `aesthetic_score`, both fields, or neither field. The comparison needs
+  `metas/v0/{clip_uuid}.json` so it can distinguish disabled scores from one-sided missing scores, malformed score
+  fields, and numeric value mismatches beyond tolerance.
+
 Current limitation: caption artifact loading supports only per-clip JSON metadata at `metas/v0/{clip_uuid}.json`.
 Outputs written with `--upload-clip-info-in-chunks` (`metas_jsonl/v0`) or `--upload-clip-info-in-lance` are not loaded
 for caption window comparison yet. When those outputs have caption counts in `summary.json`, the caption feature can
@@ -206,8 +242,8 @@ The driver owns:
 Ray workers own:
 
 - loading per-clip artifacts;
-- building normalized per-clip views;
-- running structure checks;
+- building feature-specific normalized per-clip views or observations from loaded artifacts;
+- running structure and score checks;
 - running model-backed checks in persistent actors when needed;
 - returning compact JSON-serializable rows for reduction.
 
@@ -220,6 +256,7 @@ Different stages should use different execution strategies:
 | Summary comparison | Driver CPU, cheap | Driver-side |
 | Clip metadata load | IO-bound small-object reads | `ActorPoolStrategy` workers with persistent storage clients |
 | Caption structure validation | Cheap CPU | Task map or fused with load stage |
+| Score metadata validation/comparison | Cheap CPU | Task map over loaded metadata rows |
 | Embedding-based caption comparison | Model-backed compute | `ActorPoolStrategy`, batch-oriented |
 | Reduce/report | Aggregation | Driver-side by default |
 
@@ -253,6 +290,28 @@ Feature results are reported under `feature_comparisons`:
     "captions": {
       "status": "passed",
       "metrics": {}
+    },
+    "aesthetic_score": {
+      "status": "passed",
+      "metrics": {
+        "clips_with_scores_a": 10,
+        "clips_with_scores_b": 10,
+        "clips_compared": 10,
+        "fields_compared": 10,
+        "score_abs_tolerance": 0.000001,
+        "score_rel_tolerance": 0.000001
+      }
+    },
+    "motion_score": {
+      "status": "passed",
+      "metrics": {
+        "clips_with_scores_a": 10,
+        "clips_with_scores_b": 10,
+        "clips_compared": 10,
+        "fields_compared": 20,
+        "score_abs_tolerance": 0.000001,
+        "score_rel_tolerance": 0.000001
+      }
     }
   }
 }
@@ -290,12 +349,14 @@ stage.
 
 ## Stage Fusion Decisions
 
-Artifact loading should be fused with normalized view construction. Raw metadata JSON is not useful after parsing, and
-passing it through Ray as an intermediate object would add serialization overhead without making later stages clearer.
+Artifact loading should be fused only up to the reusable artifact boundary. `ClipArtifactsLoadWorker` loads metadata
+once and emits `LoadedClipArtifacts` rows because multiple metadata-backed features can consume the same JSON. Feature
+comparators then build the normalized shape they need: caption views for caption structure checks, and score
+observations for motion/aesthetic score checks.
 
-Caption structure validation can either be fused with view construction or run as the immediate next cheap CPU stage.
-The stronger boundary is between structure/view work and model-backed embedding comparison. Model-backed comparison
-should remain a separate actor-backed stage so it can own different resources, batching, and persistent model state.
+Caption structure validation and score comparison can run as cheap CPU maps over the loaded artifact rows. The stronger
+boundary is between structure/view work and model-backed embedding comparison. Model-backed comparison should remain a
+separate actor-backed stage so it can own different resources, batching, and persistent model state.
 
 ## Reduction Decisions
 
@@ -317,9 +378,9 @@ motivated the pipeline pivot.
 Clip rows should be the first implementation target:
 
 - expand `VideoComparisonSpec` into `ClipComparisonSpec` rows on the driver;
-- load each clip's output A/B metadata independently;
-- build normalized per-clip caption views during artifact load;
-- emit compact clip-level structure results and comparable caption pairs;
+- load each clip's output A/B metadata independently into reusable `LoadedClipArtifacts` rows;
+- build normalized per-feature views or observations from loaded artifacts;
+- emit compact clip-level caption, score, and future comparable caption-pair results;
 - reduce clip-level rows back into video-level and feature-level report results.
 
 This is a larger first refactor, but it aligns the implementation with the target architecture and avoids a short-lived
@@ -333,14 +394,14 @@ The current modules can evolve toward the staged design without changing the pub
 - `compare_features.py`: own Ray-specific feature comparison pipeline assembly.
 - caption modules: split reusable caption view construction from structure comparison and future model-backed checks.
 - artifact modules: expose clip-level loaders and avoid video-sized artifact bundles as the primary execution unit.
+- score modules: keep score metadata normalization, per-field tolerance comparison, and score-specific issue shaping
+  behind a feature comparator.
 
 The important boundary is that feature stages consume prepared views and emit row results; they should not each reload
 or reparse the same artifact evidence.
 
-The current readability refactor keeps a simpler caption-only `ClipFeaturePlan` shape where each clip feature owns its
-load/normalize worker. That is acceptable for caption structure comparison as the only clip feature, but the next
-metadata-backed feature should introduce shared clip loading or grouping by artifact/load configuration so caption,
-motion, aesthetic, and similar metadata-backed checks do not repeat the same object-store reads.
+The current implementation groups clip feature plans by artifact/load configuration so caption, motion, aesthetic, and
+similar metadata-backed checks can share object-store reads when they use the same clip specs and loader settings.
 
 ## Open Questions
 

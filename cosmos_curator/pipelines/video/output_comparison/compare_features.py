@@ -14,17 +14,35 @@
 # limitations under the License.
 """Feature comparison for split pipeline outputs."""
 
+import json
 import time
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol, cast
+from collections import Counter
+from collections.abc import Callable, Hashable, Mapping, Sequence
+from datetime import date, datetime
+from enum import Enum
+from typing import Any, cast
 
 import attrs
 import ray
 from loguru import logger
 from ray.data import ActorPoolStrategy, TaskPoolStrategy
 
-from cosmos_curator.pipelines.video.output_comparison.json_types import JsonDictObject, JsonValue
+from cosmos_curator.pipelines.video.output_comparison.caption_comparator import CaptionFeatureComparator
+from cosmos_curator.pipelines.video.output_comparison.feature_plan import (
+    ClipFeaturePlan,
+    FeatureComparisonContext,
+    FeatureComparisonPlan,
+    FeatureComparisonPlanner,
+    FeatureComparisonResult,
+    FeatureComparisonResults,
+    ResolvedFeaturePlan,
+)
+from cosmos_curator.pipelines.video.output_comparison.json_types import JsonValue
 from cosmos_curator.pipelines.video.output_comparison.report import FeatureComparison, Issue
+from cosmos_curator.pipelines.video.output_comparison.score_comparator import (
+    ScoreComparisonPolicy,
+    ScoreFeatureComparator,
+)
 from cosmos_curator.pipelines.video.output_comparison.summary_loader import OutputRoot
 from cosmos_curator.pipelines.video.output_comparison.summary_schema import OutputSummary
 from cosmos_curator.pipelines.video.output_comparison.video_planning import (
@@ -32,80 +50,7 @@ from cosmos_curator.pipelines.video.output_comparison.video_planning import (
     VideoComparisonResult,
     build_video_comparison_specs,
 )
-from cosmos_curator.pipelines.video.output_comparison.video_schema import ClipComparisonSpec, VideoComparisonSpec
-
-
-@attrs.define(frozen=True)
-class FeatureComparisonContext:
-    """Planning data passed to each feature comparison planner.
-
-    This contains the two output roots, loaded summaries, selected video specs,
-    storage profile, and optional selectors. A feature uses it to decide whether
-    summary data is enough or clip-level Ray Data work is needed.
-    """
-
-    output_a: OutputRoot
-    output_b: OutputRoot
-    summary_a: OutputSummary
-    summary_b: OutputSummary
-    profile_name: str
-    specs: tuple[VideoComparisonSpec, ...]
-    video_limit: int | None = None
-    selected_video_key: str | None = None
-
-
-@attrs.define(frozen=True)
-class FeatureComparisonResult:
-    """Issues and report data emitted by one feature comparison planner."""
-
-    issues: tuple[Issue, ...]
-    comparison: FeatureComparison
-
-
-@attrs.define(frozen=True)
-class ResolvedFeaturePlan:
-    """Feature comparison plan that is already resolved without artifact work."""
-
-    feature_name: str
-    result: FeatureComparisonResult
-
-
-@attrs.define(frozen=True)
-class ClipFeaturePlan:
-    """Feature comparison plan that runs one Ray row per selected clip.
-
-    Attributes:
-        feature_name: Feature name used in report output.
-        clip_specs: Clip rows that should enter the Ray Data stage.
-        load_worker_class: Callable class used as an actor-backed load/normalize
-            worker.
-        load_worker_constructor_kwargs: Constructor kwargs for
-            ``load_worker_class``.
-        compare_row: Worker-side comparison callable for one loaded row.
-        reduce_rows: Driver-side reducer for compact comparison rows.
-
-    """
-
-    feature_name: str
-    clip_specs: tuple[ClipComparisonSpec, ...]
-    load_worker_class: type
-    load_worker_constructor_kwargs: Mapping[str, Any]
-    compare_row: Callable[[Mapping[str, JsonValue]], JsonDictObject]
-    reduce_rows: Callable[[Sequence[Mapping[str, JsonValue]]], FeatureComparisonResult]
-
-
-type FeatureComparisonPlan = ResolvedFeaturePlan | ClipFeaturePlan
-
-
-class FeatureComparisonPlanner(Protocol):
-    """Feature-specific output comparison planner."""
-
-    @property
-    def name(self) -> str:
-        """Return the feature name used in report output."""
-
-    def build_plan(self, context: FeatureComparisonContext) -> FeatureComparisonPlan:
-        """Build a resolved or clip-row feature comparison plan."""
+from cosmos_curator.pipelines.video.output_comparison.video_schema import ClipComparisonSpec
 
 
 def compare_features(  # noqa: PLR0913
@@ -120,6 +65,10 @@ def compare_features(  # noqa: PLR0913
     feature_planners: Sequence[FeatureComparisonPlanner] | None = None,
     workers_per_node: int = 32,
     cpus_per_worker: float = 0.25,
+    motion_score_abs_tolerance: float = 1e-6,
+    motion_score_rel_tolerance: float = 1e-6,
+    aesthetic_score_abs_tolerance: float = 1e-6,
+    aesthetic_score_rel_tolerance: float = 1e-6,
 ) -> VideoComparisonResult:
     """Compare output features using resolved or Ray Data clip-feature plans.
 
@@ -138,10 +87,18 @@ def compare_features(  # noqa: PLR0913
             exclusive with ``video_limit``.
         feature_planners: Optional feature-specific planners. Each planner
             returns either a resolved result or a clip-level Ray Data plan. When
-            omitted, caption structure comparison is run.
+            omitted, caption structure and score metadata comparisons are run.
         workers_per_node: Number of Ray Data worker actors/tasks to schedule per
             Ray node for clip-level feature plans.
         cpus_per_worker: CPU reservation for each Ray Data worker actor/task.
+        motion_score_abs_tolerance: Absolute tolerance for motion score value
+            comparisons.
+        motion_score_rel_tolerance: Relative tolerance for motion score value
+            comparisons.
+        aesthetic_score_abs_tolerance: Absolute tolerance for aesthetic score
+            value comparisons.
+        aesthetic_score_rel_tolerance: Relative tolerance for aesthetic score
+            value comparisons.
 
     Returns:
         Feature comparison result containing feature-level issues and report
@@ -150,7 +107,16 @@ def compare_features(  # noqa: PLR0913
     """
     if profile_name is None:
         profile_name = DEFAULT_PROFILE_NAME
-    feature_planners = _default_feature_planners() if feature_planners is None else tuple(feature_planners)
+    feature_planners = (
+        _default_feature_planners(
+            motion_score_abs_tolerance=motion_score_abs_tolerance,
+            motion_score_rel_tolerance=motion_score_rel_tolerance,
+            aesthetic_score_abs_tolerance=aesthetic_score_abs_tolerance,
+            aesthetic_score_rel_tolerance=aesthetic_score_rel_tolerance,
+        )
+        if feature_planners is None
+        else tuple(feature_planners)
+    )
     started_at = time.perf_counter()
     specs = build_video_comparison_specs(
         output_a,
@@ -199,13 +165,12 @@ def compare_features(  # noqa: PLR0913
                     feature_plan.feature_name,
                     len(feature_plan.clip_specs),
                 )
+    _validate_unique_plan_feature_names((*resolved_plans, *clip_plans))
     execution_config = _RayDataExecutionConfig(
         workers_per_node=workers_per_node,
         cpus_per_worker=cpus_per_worker,
     )
-    clip_rows_by_feature = {
-        plan.feature_name: _run_ray_data_clip_feature_plan(plan, execution_config) for plan in clip_plans
-    }
+    clip_rows_by_feature = _run_ray_data_clip_feature_plans(clip_plans, execution_config)
     logger.info(
         "Reducing output feature comparisons: resolved_features={}, clip_features={}, clip_rows={}",
         len(resolved_plans),
@@ -226,12 +191,24 @@ def compare_features(  # noqa: PLR0913
     return comparison_result
 
 
-def _default_feature_planners() -> tuple[FeatureComparisonPlanner, ...]:
-    from cosmos_curator.pipelines.video.output_comparison.caption_comparator import (  # noqa: PLC0415
-        CaptionFeatureComparator,
+def _default_feature_planners(
+    *,
+    motion_score_abs_tolerance: float = 1e-6,
+    motion_score_rel_tolerance: float = 1e-6,
+    aesthetic_score_abs_tolerance: float = 1e-6,
+    aesthetic_score_rel_tolerance: float = 1e-6,
+) -> tuple[FeatureComparisonPlanner, ...]:
+    return (
+        CaptionFeatureComparator(),
+        ScoreFeatureComparator(
+            ScoreComparisonPolicy(
+                motion_abs_tolerance=motion_score_abs_tolerance,
+                motion_rel_tolerance=motion_score_rel_tolerance,
+                aesthetic_abs_tolerance=aesthetic_score_abs_tolerance,
+                aesthetic_rel_tolerance=aesthetic_score_rel_tolerance,
+            )
+        ),
     )
-
-    return (CaptionFeatureComparator(),)
 
 
 @attrs.define(frozen=True)
@@ -242,10 +219,122 @@ class _RayDataExecutionConfig:
     cpus_per_worker: float
 
 
-def _run_ray_data_clip_feature_plan(
+@attrs.define(frozen=True)
+class _ClipFeatureLoadGroupKey:
+    """Hashable identity for clip feature plans that can share loaded rows."""
+
+    clip_specs: tuple[ClipComparisonSpec, ...]
+    load_worker_class: type
+    load_worker_constructor_identity: Hashable
+
+
+@attrs.define(frozen=True)
+class _ClipFeatureLoadGroup:
+    """Clip feature plans that share the same load stage."""
+
+    key: _ClipFeatureLoadGroupKey
+    plans: tuple[ClipFeaturePlan, ...]
+
+
+@attrs.define(frozen=True)
+class _LoadedClipDataset:
+    """Materialized Ray Dataset containing reusable loaded clip artifacts.
+
+    ``ray.data.Dataset.__len__`` intentionally raises, and ``count()`` can
+    trigger an extra distributed action.  Keep the row count captured from the
+    driver-built clip specs so compare stages can size task pools and log row
+    counts without collecting or recounting the loaded artifact rows.
+    """
+
+    dataset: ray.data.Dataset
+    row_count: int
+
+
+def _run_ray_data_clip_feature_plans(
+    plans: Sequence[ClipFeaturePlan],
+    config: _RayDataExecutionConfig,
+) -> dict[str, list[Mapping[str, JsonValue]]]:
+    rows_by_feature: dict[str, list[Mapping[str, JsonValue]]] = {}
+    for group in _clip_feature_load_groups(plans):
+        loaded_rows = _run_ray_data_clip_feature_load(group.plans[0], config)
+        for plan in group.plans:
+            if plan.feature_name in rows_by_feature:
+                error_msg = f"Duplicate feature plan names are not supported: {plan.feature_name}"
+                raise ValueError(error_msg)
+            rows_by_feature[plan.feature_name] = _run_ray_data_clip_feature_compare(plan, loaded_rows, config)
+    return rows_by_feature
+
+
+def _clip_feature_load_groups(plans: Sequence[ClipFeaturePlan]) -> tuple[_ClipFeatureLoadGroup, ...]:
+    plans_by_key: dict[_ClipFeatureLoadGroupKey, list[ClipFeaturePlan]] = {}
+    for plan in plans:
+        plans_by_key.setdefault(_clip_feature_load_group_key(plan), []).append(plan)
+    return tuple(_ClipFeatureLoadGroup(key=key, plans=tuple(group_plans)) for key, group_plans in plans_by_key.items())
+
+
+def _clip_feature_load_group_key(plan: ClipFeaturePlan) -> _ClipFeatureLoadGroupKey:
+    return _ClipFeatureLoadGroupKey(
+        clip_specs=plan.clip_specs,
+        load_worker_class=plan.load_worker_class,
+        load_worker_constructor_identity=plan.load_group_id
+        if plan.load_group_id is not None
+        else _canonical_load_worker_constructor_kwargs(plan.load_worker_constructor_kwargs),
+    )
+
+
+def _canonical_load_worker_constructor_kwargs(kwargs: Mapping[str, Any]) -> str:
+    try:
+        return json.dumps(
+            _normalize_load_group_value(kwargs),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        error_msg = (
+            "load_worker_constructor_kwargs must be JSON-serializable for load grouping; "
+            "set load_group_id for non-serializable values"
+        )
+        raise TypeError(error_msg) from exc
+
+
+def _normalize_load_group_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, str | int | float | bool):
+        return cast("JsonValue", value)
+    if isinstance(value, list):
+        return {"__type__": "list", "items": [_normalize_load_group_value(item) for item in value]}
+    if isinstance(value, tuple):
+        return {"__type__": "tuple", "items": [_normalize_load_group_value(item) for item in value]}
+    if isinstance(value, Mapping):
+        normalized_items = [
+            [_normalize_load_group_value(key), _normalize_load_group_value(item)] for key, item in value.items()
+        ]
+        normalized_items.sort(key=lambda item: json.dumps(item[0], sort_keys=True, separators=(",", ":")))
+        return {"__type__": "mapping", "items": cast("list[JsonValue]", normalized_items)}
+    return _load_group_json_default(value)
+
+
+def _load_group_json_default(value: object) -> JsonValue:
+    if isinstance(value, Enum):
+        return {
+            "__type__": "enum",
+            "class": f"{value.__class__.__module__}.{value.__class__.__qualname__}",
+            "name": value.name,
+        }
+    if isinstance(value, datetime | date):
+        return {"__type__": value.__class__.__name__, "value": value.isoformat()}
+    if isinstance(value, bytes):
+        return {"__type__": "bytes", "value": value.hex()}
+    if isinstance(value, type):
+        return {"__type__": "type", "value": f"{value.__module__}.{value.__qualname__}"}
+    error_msg = f"Object of type {value.__class__.__name__} is not JSON serializable"
+    raise TypeError(error_msg)
+
+
+def _run_ray_data_clip_feature_load(
     plan: ClipFeaturePlan,
     config: _RayDataExecutionConfig,
-) -> list[Mapping[str, JsonValue]]:
+) -> _LoadedClipDataset | None:
     dataset_rows = [spec.to_json_dict() for spec in plan.clip_specs]
     if config.workers_per_node <= 0:
         error_msg = "workers_per_node must be greater than 0"
@@ -255,7 +344,7 @@ def _run_ray_data_clip_feature_plan(
         raise ValueError(error_msg)
     if not dataset_rows:
         logger.info("Skipping Ray Data clip feature plan: feature={}, no clip specs", plan.feature_name)
-        return []
+        return None
 
     _disable_ray_data_progress_ui()
     if not ray.is_initialized():
@@ -264,7 +353,7 @@ def _run_ray_data_clip_feature_plan(
     node_count = len(ray.nodes())  # type: ignore[no-untyped-call]
     compute_size = min(config.workers_per_node * node_count, len(dataset_rows))
     logger.info(
-        "Running Ray Data clip feature plan: feature={}, clips={}, nodes={}, actors={}, cpus_per_actor={}",
+        "Running Ray Data clip feature load stage: feature={}, clips={}, nodes={}, actors={}, cpus_per_actor={}",
         plan.feature_name,
         len(dataset_rows),
         node_count,
@@ -282,11 +371,38 @@ def _run_ray_data_clip_feature_plan(
         compute=ActorPoolStrategy(size=compute_size),
         fn_constructor_kwargs=dict(plan.load_worker_constructor_kwargs),
     )
+    materialization_started_at = time.perf_counter()
+    loaded_dataset = view_dataset.materialize()
+    logger.info(
+        "Materialized Ray Data clip feature loaded rows: feature={}, rows={}, elapsed_sec={:.2f}",
+        plan.feature_name,
+        len(dataset_rows),
+        time.perf_counter() - materialization_started_at,
+    )
+    return _LoadedClipDataset(dataset=loaded_dataset, row_count=len(dataset_rows))
+
+
+def _run_ray_data_clip_feature_compare(
+    plan: ClipFeaturePlan,
+    loaded_rows: _LoadedClipDataset | None,
+    config: _RayDataExecutionConfig,
+) -> list[Mapping[str, JsonValue]]:
+    if loaded_rows is None or loaded_rows.row_count == 0:
+        logger.info("Skipping Ray Data clip feature compare stage: feature={}, no loaded rows", plan.feature_name)
+        return []
+    compute_size = min(config.workers_per_node * len(ray.nodes()), loaded_rows.row_count)  # type: ignore[no-untyped-call]
+    logger.info(
+        "Running Ray Data clip feature compare stage: feature={}, rows={}, tasks={}, cpus_per_task={}",
+        plan.feature_name,
+        loaded_rows.row_count,
+        compute_size,
+        config.cpus_per_worker,
+    )
     compare_fn = cast(
         "Callable[[dict[str, Any]], dict[str, Any]]",
         plan.compare_row,
     )
-    mapped_dataset = view_dataset.map(
+    mapped_dataset = loaded_rows.dataset.map(
         compare_fn,
         num_cpus=config.cpus_per_worker,
         compute=TaskPoolStrategy(size=compute_size),
@@ -322,12 +438,43 @@ def _build_video_comparison_result(
     clip_plans: Sequence[ClipFeaturePlan],
     clip_rows_by_feature: Mapping[str, Sequence[Mapping[str, JsonValue]]],
 ) -> VideoComparisonResult:
-    results = {plan.feature_name: plan.result for plan in resolved_plans}
-    for plan in clip_plans:
-        results[plan.feature_name] = plan.reduce_rows(clip_rows_by_feature[plan.feature_name])
+    results: dict[str, FeatureComparisonResult] = {}
+    for resolved_plan in resolved_plans:
+        _add_feature_results(results, resolved_plan.feature_name, resolved_plan.result)
+    for clip_plan in clip_plans:
+        _add_feature_results(
+            results,
+            clip_plan.feature_name,
+            clip_plan.reduce_rows(clip_rows_by_feature[clip_plan.feature_name]),
+        )
     issues: list[Issue] = []
     feature_comparisons: dict[str, FeatureComparison] = {}
     for feature_name, result in sorted(results.items()):
         issues.extend(result.issues)
         feature_comparisons[feature_name] = result.comparison
     return VideoComparisonResult(issues=tuple(issues), feature_comparisons=feature_comparisons)
+
+
+def _validate_unique_plan_feature_names(plans: Sequence[FeatureComparisonPlan]) -> None:
+    duplicate_names = sorted(name for name, count in Counter(plan.feature_name for plan in plans).items() if count > 1)
+    if duplicate_names:
+        error_msg = f"Duplicate feature plan names are not supported: {duplicate_names}"
+        raise ValueError(error_msg)
+
+
+def _add_feature_results(
+    results: dict[str, FeatureComparisonResult],
+    feature_name: str,
+    plan_results: FeatureComparisonResults,
+) -> None:
+    if isinstance(plan_results, FeatureComparisonResult):
+        if feature_name in results:
+            error_msg = f"Duplicate feature results are not supported: {feature_name}"
+            raise ValueError(error_msg)
+        results[feature_name] = plan_results
+        return
+    duplicate_names = sorted(set(results).intersection(plan_results))
+    if duplicate_names:
+        error_msg = f"Duplicate feature results are not supported: {duplicate_names}"
+        raise ValueError(error_msg)
+    results.update(plan_results)

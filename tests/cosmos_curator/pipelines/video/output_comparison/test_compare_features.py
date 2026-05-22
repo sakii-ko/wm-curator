@@ -22,11 +22,14 @@ import pytest
 
 from cosmos_curator.pipelines.video.output_comparison.caption_comparator import CaptionFeatureComparator
 from cosmos_curator.pipelines.video.output_comparison.compare_features import (
+    _canonical_load_worker_constructor_kwargs,
+    compare_features,
+)
+from cosmos_curator.pipelines.video.output_comparison.feature_plan import (
     ClipFeaturePlan,
     FeatureComparisonContext,
     FeatureComparisonResult,
     ResolvedFeaturePlan,
-    compare_features,
 )
 from cosmos_curator.pipelines.video.output_comparison.report import FeatureComparison
 from cosmos_curator.pipelines.video.output_comparison.summary_schema import OutputSummary
@@ -51,6 +54,23 @@ class _FakeResolvedComparator:
                 issues=(),
                 comparison=FeatureComparison(status="passed", metrics={"planned_videos": len(context.specs)}),
             ),
+        )
+
+
+class _FakeMappedResolvedComparator:
+    @property
+    def name(self) -> str:
+        return "fake_mapped"
+
+    def build_plan(self, context: FeatureComparisonContext) -> ResolvedFeaturePlan:
+        return ResolvedFeaturePlan(
+            feature_name=self.name,
+            result={
+                "fake_resolved": FeatureComparisonResult(
+                    issues=(),
+                    comparison=FeatureComparison(status="passed", metrics={"planned_videos": len(context.specs)}),
+                )
+            },
         )
 
 
@@ -83,6 +103,36 @@ class _FakeClipComparator:
             "clip_id": row["clip_id"],
             "marker": row["loaded_marker"],
         }
+
+    def _reduce_rows(self, rows: Sequence[dict[str, object]]) -> FeatureComparisonResult:
+        return FeatureComparisonResult(
+            issues=(),
+            comparison=FeatureComparison(status="passed", metrics={"rows": len(rows)}),
+        )
+
+
+class _FakeNonSerializableClipComparator:
+    def __init__(self, *, load_group_id: str | None = None) -> None:
+        self._load_group_id = load_group_id
+
+    @property
+    def name(self) -> str:
+        return "fake_nonserializable_clip"
+
+    def build_plan(self, context: FeatureComparisonContext) -> ClipFeaturePlan:
+        _ = context
+        return ClipFeaturePlan(
+            feature_name=self.name,
+            clip_specs=(),
+            load_worker_class=_FakeClipLoadWorker,
+            load_worker_constructor_kwargs={"marker": object()},
+            compare_row=self._compare_row,
+            reduce_rows=self._reduce_rows,
+            load_group_id=self._load_group_id,
+        )
+
+    def _compare_row(self, row: dict[str, object]) -> dict[str, object]:
+        return row
 
     def _reduce_rows(self, rows: Sequence[dict[str, object]]) -> FeatureComparisonResult:
         return FeatureComparisonResult(
@@ -364,6 +414,62 @@ def test_compare_features_runs_injected_feature_plans(tmp_path: Path) -> None:
     assert result.feature_comparisons["fake_clip"].metrics == {"rows": 2}
 
 
+def test_compare_features_rejects_duplicate_feature_plan_names(tmp_path: Path) -> None:
+    """Feature plan names are report keys and must not collide."""
+    with pytest.raises(ValueError, match="Duplicate feature plan names"):
+        compare_features(
+            tmp_path / "output-a",
+            tmp_path / "output-b",
+            _output_summary(),
+            _output_summary(),
+            feature_planners=(_FakeResolvedComparator(), _FakeResolvedComparator()),
+        )
+
+
+def test_compare_features_rejects_duplicate_feature_result_names(tmp_path: Path) -> None:
+    """Mapped feature results must not overwrite earlier feature results."""
+    with pytest.raises(ValueError, match="Duplicate feature results"):
+        compare_features(
+            tmp_path / "output-a",
+            tmp_path / "output-b",
+            _output_summary(),
+            _output_summary(),
+            feature_planners=(_FakeResolvedComparator(), _FakeMappedResolvedComparator()),
+        )
+
+
+def test_compare_features_rejects_nonserializable_load_group_kwargs(tmp_path: Path) -> None:
+    """Load grouping requires stable constructor identities for custom non-JSON kwargs."""
+    with pytest.raises(TypeError, match="set load_group_id"):
+        compare_features(
+            tmp_path / "output-a",
+            tmp_path / "output-b",
+            _output_summary(),
+            _output_summary(),
+            feature_planners=(_FakeNonSerializableClipComparator(),),
+        )
+
+
+def test_compare_features_accepts_explicit_load_group_id_for_nonserializable_kwargs(tmp_path: Path) -> None:
+    """Custom planners can provide an explicit stable load group identity."""
+    result = compare_features(
+        tmp_path / "output-a",
+        tmp_path / "output-b",
+        _output_summary(),
+        _output_summary(),
+        feature_planners=(_FakeNonSerializableClipComparator(load_group_id="fake-loader"),),
+    )
+
+    assert result.feature_comparisons["fake_nonserializable_clip"].metrics == {"rows": 0}
+
+
+def test_load_group_identity_preserves_container_types() -> None:
+    """Load grouping must not collapse distinct Python container types."""
+    assert _canonical_load_worker_constructor_kwargs({"marker": [1, 2]}) != _canonical_load_worker_constructor_kwargs(
+        {"marker": (1, 2)}
+    )
+
+
 def test_compare_features_caps_ray_compute_size_to_clip_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -388,8 +494,8 @@ def test_compare_features_caps_ray_compute_size_to_clip_rows(
         workers_per_node=32,
     )
 
-    assert actor_sizes == [1]
-    assert task_sizes == [1]
+    assert actor_sizes == [1, 2]
+    assert task_sizes == [1, 2]
 
 
 @pytest.mark.parametrize(
@@ -512,6 +618,7 @@ def test_compare_features_skips_no_caption_video_metadata(
         tmp_path / "output-b",
         summary_value,
         summary_value,
+        feature_planners=(CaptionFeatureComparator(),),
     )
 
     assert result.issues == ()

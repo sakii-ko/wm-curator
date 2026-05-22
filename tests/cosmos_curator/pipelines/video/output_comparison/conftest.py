@@ -97,21 +97,25 @@ def fake_ray_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run Ray Data executor tests through an in-process dataset."""
 
     class FakeDataset:
-        def __init__(self, rows: list[dict[str, object]]) -> None:
+        def __init__(self, rows: list[dict[str, object]], *, allow_iter_rows: bool = True) -> None:
             self.rows = rows
+            self._allow_iter_rows = allow_iter_rows
 
         def map(self, fn: object, **kwargs: object) -> "FakeDataset":
-            _ = kwargs
             constructor_kwargs = kwargs.get("fn_constructor_kwargs", {})
             if isinstance(fn, type):
                 worker = fn(**constructor_kwargs)  # type: ignore[arg-type]
-                self.rows = [worker(row) for row in self.rows]
-            else:
-                map_fn = cast("Callable[[dict[str, object]], dict[str, object]]", fn)
-                self.rows = [map_fn(row) for row in self.rows]
+                return FakeDataset([worker(row) for row in self.rows], allow_iter_rows=False)
+            map_fn = cast("Callable[[dict[str, object]], dict[str, object]]", fn)
+            return FakeDataset([map_fn(row) for row in self.rows])
+
+        def materialize(self) -> "FakeDataset":
             return self
 
         def iter_rows(self) -> list[dict[str, object]]:
+            if not self._allow_iter_rows:
+                msg = "loaded artifact rows should stay in Ray until a compare stage maps them to compact rows"
+                raise AssertionError(msg)
             return self.rows
 
     monkeypatch.setattr("ray.data.from_items", lambda rows: FakeDataset(rows))
