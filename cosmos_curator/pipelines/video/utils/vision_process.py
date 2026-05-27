@@ -155,6 +155,7 @@ def fetch_video(  # noqa: C901, PLR0911, PLR0913
     preprocess_dtype: str = "float32",
     num_frames_to_use: int = 0,
     flip_input: bool = False,
+    max_pixels_per_frame: int | None = None,
 ) -> tuple[torch.Tensor, list[int]]:
     """Load and preprocess video frames from a file.
 
@@ -166,6 +167,7 @@ def fetch_video(  # noqa: C901, PLR0911, PLR0913
         preprocess_dtype: Data type for preprocessing.
         num_frames_to_use: Number of frames to extract (0 for all).
         flip_input: Whether to flip frames horizontally.
+        max_pixels_per_frame: Optional fixed per-frame resize upper bound.
 
     Returns:
         Tuple of (processed frames tensor, frame counts for each window).
@@ -181,10 +183,12 @@ def fetch_video(  # noqa: C901, PLR0911, PLR0913
     )
     nframes, _, height, width = video.shape
 
-    max_pixels = max(
-        min(VIDEO_MAX_PIXELS, int(VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR)),
-        int(VIDEO_MIN_PIXELS * 1.05),
-    )
+    max_pixels = max_pixels_per_frame
+    if max_pixels is None:
+        max_pixels = max(
+            min(VIDEO_MAX_PIXELS, int(VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR)),
+            int(VIDEO_MIN_PIXELS * 1.05),
+        )
     resized_height, resized_width = smart_resize(
         height,
         width,

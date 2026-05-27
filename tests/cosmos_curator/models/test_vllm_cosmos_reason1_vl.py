@@ -34,6 +34,7 @@ if conda_utils.is_running_in_env("unified"):
         make_prompt,
     )
     from cosmos_curator.models.vllm_cosmos_reason2_vl import VllmCosmosReason2VL
+    from cosmos_curator.pipelines.video.utils.vision_process import VIDEO_MIN_PIXELS
 
     _PLUGIN_CLASSES = (VllmCosmosReason1VL, VllmCosmosReason2VL)
 
@@ -63,6 +64,43 @@ def test_make_llm_input_cosmos_reason(plugin_cls: type[VllmCosmosReason1VL]) -> 
     video_frames, video_metadata = result["multi_modal_data"]["video"][0]
     assert video_frames.shape == (2, 3, 32, 32)
     assert video_metadata == metadata
+    assert "mm_processor_kwargs" not in result
+
+
+@pytest.mark.env("unified")
+def test_cosmos_reason1_does_not_emit_size_when_cap_is_set() -> None:
+    """Cosmos-Reason1 support is enforced by fetch_video(), not request-level size."""
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = "mocked_reasoning_prompt"
+
+    frames = torch.rand(2, 3, 32, 32)
+    metadata = {"fps": 30, "duration": 1.0}
+    config = VllmConfig(model_variant="cosmos_r1", video_max_pixels_per_frame=602112)
+
+    result = VllmCosmosReason1VL.make_llm_input("Describe the video", frames, metadata, mock_processor, config)
+
+    assert "mm_processor_kwargs" not in result
+
+
+@pytest.mark.env("unified")
+def test_cosmos_reason2_emits_top_level_qwen3_size_when_cap_is_set() -> None:
+    """Cosmos-Reason2 uses request-level Qwen3 processor sizing."""
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = "mocked_reasoning_prompt"
+
+    frames = torch.rand(3, 3, 32, 32)
+    metadata = {"fps": 30, "duration": 1.0}
+    config = VllmConfig(model_variant="cosmos_r2", video_max_pixels_per_frame=602112)
+
+    result = VllmCosmosReason2VL.make_llm_input("Describe the video", frames, metadata, mock_processor, config)
+
+    assert result["mm_processor_kwargs"] == {
+        "size": {
+            "shortest_edge": 3 * VIDEO_MIN_PIXELS,
+            "longest_edge": 3 * 602112,
+        }
+    }
+    assert "mm_processor_kwargs" not in result["multi_modal_data"]
 
 
 @pytest.mark.env("unified")
@@ -102,7 +140,12 @@ def test_make_refined_llm_request(plugin_cls: type[VllmCosmosReason1VL]) -> None
     frames = torch.rand(1, 3, 8, 8)
     metadata = {"fps": 30, "duration": 1.0}
     # Video is stored as (frames, metadata) tuple
-    base_inputs = {"prompt": "base", "multi_modal_data": {"video": [(frames, metadata)]}}
+    size_kwargs = {"size": {"shortest_edge": 2, "longest_edge": 4}}
+    base_inputs = {
+        "prompt": "base",
+        "multi_modal_data": {"video": [(frames, metadata)]},
+        "mm_processor_kwargs": size_kwargs,
+    }
 
     base_req = VllmCaptionRequest(
         request_id="r1",
@@ -115,6 +158,7 @@ def test_make_refined_llm_request(plugin_cls: type[VllmCosmosReason1VL]) -> None
     refined_frames, refined_metadata = refined.inputs["multi_modal_data"]["video"][0]
     assert refined_frames.shape == (1, 3, 8, 8)
     assert refined_metadata == metadata
+    assert refined.inputs["mm_processor_kwargs"] == size_kwargs
 
 
 @pytest.mark.env("unified")

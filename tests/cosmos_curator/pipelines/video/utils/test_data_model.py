@@ -33,6 +33,8 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     Video,
     VideoMetadata,
     VllmAsyncConfig,
+    VllmConfig,
+    WindowConfig,
     _add_children_to_queue,
     _get_object_size,
     assert_time_alignment,
@@ -837,3 +839,17 @@ class TestVllmAsyncConfigGpuMemoryUtilization:
         """Reject 0.0, negatives, and any value strictly greater than 1.0."""
         with pytest.raises(ValueError, match="gpu_memory_utilization"):
             VllmAsyncConfig(model_variant="qwen", gpu_memory_utilization=value)
+
+
+class TestVideoMaxPixelsPerFrameConfig:
+    """Defaults for the sync-only video resize upper-bound carriers."""
+
+    def test_sync_config_carriers_default_to_none(self) -> None:
+        """Unset configs preserve existing resize behavior."""
+        assert WindowConfig().video_max_pixels_per_frame is None
+        assert VllmConfig(model_variant="qwen").video_max_pixels_per_frame is None
+
+    def test_async_adapter_leaves_video_max_pixels_unset(self) -> None:
+        """Async plugin reuse cannot activate sync request-level sizing."""
+        sync_cfg = VllmAsyncConfig(model_variant="qwen3_vl_30b").to_vllm_config()
+        assert sync_cfg.video_max_pixels_per_frame is None

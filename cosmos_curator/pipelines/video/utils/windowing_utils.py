@@ -257,6 +257,7 @@ def split_video_into_windows(  # noqa: PLR0913
     target_bit_rate: str = f"{DEFAULT_TRANSCODE_BITRATE_M}M",
     return_video_frames: bool = True,
     num_threads: int = 1,
+    max_pixels_per_frame: int | None = None,
 ) -> tuple[list[bytes | None], list[torch.Tensor | None], list[WindowFrameInfo]]:
     """Calculate windows and return video inputs for the Qwen language model from input clips.
 
@@ -281,6 +282,7 @@ def split_video_into_windows(  # noqa: PLR0913
         target_bit_rate: Target bit rate for the output window mp4 bytes.
         return_video_frames: whether to return video frames
         num_threads: number of threads
+        max_pixels_per_frame: Optional fixed per-frame resize upper bound.
 
     Returns:
         Tuple containing three lists of equal length:
@@ -313,6 +315,7 @@ def split_video_into_windows(  # noqa: PLR0913
                 preprocess_dtype=preprocess_dtype,
                 num_frames_to_use=num_frames_to_use,
                 flip_input=flip_input,
+                max_pixels_per_frame=max_pixels_per_frame,
             )
 
             index = 0
@@ -400,6 +403,7 @@ def _make_windows_for_clip(  # noqa: PLR0913
         target_bit_rate=target_bit_rate,
         return_video_frames=return_frames,
         num_threads=num_decode_threads,
+        max_pixels_per_frame=config.video_max_pixels_per_frame,
     )
 
     for window_bytes, window_frames_tensor, window_frame_info in zip(

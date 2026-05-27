@@ -34,6 +34,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+import attrs
 import nvtx  # type: ignore[import-untyped]
 import psutil
 import tenacity
@@ -827,10 +828,11 @@ class VllmCaptionStage(SingleInferenceCaptionStage):
             raise RuntimeError(msg)
 
         video_tensor, video_metadata = self._decode_video_for_caption_single(video_bytes)
+        caption_single_config = attrs.evolve(self._vllm_config, video_max_pixels_per_frame=None)
         llm_inputs = make_model_inputs(
             videos=[video_tensor],
             metadata=[video_metadata],
-            config=self._vllm_config,
+            config=caption_single_config,
             processor=self._processor,
             prompt=prompt,
         )
@@ -838,8 +840,8 @@ class VllmCaptionStage(SingleInferenceCaptionStage):
             msg = "make_model_inputs produced no inputs for caption_single."
             raise RuntimeError(msg)
 
-        outputs = self._llm.generate(  # type: ignore[arg-type]
-            llm_inputs,
+        outputs = self._llm.generate(
+            llm_inputs,  # type: ignore[arg-type]
             sampling_params=self._caption_single_sampling_params,
             use_tqdm=False,
         )

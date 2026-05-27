@@ -51,7 +51,7 @@ def test_make_llm_input_nemotron() -> None:
         "video_backend": "opencv",
     }
 
-    config = VllmConfig(model_variant="nemotron")
+    config = VllmConfig(model_variant="nemotron", video_max_pixels_per_frame=602112)
     result = VllmNemotronNano12Bv2VL.make_llm_input(prompt, frames, metadata, mock_processor, config)
 
     # Verify structure
@@ -60,6 +60,7 @@ def test_make_llm_input_nemotron() -> None:
     assert result["prompt_token_ids"] == [1, 2, 3, 4, 5]  # Should be the token IDs as list
     assert result["multi_modal_data"]["video"][0].shape == (N, H, W, C)
     assert result["multi_modal_data"]["video"][1]["fps"] == metadata["fps"]
+    assert "mm_processor_kwargs" not in result
 
 
 @pytest.mark.env("unified")

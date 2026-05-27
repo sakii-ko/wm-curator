@@ -158,6 +158,9 @@ COSMOS_REASON_ALGOS = {"cosmos_r1", "cosmos_r2"}
 ALL_CAPTION_ALGOS = VLLM_CAPTION_ALGOS | {"gemini", "openai", "vllm_async"}
 MULTICAM_VIDEO_EXTENSIONS: set[str] = {".mp4"}
 QWEN3_VL_235B_HIGH_MEMORY_GPU_THRESHOLD_MB = 128_000
+# Keep these bounds local so the CLI path does not import vision_process.py and pull in torchvision.
+VLLM_VIDEO_MIN_PIXELS_PER_FRAME = 100_352
+VLLM_VIDEO_MAX_PIXELS_PER_FRAME = 602_112
 
 
 def _clamp_num_gpus_for_qwen3_235b(model_variant: str, num_gpus: int) -> int:
@@ -725,6 +728,24 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             window_config.model_does_preprocess = bool(args.vllm_async_preprocess)
         elif caption_algo == "nemotron":
             vllm_config.stage2_caption = args.nemotron_stage2_caption
+
+        if args.vllm_video_max_pixels_per_frame is not None:
+            video_max_pixels_per_frame = args.vllm_video_max_pixels_per_frame
+            if caption_algo not in VLLM_CAPTION_ALGOS:
+                msg = (
+                    "--vllm-video-max-pixels-per-frame is only supported for regular windowed sync "
+                    f"vLLM captioning algorithms: {sorted(VLLM_CAPTION_ALGOS)}"
+                )
+                raise ValueError(msg)
+            if not (VLLM_VIDEO_MIN_PIXELS_PER_FRAME <= video_max_pixels_per_frame <= VLLM_VIDEO_MAX_PIXELS_PER_FRAME):
+                msg = (
+                    "--vllm-video-max-pixels-per-frame must be an integer in "
+                    f"[{VLLM_VIDEO_MIN_PIXELS_PER_FRAME}, {VLLM_VIDEO_MAX_PIXELS_PER_FRAME}]; "
+                    "this is the per-frame upper bound for the resize budget."
+                )
+                raise ValueError(msg)
+            window_config.video_max_pixels_per_frame = video_max_pixels_per_frame
+            vllm_config.video_max_pixels_per_frame = video_max_pixels_per_frame
 
         # Wire up debug frame saving configuration
         if args.debug_save_vllm_frames:
@@ -2087,6 +2108,18 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         type=int,
         default=3,
         help="Number of times to retry vLLM captioning failures",
+    )
+    parser.add_argument(
+        "--vllm-video-max-pixels-per-frame",
+        type=int,
+        default=None,
+        help=(
+            "Optional per-frame maximum pixel budget for regular windowed sync vLLM video prep. "
+            "The minimum is the built-in VIDEO_MIN_PIXELS floor; this flag only sets the upper bound. "
+            f"Accepted values are [{VLLM_VIDEO_MIN_PIXELS_PER_FRAME}, {VLLM_VIDEO_MAX_PIXELS_PER_FRAME}]. "
+            "Effective frame shape is quantized by processor grid size, such as 28 for CPU prep or 32 for "
+            "Qwen3 model-side processing."
+        ),
     )
     parser.add_argument(
         "--copy-weights-to",

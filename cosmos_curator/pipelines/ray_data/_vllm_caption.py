@@ -388,6 +388,7 @@ def make_caption_window_rows_fn(
             preprocess_dtype=resolved_window_config.preprocess_dtype,
             return_bytes=False,
             return_video_frames=True,
+            max_pixels_per_frame=resolved_window_config.video_max_pixels_per_frame,
         )
 
         decoded_windows = []

@@ -20,7 +20,7 @@ import pytest
 import torch
 
 from cosmos_curator.core.utils.model import conda_utils
-from cosmos_curator.pipelines.video.utils.data_model import VllmConfig
+from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, VllmConfig
 
 if conda_utils.is_running_in_env("unified"):
     from cosmos_curator.models.vllm_qwen import (
@@ -30,7 +30,9 @@ if conda_utils.is_running_in_env("unified"):
         _strip_qwen3_reasoning,
         make_message,
         make_prompt,
+        qwen3_video_size_kwargs,
     )
+    from cosmos_curator.pipelines.video.utils.vision_process import VIDEO_MIN_PIXELS
 
     _MODEL_VARIANT = VllmQwen7B.model_variant()
 
@@ -60,6 +62,7 @@ def test_make_llm_input_qwen() -> None:
     video_frames, video_metadata = result["multi_modal_data"]["video"][0]
     assert video_frames.shape == (2, 3, 32, 32)
     assert video_metadata == metadata
+    assert "mm_processor_kwargs" not in result
 
 
 @pytest.mark.env("unified")
@@ -100,6 +103,7 @@ def test_make_llm_input_qwen3vl_image() -> None:
     assert "image" in result["multi_modal_data"]
     assert "video" not in result["multi_modal_data"]
     assert result["multi_modal_data"]["image"].shape == (1, 3, 32, 32)
+    assert "mm_processor_kwargs" not in result
 
 
 @pytest.mark.env("unified")
@@ -170,6 +174,105 @@ def test_make_llm_input_qwen3vl_video() -> None:
     video_frames, video_metadata = result["multi_modal_data"]["video"][0]
     assert video_frames.shape == (2, 3, 32, 32)
     assert video_metadata == metadata
+    assert "mm_processor_kwargs" not in result
+
+
+@pytest.mark.env("unified")
+@pytest.mark.parametrize("num_frames", [2, 3])
+def test_qwen3_video_size_kwargs_scales_edges_by_frame_count(num_frames: int) -> None:
+    """Qwen3 processor size is expressed as a whole-video budget."""
+    result = qwen3_video_size_kwargs(num_frames, 602112)
+
+    assert result == {
+        "size": {
+            "shortest_edge": num_frames * VIDEO_MIN_PIXELS,
+            "longest_edge": num_frames * 602112,
+        }
+    }
+
+
+@pytest.mark.env("unified")
+def test_qwen3_video_size_kwargs_boundary_min_equals_max() -> None:
+    """At the lower boundary, the fixed floor and user cap translate to the same whole-video budget."""
+    result = qwen3_video_size_kwargs(3, VIDEO_MIN_PIXELS)
+
+    assert result["size"]["shortest_edge"] == result["size"]["longest_edge"]
+
+
+@pytest.mark.env("unified")
+def test_make_llm_input_qwen3vl_video_emits_top_level_size() -> None:
+    """Qwen3 video inputs carry request-level processor size when the sync cap is set."""
+    mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = mock_tensor
+
+    frames = torch.rand(3, 3, 32, 32)
+    metadata = {"fps": 2.0, "duration": 1.5}
+    config = VllmConfig(model_variant="qwen3_vl_30b", video_max_pixels_per_frame=602112)
+
+    result = VllmQwen3VL.make_llm_input("Describe the video", frames, metadata, mock_processor, config)
+
+    assert result["mm_processor_kwargs"] == {
+        "size": {
+            "shortest_edge": 3 * VIDEO_MIN_PIXELS,
+            "longest_edge": 3 * 602112,
+        }
+    }
+    assert "mm_processor_kwargs" not in result["multi_modal_data"]
+
+
+@pytest.mark.env("unified")
+def test_make_llm_input_qwen_does_not_emit_size_when_cap_is_set() -> None:
+    """Qwen2.5 support is enforced by fetch_video(), not request-level size."""
+    mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = mock_tensor
+
+    frames = torch.rand(2, 3, 32, 32)
+    metadata = {"fps": 2.0, "duration": 1.0}
+    config = VllmConfig(model_variant="qwen", video_max_pixels_per_frame=602112)
+
+    result = VllmQwen.make_llm_input("Describe the video", frames, metadata, mock_processor, config)
+
+    assert "mm_processor_kwargs" not in result
+
+
+@pytest.mark.env("unified")
+def test_make_llm_input_qwen3vl_image_does_not_emit_video_size_when_cap_is_set() -> None:
+    """Image inputs do not receive video processor sizing."""
+    mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = mock_tensor
+
+    frames = torch.rand(1, 3, 32, 32)
+    config = VllmConfig(model_variant="qwen3_vl_30b", use_image_input=True, video_max_pixels_per_frame=602112)
+
+    result = VllmQwen3VL.make_llm_input("Describe the image", frames, {}, mock_processor, config)
+
+    assert "mm_processor_kwargs" not in result
+
+
+@pytest.mark.env("unified")
+def test_qwen_stage2_refine_preserves_mm_processor_kwargs() -> None:
+    """Stage-2 refinement keeps request-level processor sizing from stage 1."""
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
+
+    frames = torch.rand(2, 3, 32, 32)
+    size_kwargs = qwen3_video_size_kwargs(2, 602112)
+    base_req = VllmCaptionRequest(
+        request_id="r1",
+        inputs={
+            "prompt_token_ids": [0],
+            "multi_modal_data": {"video": [(frames, {"fps": 2.0})]},
+            "mm_processor_kwargs": size_kwargs,
+        },
+        caption="stage1 caption",
+    )
+
+    refined = VllmQwen3VL.make_refined_llm_request(base_req, mock_processor, refine_prompt="Refine: ")
+
+    assert refined.inputs["mm_processor_kwargs"] == size_kwargs
 
 
 @pytest.mark.env("unified")

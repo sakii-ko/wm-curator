@@ -332,6 +332,47 @@ def test_vllm_caption_single_returns_text_on_success(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.env("unified")
+def test_vllm_caption_single_clears_video_max_pixels_without_mutating_stage_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``caption_single`` remains out of scope for sync window resize overrides."""
+    from cosmos_curator.pipelines.video.captioning import vllm_caption_stage as vcs  # noqa: PLC0415
+    from cosmos_curator.pipelines.video.utils.data_model import VllmConfig  # noqa: PLC0415
+
+    stage = vcs.VllmCaptionStage(
+        vllm_config=VllmConfig(model_variant="qwen3_vl_30b", video_max_pixels_per_frame=602112)
+    )
+    captured: dict[str, object] = {}
+
+    def fake_make_model_inputs(**kwargs: object) -> list[dict[str, object]]:
+        captured["config"] = kwargs["config"]
+        return [{"prompt": "rendered", "multi_modal_data": {"video": [None]}}]
+
+    monkeypatch.setattr(vcs, "make_model_inputs", fake_make_model_inputs)
+    monkeypatch.setattr(
+        vcs.VllmCaptionStage,
+        "_decode_video_for_caption_single",
+        lambda _self, _bytes: (None, {}),
+    )
+
+    fake_engine = MagicMock()
+    fake_engine.generate.return_value = [
+        SimpleNamespace(outputs=[SimpleNamespace(text="caption-from-engine", finish_reason="stop")]),
+    ]
+    stage._llm = fake_engine
+    stage._processor = SimpleNamespace()
+    stage._caption_single_sampling_params = SimpleNamespace(max_tokens=4096)
+
+    out = stage.caption_single("describe", b"\x00mp4")
+
+    assert out == "caption-from-engine"
+    config = captured["config"]
+    assert isinstance(config, VllmConfig)
+    assert config.video_max_pixels_per_frame is None
+    assert stage._vllm_config.video_max_pixels_per_frame == 602112
+
+
+@pytest.mark.env("unified")
 def test_vllm_caption_single_raises_on_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty engine output raises ``RuntimeError`` with finish_reason in the message."""
     from cosmos_curator.pipelines.video.captioning import vllm_caption_stage as vcs  # noqa: PLC0415

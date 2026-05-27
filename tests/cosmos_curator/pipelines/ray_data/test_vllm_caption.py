@@ -39,7 +39,7 @@ from cosmos_curator.pipelines.ray_data._vllm_caption import (
     sampling_params_dict,
     write_captioned_metadata_and_summary,
 )
-from cosmos_curator.pipelines.video.utils.data_model import VllmConfig, VllmSamplingConfig
+from cosmos_curator.pipelines.video.utils.data_model import VllmConfig, VllmSamplingConfig, WindowConfig
 
 
 def _base_window_row(**overrides: object) -> dict[str, object]:
@@ -397,6 +397,41 @@ def test_normalize_caption_output_preserves_skipped_rows() -> None:
     assert skipped["caption_error"] == "no_caption_windows"
     assert skipped["qwen_caption"] is None
     assert skipped["qwen_prompt_tokens"] == 0
+
+
+@pytest.mark.parametrize("pixel_cap", [None, 100_500])
+def test_caption_window_rows_threads_window_pixel_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    pixel_cap: int | None,
+) -> None:
+    """Ray Data honors WindowConfig pixel caps without coupling VllmConfig request hints."""
+    captured_kwargs: dict[str, object] = {}
+
+    fake_vllm_interface = types.ModuleType("cosmos_curator.models.vllm_interface")
+    fake_vllm_interface.make_metadata = lambda *_args, **_kwargs: []
+    fake_vllm_interface.make_model_inputs = lambda *_args, **_kwargs: []
+
+    fake_windowing_utils = types.ModuleType("cosmos_curator.pipelines.video.utils.windowing_utils")
+
+    def fake_split_video_into_windows(
+        *_args: object, **kwargs: object
+    ) -> tuple[list[object], list[object], list[object]]:
+        captured_kwargs.update(kwargs)
+        return [], [], []
+
+    fake_windowing_utils.split_video_into_windows = fake_split_video_into_windows
+    monkeypatch.setitem(sys.modules, "cosmos_curator.models.vllm_interface", fake_vllm_interface)
+    monkeypatch.setitem(sys.modules, "cosmos_curator.pipelines.video.utils.windowing_utils", fake_windowing_utils)
+
+    make_rows = _captioner.make_caption_window_rows_fn(
+        window_config=WindowConfig(video_max_pixels_per_frame=pixel_cap),
+    )
+
+    rows = make_rows(_base_window_row(clip_bytes=b"not-real-video"))
+
+    assert captured_kwargs["max_pixels_per_frame"] == pixel_cap
+    assert rows[0]["caption_skip"] is True
+    assert rows[0]["caption_error"] == "no_caption_windows"
 
 
 def test_caption_window_rows_runs_window_generation_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

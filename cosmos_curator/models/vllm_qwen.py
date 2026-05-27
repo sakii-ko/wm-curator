@@ -26,6 +26,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 
 from cosmos_curator.models.vllm_plugin import VllmPlugin
 from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig, VllmCaptionRequest, VllmConfig
+from cosmos_curator.pipelines.video.utils.vision_process import VIDEO_MIN_PIXELS
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -49,6 +50,20 @@ def _strip_qwen3_reasoning(text: str) -> str:
     if "</think>" not in text:
         return text
     return _QWEN3_REASONING_PATTERN.sub("", text, count=1)
+
+
+def qwen3_video_size_kwargs(num_frames: int, cap: int) -> dict[str, dict[str, int]]:
+    """Return Qwen3 whole-video processor size from a per-frame upper bound.
+
+    ``shortest_edge`` is the fixed VIDEO_MIN_PIXELS floor translated to
+    whole-video units; only ``longest_edge`` reflects the user-supplied cap.
+    """
+    return {
+        "size": {
+            "shortest_edge": num_frames * VIDEO_MIN_PIXELS,
+            "longest_edge": num_frames * cap,
+        },
+    }
 
 
 MAX_MODEL_LEN = 32768
@@ -305,6 +320,8 @@ class VllmQwen(VllmPlugin):
         use_image = key == "image"
         message = make_message(final_prompt, use_image=use_image)
         inputs = make_prompt(message, mm_data[key], processor, use_image=use_image)
+        if "mm_processor_kwargs" in request.inputs:
+            inputs["mm_processor_kwargs"] = request.inputs["mm_processor_kwargs"]
 
         return VllmCaptionRequest(
             request_id=secrets.token_hex(8),
@@ -420,7 +437,13 @@ class VllmQwen3VL(VllmQwen):
         """
         message = make_message(prompt, use_image=config.use_image_input)
         data = frames if config.use_image_input else [(frames, metadata)]
-        return make_prompt(message, data, processor, use_image=config.use_image_input)
+        inputs = make_prompt(message, data, processor, use_image=config.use_image_input)
+        if config.video_max_pixels_per_frame is not None and not config.use_image_input:
+            inputs["mm_processor_kwargs"] = qwen3_video_size_kwargs(
+                int(frames.shape[0]),
+                config.video_max_pixels_per_frame,
+            )
+        return inputs
 
     @staticmethod
     def decode(vllm_output: RequestOutput) -> str:

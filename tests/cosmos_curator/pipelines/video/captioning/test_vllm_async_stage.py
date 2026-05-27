@@ -166,6 +166,7 @@ class TestVllmAsyncConfigToVllmConfig:
         assert sync_cfg.copy_weights_to is None  # async never uses sync's SSD-copy fast path
         assert sync_cfg.fp8 is True
         assert sync_cfg.disable_mmcache is True
+        assert sync_cfg.video_max_pixels_per_frame is None
 
     def test_defaults_propagate(self) -> None:
         """Default fp8/disable_mmcache forward to the sync VllmConfig."""

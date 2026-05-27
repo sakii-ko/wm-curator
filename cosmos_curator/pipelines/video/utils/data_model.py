@@ -1179,6 +1179,7 @@ class VllmConfig:
         use_image_input: When True, use the image modality only: content type "image",
             multi_modal_data["image"], and limit_mm_per_prompt for image (video slot 0).
             Used by the image pipeline; video pipeline leaves this False.
+        video_max_pixels_per_frame: Optional per-frame video resize upper bound for regular sync vLLM.
 
     """
 
@@ -1200,6 +1201,7 @@ class VllmConfig:
     performance_mode: Literal["balanced", "interactivity", "throughput"] | None = "throughput"
     debug_save_frames: bool = False
     debug_frames_output_dir: pathlib.Path | None = None
+    video_max_pixels_per_frame: int | None = None
 
 
 def validate_optional_json_str_str_dict(
@@ -1331,6 +1333,7 @@ class WindowConfig:
         preprocess_dtype: Data type for preprocessing.
         model_does_preprocess: Whether model handles preprocessing.
         use_input_bit_rate: Whether to use the input video's bit rate for processing.
+        video_max_pixels_per_frame: Optional per-frame video resize upper bound.
 
     """
 
@@ -1340,6 +1343,7 @@ class WindowConfig:
     model_does_preprocess: bool = True
     preprocess_dtype: str = "float32"
     use_input_bit_rate: bool = False
+    video_max_pixels_per_frame: int | None = None
 
 
 @attrs.define

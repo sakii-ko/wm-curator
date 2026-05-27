@@ -309,6 +309,8 @@ class VllmCosmosReason1VL(VllmPlugin):
             video_data = mm_data["video"][0]
             video_frames, video_metadata = video_data
             inputs = make_prompt(make_message(final_prompt), video_frames, video_metadata, processor)
+        if "mm_processor_kwargs" in request.inputs:
+            inputs["mm_processor_kwargs"] = request.inputs["mm_processor_kwargs"]
 
         return VllmCaptionRequest(
             request_id=secrets.token_hex(8),

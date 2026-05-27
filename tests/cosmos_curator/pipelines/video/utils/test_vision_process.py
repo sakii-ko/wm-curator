@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 
 from cosmos_curator.pipelines.video.utils import vision_process
 from cosmos_curator.pipelines.video.utils.windowing_utils import WindowFrameInfo
@@ -74,3 +75,64 @@ def test_read_video_cpu_num_frames_to_use_preserves_inclusive_start(monkeypatch:
 
     assert captured["total_frames"] == [4]
     assert captured["frame_ids"] == [10, 11, 12, 13]
+
+
+def _patch_fetch_video_resize(monkeypatch: pytest.MonkeyPatch, nframes: int) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def fake_read_video_cpu(
+        _video_path: str,
+        _fps: float,
+        _num_frames_to_use: int,
+        _window_range: list[WindowFrameInfo],
+    ) -> tuple[torch.Tensor, list[int]]:
+        return torch.zeros((nframes, 3, 120, 200), dtype=torch.uint8), [nframes]
+
+    def fake_smart_resize(
+        height: int,
+        width: int,
+        *,
+        factor: int,
+        min_pixels: int,
+        max_pixels: int,
+    ) -> tuple[int, int]:
+        captured["smart_resize"] = {
+            "height": height,
+            "width": width,
+            "factor": factor,
+            "min_pixels": min_pixels,
+            "max_pixels": max_pixels,
+        }
+        return height, width
+
+    monkeypatch.setattr(vision_process, "read_video_cpu", fake_read_video_cpu)
+    monkeypatch.setattr(vision_process, "smart_resize", fake_smart_resize)
+    monkeypatch.setattr(vision_process.transforms.functional, "resize", lambda video, *_args, **_kwargs: video)
+    return captured
+
+
+def test_fetch_video_unset_uses_dynamic_max_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default sync prep keeps the existing clip-coupled resize formula."""
+    nframes = 100
+    captured = _patch_fetch_video_resize(monkeypatch, nframes=nframes)
+
+    vision_process.fetch_video("video.mp4")
+
+    expected = max(
+        min(
+            vision_process.VIDEO_MAX_PIXELS,
+            int(vision_process.VIDEO_TOTAL_PIXELS / nframes * vision_process.FRAME_FACTOR),
+        ),
+        int(vision_process.VIDEO_MIN_PIXELS * 1.05),
+    )
+    assert captured["smart_resize"]["max_pixels"] == expected
+
+
+def test_fetch_video_override_uses_exact_max_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A low-but-valid override is passed through without the old 1.05 floor."""
+    captured = _patch_fetch_video_resize(monkeypatch, nframes=100)
+
+    vision_process.fetch_video("video.mp4", max_pixels_per_frame=100500)
+
+    assert captured["smart_resize"]["max_pixels"] == 100500
+    assert captured["smart_resize"]["min_pixels"] == vision_process.VIDEO_MIN_PIXELS

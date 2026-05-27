@@ -16,10 +16,14 @@
 
 from uuid import uuid4
 
+import numpy as np
 import pytest
+import torch
 
-from cosmos_curator.pipelines.video.utils.data_model import Clip, Window
+from cosmos_curator.pipelines.video.utils import windowing_utils
+from cosmos_curator.pipelines.video.utils.data_model import Clip, Window, WindowConfig
 from cosmos_curator.pipelines.video.utils.windowing_utils import (
+    WindowFrameInfo,
     estimate_native_frame_count,
     frame_index_to_source_time_s,
     window_source_time_bounds_from_clip,
@@ -37,6 +41,38 @@ def _make_clip(
     if windows:
         clip.windows.extend(windows)
     return clip
+
+
+def test_make_windows_for_clip_threads_video_max_pixels_per_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WindowConfig carries the fixed resize upper bound into split_video_into_windows()."""
+    captured: dict[str, object] = {}
+
+    def fake_split_video_into_windows(
+        _data: object,
+        **kwargs: object,
+    ) -> tuple[list[bytes | None], list[torch.Tensor | None], list[WindowFrameInfo]]:
+        captured.update(kwargs)
+        return [None], [torch.zeros((1, 3, 2, 2))], [WindowFrameInfo(start=0, end=0)]
+
+    monkeypatch.setattr(windowing_utils, "split_video_into_windows", fake_split_video_into_windows)
+    clip = Clip(
+        uuid=uuid4(),
+        source_video="video.mp4",
+        span=(0.0, 1.0),
+        encoded_data=np.array([1], dtype=np.uint8),
+    )
+    config = WindowConfig(video_max_pixels_per_frame=100500)
+
+    windows, frames = windowing_utils._make_windows_for_clip(
+        clip,
+        config,
+        target_bit_rate="10M",
+        num_decode_threads=1,
+    )
+
+    assert captured["max_pixels_per_frame"] == 100500
+    assert len(windows) == 1
+    assert len(frames) == 1
 
 
 # ---------------------------------------------------------------------------
