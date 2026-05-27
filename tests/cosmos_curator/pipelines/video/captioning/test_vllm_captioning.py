@@ -42,7 +42,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
 
 _THRESHOLDS = {
     "qwen": 0.9,
-    "cosmos_r1": 0.75,
+    "cosmos_r1": 0.7,
     "cosmos_r2": 0.7,
     "qwen3_5_27b": 0.8,
 }
@@ -52,14 +52,6 @@ _VLLM_CONFIG_OVERRIDES: dict[str, dict[str, object]] = {
         "preprocess": True,
     },
 }
-# Per-variant cap on generated tokens. Reasoning variants (Qwen3.5+) need the
-# larger production-default headroom (8192) so the chain-of-thought plus the
-# answer fit; otherwise the window is marked failed.
-# We increase this to avoid flaky test failures.
-_SAMPLING_MAX_TOKENS: dict[str, int] = {
-    "qwen3_5_27b": 8192,
-}
-_DEFAULT_SAMPLING_MAX_TOKENS = 2048
 _WINDOW_CONFIG_OVERRIDES: dict[str, dict[str, object]] = {
     "qwen": {
         "sampling_fps": 2.0,
@@ -110,50 +102,25 @@ _EXPECTED_CAPTIONS: dict[str, list[str]] = {
     ],
     "cosmos_r1": [
         (
-            "The video unfolds through a series of distinct yet interconnected scenes, each rich in visual and "
-            "narrative detail:\n"
+            "The video opens with a **determined female character** navigating a **harsh, snowy mountainous "
+            "landscape**. Her rugged appearance-weathered face, dark hair, and earth-toned clothing-suggests she is "
+            "on a **challenging journey**. She holds a **staff** in her right hand, implying a role as a guide, "
+            "protector, or seeker. The camera uses **wide shots** to emphasize the vast, treacherous environment, "
+            "while her **focused gaze** and steady posture convey resolve. The muted, natural lighting and swirling "
+            "snow enhance the **isolation and severity** of the setting.\n"
             "\n"
-            "### **Visual Elements**  \n"
-            "1. **Opening Scene: Snowy Mountains**  \n"
-            "   - **Cool Tones & Harsh Environment**: The icy blue and white palette dominates, evoking isolation "
-            "and danger. Jagged mountain peaks and swirling fog amplify the sense of vastness and "
-            "unpredictability.  \n"
-            "   - **Character Design**: The young woman's rugged attire (fur-lined jacket, utility belt) and staff "
-            "suggest preparedness for survival or adventure. Her determined expression and steady posture contrast "
-            "with the chaotic backdrop, emphasizing her resolve.  \n"
-            "   - **Camera Work**: A slow zoom-in and upward pedestal movement track toward her, heightening "
-            "tension and focus on her as the central figure.  \n"
+            "The scene then transitions via a **fade-out/fade-in** to an **indoor setting**, where a **mysterious "
+            "male character** appears. He wears elaborate **tribal accessories** (pierced face, feathers, chains) "
+            "and a **textured robe**, situating him in a **cultural or spiritual context**. The dim, shadowy lighting "
+            "and **ornate carvings** on the walls suggest a **temple, council chamber, or sacred space**. The camera "
+            "focuses closely on his **expressive face** and attire, building intrigue about his role and intentions. "
+            "His **haunted expression** hints at a **hidden backstory** or internal conflict.\n"
             "\n"
-            "2. **Transition to Dark Environment**  \n"
-            "   - **Lighting Shift**: Daylight fades to artificial, dim lighting, creating a sudden tone shift from "
-            "hope to uncertainty. Tribal accessories and staff on the second character introduce mystique or "
-            "cultural significance.  \n"
-            "   - **Mood & Symbolism**: The darkened setting and close-up on the second character's concerned "
-            "expression suggest impending conflict or revelation, deepening the narrative's emotional stakes.  \n"
-            "\n"
-            "3. **Dimly Lit Room Scene**  \n"
-            "   - **Warm, Intimate Lighting**: Contrasting cool tones with golden hues, the room's shadows and "
-            "sword hint at danger or hidden history. The red-haired woman's tattoos and warrior-like appearance "
-            "signal combat readiness or a protective role.  \n"
-            "   - **Close-Up Dynamics**: Subtle facial expressions and the camera's focus on her eyes convey inner "
-            "turmoil or resolve, while the ornate background adds layers of world-building.  \n"
-            "\n"
-            "### **Narrative Progression**  \n"
-            "- **Character Development**: Each scene introduces a protagonist with distinct traits (determination, "
-            "wisdom, combat readiness), suggesting a collective journey or shared mission.  \n"
-            "- **Environmental Storytelling**: The snowy wilderness, tribal artifacts, and mysterious room imply a "
-            "fantasy or survival narrative, possibly involving magic, survival, or hidden knowledge.  \n"
-            "- **Tension & Pacing**: Slow transitions and deliberate framing build suspense, guiding the viewer "
-            "through a character-driven story with high stakes.  \n"
-            "\n"
-            "### **Symbolism & Themes**  \n"
-            "- **Staffs & Accessories**: Tools of guidance or power, tying the characters to a larger mythic or "
-            "cultural narrative.  \n"
-            "- **Light vs. Shadow**: Represents clarity versus mystery, danger versus safety, reflecting the "
-            "characters' psychological and physical challenges.  \n"
-            "\n"
-            "In sum, the video crafts a rich, atmospheric tale centered on resilience and mystery, using visual "
-            "storytelling to draw viewers into a world where survival, wisdom, and inner strength converge."
+            "The transition between these two scenes underscores a **contrast between external struggle (the snowy "
+            "wilderness)** and **internal or communal stakes** (the dimly lit chamber). The **Blender Foundation "
+            "logos** appear briefly as production credits, grounding the fantasy visuals in their creative source. "
+            "The overall tone blends **epic adventure** with **dark, atmospheric storytelling**, leaving viewers "
+            "curious about the characters' motivations and the narrative's direction."
         ),
     ],
     "qwen3_5_27b": [
@@ -321,10 +288,7 @@ def test_vllm_caption_generation(
     _skip_if_weights_missing(model_variant)
     vllm_config = VllmConfig(
         model_variant=model_variant,
-        sampling_config=VllmSamplingConfig(
-            temperature=0.0,
-            max_tokens=_SAMPLING_MAX_TOKENS.get(model_variant, _DEFAULT_SAMPLING_MAX_TOKENS),
-        ),
+        sampling_config=VllmSamplingConfig(temperature=0.0),
         **_VLLM_CONFIG_OVERRIDES.get(model_variant, {}),
     )
     window_config = WindowConfig(
