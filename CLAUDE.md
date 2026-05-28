@@ -78,7 +78,7 @@ Stages specify `conda_env_name` property to run in specific environments, enabli
 **Commits**: Conventional Commits: `git commit -m "fix: description"`. MRs squash on merge, so commit early and often as checkpoints — individual commit messages don't need to be perfect.
 
 **Merge Requests**:
-- Create using `glab mr create` targeting branch `nvidia/main`, assign to author, with `--remove-source-branch --squash-before-merge`
+- Create using `glab mr create` targeting branch `nvidia/main`, assign to `@me`, with `--remove-source-branch --squash-before-merge`
 - Write MR descriptions for reviewers: summarize intent and behavior changes, call out impacted CLIs/pipelines/envs and non-obvious risks or follow-ups, and include issue links or manual validation only when known and useful beyond CI
 - Do NOT include "Generated with Claude Code" in descriptions
 - Use GitLab MCP server (if available) to retrieve CodeRabbit and Greptile review comments
