@@ -148,7 +148,7 @@ cosmos-curator local launch \
   -- pixi run python3 -m cosmos_curator.pipelines.image.run_pipeline annotate \
   --input-image-path /path/to/images \
   --output-path /path/to/output \
-  --semantic-filter enable \
-  --image-classifier enable \
+  --semantic-filter \
+  --image-classifier \
   --embedding-algorithm cosmos-embed1-336p
 ```

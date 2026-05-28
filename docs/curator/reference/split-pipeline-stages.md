@@ -24,15 +24,15 @@ The blocks below are appended in this order:
 | 5 | Motion filter | `--motion-filter enable` or `score-only` |
 | 6 | Shared clip frame extraction | Embeddings are enabled, or `--aesthetic-threshold` is set |
 | 7 | Aesthetic filter | `--aesthetic-threshold` is set |
-| 8 | Artificial text filter | `--artificial-text-filter enable` |
+| 8 | Artificial text filter | `--artificial-text-filter` |
 | 9 | VLM semantic filter | `--vlm-filter enable` or `score-only` |
-| 10 | Video classifier | `--video-classifier enable` |
+| 10 | Video classifier | `--video-classifier` |
 | 11 | Embedding | Enabled by default, disabled with `--no-generate-embeddings` |
 | 12 | Captioning and previews | Captioning is enabled by default; previews require captioning plus `--generate-previews` |
 | 13 | Caption enhancement | Captioning is enabled and `--enhance-captions` |
-| 14 | SAM3 tracking | `--enable-sam3` |
-| 15 | Per-event captioning | `--enable-event-captioning`; requires `--enable-sam3` |
-| 16 | T5 encoding for Cosmos-Predict | `--generate-cosmos-predict-dataset predict2` |
+| 14 | SAM3 tracking | `--sam3` |
+| 15 | Per-event captioning | `--event-captioning`; requires `--sam3` |
+| 16 | T5 encoding for Cosmos-Predict | `--generate-cosmos-predict-dataset` |
 | 17 | Output writer | Always |
 
 ## Stage Catalog
@@ -197,7 +197,7 @@ Run-level aggregates of caption status and quality-flag fields are documented in
 |---|---|
 | Stage | `SAM3BBoxStage` |
 | Code | [`tracking/sam3_bbox_stage.py`](../../../cosmos_curator/pipelines/video/tracking/sam3_bbox_stage.py), built by [`tracking_builders.py`](../../../cosmos_curator/pipelines/video/tracking/tracking_builders.py) |
-| Main flags | `--enable-sam3`, `--sam3-prompts`, `--sam3-target-fps`, `--sam3-max-clip-duration-s`, `--sam3-write-annotated-video` |
+| Main flags | `--sam3`, `--sam3-prompts`, `--sam3-target-fps`, `--sam3-max-clip-duration-s`, `--sam3-write-annotated-video` |
 | Purpose | Tracks prompted objects through each clip with SAM3. Prompts are plain-text object descriptions such as `"a car"` or `"a pedestrian"`. |
 | Output | Populates `clip.sam3_instances`, `clip.sam3_objects_by_frame`, and optionally `clip.sam3_annotated_video`; the writer emits `sam3_instances/`, `sam3_objects/`, and optionally `sam3_tracked/`. |
 | Cost notes | Runs in the `sam3` Pixi environment and uses a GPU. Event captioning automatically enables annotated video because the VLM needs object ID overlays. |
@@ -208,10 +208,10 @@ Run-level aggregates of caption status and quality-flag fields are documented in
 |---|---|
 | Stage | `PerEventCaptionStage` |
 | Code | [`captioning/per_event_caption_stage.py`](../../../cosmos_curator/pipelines/video/captioning/per_event_caption_stage.py) |
-| Main flags | `--enable-event-captioning`, `--event-caption-backend`, `--event-caption-prompt-file`, `--event-caption-qwen-*`, `--event-caption-gemini-*` |
+| Main flags | `--event-captioning`, `--event-caption-backend`, `--event-caption-prompt-file`, `--event-caption-qwen-*`, `--event-caption-gemini-*` |
 | Purpose | Uses SAM3 object tracks plus the annotated video to generate structured event annotations that reference SAM3 object IDs. This is intended for event-level descriptions, not generic clip captions. |
 | Output | Populates `clip.sam3_events`; the writer emits `sam3_events/`. |
-| Dependency | Requires `--enable-sam3` and at least one `--sam3-prompts` value. |
+| Dependency | Requires `--sam3` and at least one `--sam3-prompts` value. |
 
 ### T5 Encoding for Cosmos-Predict
 
@@ -219,7 +219,7 @@ Run-level aggregates of caption status and quality-flag fields are documented in
 |---|---|
 | Stage | `T5StageForSplit` |
 | Code | [`captioning/captioning_stages.py`](../../../cosmos_curator/pipelines/video/captioning/captioning_stages.py) |
-| Main flags | `--generate-cosmos-predict-dataset predict2` |
+| Main flags | `--generate-cosmos-predict-dataset` |
 | Purpose | Encodes generated captions with T5-XXL so the writer can emit a Cosmos-Predict2 Video2World post-training dataset. |
 | Output | Populates `window.t5_xxl_embedding`; the writer emits per-window videos, captions, and T5 embeddings under `cosmos_predict2_video2world_dataset/`. |
 | Dependency | Requires usable captions for the selected caption field. |
@@ -244,7 +244,7 @@ Run-level aggregates of caption status and quality-flag fields are documented in
 | Score motion without rejecting clips | `--motion-filter score-only` |
 | Reject low-quality clips | `--motion-filter enable --aesthetic-threshold <score>` |
 | Reject semantic categories | `--vlm-filter enable --vlm-filter-categories <categories>` |
-| Keep or reject broad video types | `--video-classifier enable --video-classifier-allow <type>` or `--video-classifier-block <type>` |
-| Track prompted objects | `--enable-sam3 --sam3-prompts "a car" "a pedestrian"` |
-| Generate object-grounded event annotations | `--enable-sam3 --sam3-prompts ... --enable-event-captioning` |
-| Emit Cosmos-Predict2 training assets | `--generate-cosmos-predict-dataset predict2` |
+| Keep or reject broad video types | `--video-classifier --video-classifier-allow <type>` or `--video-classifier-block <type>` |
+| Track prompted objects | `--sam3 --sam3-prompts "a car" "a pedestrian"` |
+| Generate object-grounded event annotations | `--sam3 --sam3-prompts ... --event-captioning` |
+| Emit Cosmos-Predict2 training assets | `--generate-cosmos-predict-dataset` |

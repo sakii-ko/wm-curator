@@ -50,6 +50,41 @@ def test_add_annotate_command_registers_subcommand(tmp_path: pathlib.Path) -> No
     assert callable(args.func)
 
 
+def test_filter_toggles_parse_boolean_optional_forms(tmp_path: pathlib.Path) -> None:
+    """Filter toggles should expose --flag and --no-flag forms."""
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    add_annotate_command(subparsers)
+
+    args = parser.parse_args(
+        [
+            "annotate",
+            "--input-image-path",
+            str(tmp_path / "in"),
+            "--output-path",
+            str(tmp_path / "out"),
+            "--semantic-filter",
+            "--image-classifier",
+        ]
+    )
+    assert args.semantic_filter is True
+    assert args.image_classifier is True
+
+    args = parser.parse_args(
+        [
+            "annotate",
+            "--input-image-path",
+            str(tmp_path / "in"),
+            "--output-path",
+            str(tmp_path / "out"),
+            "--no-semantic-filter",
+            "--no-image-classifier",
+        ]
+    )
+    assert args.semantic_filter is False
+    assert args.image_classifier is False
+
+
 def test_assemble_stages_without_captioning_returns_ingest_embedding_and_output(tmp_path: pathlib.Path) -> None:
     """Disabling captions should still leave ingest, embedding, and output stage specs."""
     parser = argparse.ArgumentParser()
@@ -186,7 +221,6 @@ def test_assemble_stages_with_local_semantic_filter_returns_filter_specs(tmp_pat
             "--output-path",
             str(tmp_path / "out"),
             "--semantic-filter",
-            "enable",
         ]
     )
 
@@ -221,7 +255,6 @@ def test_assemble_stages_with_openai_semantic_filter_returns_endpoint_specs(tmp_
             "--output-path",
             str(tmp_path / "out"),
             "--semantic-filter",
-            "enable",
             "--semantic-filter-model-variant",
             "openai",
         ]
@@ -259,7 +292,6 @@ def test_assemble_stages_with_gemini_semantic_filter_returns_endpoint_specs(
             "--output-path",
             str(tmp_path / "out"),
             "--semantic-filter",
-            "enable",
             "--semantic-filter-model-variant",
             "gemini",
         ]
@@ -291,7 +323,6 @@ def test_assemble_stages_with_local_classifier_returns_classifier_specs(tmp_path
             "--output-path",
             str(tmp_path / "out"),
             "--image-classifier",
-            "enable",
             "--image-classifier-use-custom-categories",
             "--image-classifier-allow",
             "planet_earth",
@@ -329,7 +360,6 @@ def test_assemble_stages_with_openai_classifier_returns_endpoint_specs(tmp_path:
             "--output-path",
             str(tmp_path / "out"),
             "--image-classifier",
-            "enable",
             "--image-classifier-model-variant",
             "openai",
             "--image-classifier-use-custom-categories",
@@ -370,7 +400,6 @@ def test_assemble_stages_with_gemini_classifier_returns_endpoint_specs(
             "--output-path",
             str(tmp_path / "out"),
             "--image-classifier",
-            "enable",
             "--image-classifier-model-variant",
             "gemini",
             "--image-classifier-use-custom-categories",
@@ -407,11 +436,9 @@ def test_assemble_stages_builds_openai_api_stages(tmp_path: pathlib.Path) -> Non
             "--captioning-algorithm",
             "openai",
             "--semantic-filter",
-            "enable",
             "--semantic-filter-model-variant",
             "openai",
             "--image-classifier",
-            "enable",
             "--image-classifier-model-variant",
             "openai",
             "--image-classifier-use-custom-categories",
@@ -446,11 +473,9 @@ def test_assemble_stages_builds_gemini_api_stages(tmp_path: pathlib.Path, monkey
             "--captioning-algorithm",
             "gemini",
             "--semantic-filter",
-            "enable",
             "--semantic-filter-model-variant",
             "gemini",
             "--image-classifier",
-            "enable",
             "--image-classifier-model-variant",
             "gemini",
             "--image-classifier-use-custom-categories",

@@ -180,7 +180,7 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
             )
         )
     )
-    if args.image_classifier == "enable" or args.semantic_filter == "enable":
+    if args.image_classifier or args.semantic_filter:
         stages.extend(
             build_image_filter_classifier_stages(
                 filter_config=(
@@ -206,7 +206,7 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
                         verbose=args.verbose,
                         perf_profile=args.perf_profile,
                     )
-                    if args.semantic_filter == "enable"
+                    if args.semantic_filter
                     else None
                 ),
                 classifier_config=(
@@ -234,7 +234,7 @@ def _assemble_stages(args: argparse.Namespace) -> list[CuratorStage | CuratorSta
                         type_allow_file=args.image_classifier_allow_file,
                         type_block_file=args.image_classifier_block_file,
                     )
-                    if args.image_classifier == "enable"
+                    if args.image_classifier
                     else None
                 ),
             )
@@ -463,9 +463,9 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     parser.add_argument(
         "--semantic-filter",
         dest="semantic_filter",
-        choices=["enable", "disable"],
-        default="disable",
-        help="Whether to enable local semantic filtering for images.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable semantic filtering for images.",
     )
     parser.add_argument(
         "--semantic-filter-score-only",
@@ -555,9 +555,9 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
     parser.add_argument(
         "--image-classifier",
         dest="image_classifier",
-        choices=["enable", "disable"],
-        default="disable",
-        help="Whether to enable local image classifier filtering.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable image classifier filtering.",
     )
     parser.add_argument(
         "--image-classifier-model-variant",
