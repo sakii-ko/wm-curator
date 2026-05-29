@@ -30,10 +30,11 @@ def _render_dockerfile(
     *,
     slim: bool,
     redistributable: bool,
+    conda_env_names: list[str] | None = None,
 ) -> str:
     dockerfile_path = docker_utils.generate_dockerfile(
         dockerfile_template_path=DOCKERFILE_TEMPLATE_PATH,
-        conda_env_names=["default"],
+        conda_env_names=["default"] if conda_env_names is None else conda_env_names,
         dockerfile_output_path=tmp_path / f"Dockerfile-slim-{slim}-redistributable-{redistributable}",
         slim=slim,
         redistributable=redistributable,
@@ -48,6 +49,35 @@ def _empty_continuation_lines(contents: str) -> list[int]:
         for line_number, (previous_line, line) in enumerate(pairwise(lines), start=2)
         if previous_line.rstrip().endswith("\\") and not line.strip()
     ]
+
+
+def _run_blocks(contents: str) -> list[str]:
+    blocks: list[str] = []
+    current_block: list[str] = []
+    in_run = False
+
+    for line in contents.splitlines():
+        if line.startswith("RUN "):
+            if current_block:
+                blocks.append("\n".join(current_block))
+            current_block = [line]
+            in_run = line.rstrip().endswith("\\")
+            if not in_run:
+                blocks.append("\n".join(current_block))
+                current_block = []
+            continue
+
+        if in_run:
+            current_block.append(line)
+            in_run = line.rstrip().endswith("\\")
+            if not in_run:
+                blocks.append("\n".join(current_block))
+                current_block = []
+
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    return blocks
 
 
 @pytest.mark.parametrize("slim", [False, True])
@@ -70,3 +100,147 @@ def test_generated_dockerfile_has_no_empty_continuation_lines(
     assert pkg_config_arg != -1
     assert pkg_config_env != -1
     assert pkg_config_arg < pkg_config_env
+
+
+def test_full_dockerfile_rebuilds_opencv_against_local_ffmpeg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full images should replace PyPI OpenCV wheels with a local FFmpeg-linked build."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    contents = _render_dockerfile(tmp_path, slim=False, redistributable=True)
+
+    assert "AS opencv-builder" in contents
+    assert "COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg" in contents
+    assert "libvpx9" in contents
+    assert "libavif16" in contents
+    assert "libdrm2" in contents
+    assert "libgfortran5" in contents
+    assert "libwebp7" in contents
+    assert "libwebpdemux2" in contents
+    assert "libjpeg-turbo8" in contents
+    assert "libopenblas0-pthread" in contents
+    assert "libpcre2-16-0" in contents
+    assert "libpng16-16t64" in contents
+    assert '$(if [ "$(dpkg --print-architecture)" = "amd64" ]; then echo libquadmath0; fi)' in contents
+    assert "--wheel-dir /opencv-wheelhouse /opencv-python-src" in contents
+    assert 'PKG_CONFIG_PATH="/opt/ffmpeg/lib/pkgconfig"' in contents
+    assert 'LD_LIBRARY_PATH="/opt/ffmpeg/lib:/usr/local/nvidia/lib' in contents
+    assert 'LIBRARY_PATH="/opt/ffmpeg/lib:/usr/local/cuda/lib64' in contents
+    assert "WITH_FFMPEG=ON" in contents
+    assert "WITH_GTK=OFF" in contents
+    assert "WITH_QT=OFF" in contents
+    assert "CMAKE_PREFIX_PATH=/opt/ffmpeg" in contents
+    assert "CMAKE_BUILD_RPATH=/opt/ffmpeg/lib" in contents
+    assert "pip install --no-cache-dir --no-deps /opencv-wheelhouse/opencv_python_headless-*.whl" in contents
+    assert 'raise SystemExit(0 if "FFMPEG:                      YES" in info else 1)' in contents
+    assert "COPY --from=opencv-builder /opencv-wheelhouse /opt/cosmos-curator-wheelhouse" in contents
+    assert "pip uninstall -y opencv-python-headless opencv-python opencv-contrib-python" in contents
+    assert (
+        "pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python_headless-*.whl" in contents
+    )
+
+
+def test_full_dockerfile_with_paddle_ocr_rebuilds_all_opencv_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PaddleOCR images need the non-headless OpenCV wheels rebuilt too."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    contents = _render_dockerfile(
+        tmp_path,
+        slim=False,
+        redistributable=True,
+        conda_env_names=["default", "paddle-ocr"],
+    )
+
+    assert "/opt/cosmos-curator-wheelhouse/opencv_python-*.whl" in contents
+    assert "opencv_python-" in contents
+    assert "opencv_contrib_python-" in contents
+    assert "WITH_GTK=OFF" in contents
+    assert "WITH_QT=OFF" in contents
+
+
+def test_full_dockerfile_with_unified_rebuilds_all_opencv_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unified includes PaddleOCR and needs the non-headless OpenCV wheels too."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    contents = _render_dockerfile(
+        tmp_path,
+        slim=False,
+        redistributable=True,
+        conda_env_names=["default", "unified"],
+    )
+
+    assert "/opt/cosmos-curator-wheelhouse/opencv_python-*.whl" in contents
+    assert "opencv_python-" in contents
+    assert "opencv_contrib_python-" in contents
+    assert "WITH_GTK=OFF" in contents
+    assert "WITH_QT=OFF" in contents
+
+
+def test_full_dockerfile_replaces_bundled_video_wheels_in_pixi_install_layer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bundled PyPI video wheels must not survive in lower final-image layers."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    contents = _render_dockerfile(tmp_path, slim=False, redistributable=True)
+    install_blocks = [block for block in _run_blocks(contents) if "=== pixi install attempt $attempt/10 ===" in block]
+
+    assert len(install_blocks) == 1
+    install_block = install_blocks[0]
+    assert "pip uninstall -y av" in install_block
+    assert "pip install --no-cache-dir /opt/cosmos-curator-wheelhouse/av-17.0.0-*.whl" in install_block
+    assert "pip uninstall -y opencv-python-headless opencv-python opencv-contrib-python" in install_block
+    assert 'if [ "$env" = "paddle-ocr" ] || [ "$env" = "unified" ]; then' in install_block
+    assert "pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python-*.whl" in install_block
+    assert (
+        "pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python_headless-*.whl"
+        in install_block
+    )
+
+
+def test_full_dockerfile_rewrites_pixi_lock_to_local_video_wheels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full images should keep a lockfile that points at source-built video wheels."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    full_contents = _render_dockerfile(tmp_path, slim=False, redistributable=True)
+    slim_contents = _render_dockerfile(tmp_path, slim=True, redistributable=True)
+
+    assert "COPY --chown=1000:1000 pixi.toml pixi.lock" not in full_contents
+    assert "COPY --chown=1000:1000 --from=opencv-builder /opencv-build/pixi.lock" in full_contents
+    assert "file:///opt/cosmos-curator-wheelhouse/" in full_contents
+    assert "ERROR: full image runtime pixi.lock still references bundled PyPI wheels (av/opencv)" in full_contents
+    assert "COPY --chown=1000:1000 pixi.toml pixi.lock" in slim_contents
+
+
+def test_full_dockerfile_with_cuml_keeps_local_video_wheel_lockfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cuml install layer should not revert or delete the full-image lockfile."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    contents = _render_dockerfile(
+        tmp_path,
+        slim=False,
+        redistributable=True,
+        conda_env_names=["default", "cuml"],
+    )
+    cuml_blocks = [block for block in _run_blocks(contents) if "=== pixi install cuml attempt $attempt/10 ===" in block]
+
+    assert len(cuml_blocks) == 1
+    cuml_block = cuml_blocks[0]
+    assert "rm -f pixi.lock" not in cuml_block
+    assert "source=pixi.lock,target=/tmp/cosmos-curator-pixi.lock,readonly" not in cuml_block
+    assert "cp /tmp/cosmos-curator-pixi.lock pixi.lock" not in cuml_block

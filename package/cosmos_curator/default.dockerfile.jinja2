@@ -283,6 +283,127 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
     mkdir -p /pyav-wheelhouse && \
     pixi run --as-is -e default pip wheel --no-binary av --no-cache-dir \
         --wheel-dir /pyav-wheelhouse av==17.0.0
+
+# ---------------------------------------------------------------------------
+# OpenCV builder stage: source-build OpenCV against /opt/ffmpeg
+# ---------------------------------------------------------------------------
+# PyPI's opencv-python-headless wheels bundle their own FFmpeg shared libs.
+# Rebuilding from source linked against /opt/ffmpeg keeps cv2.VideoCapture /
+# cv2.VideoWriter on the same codec policy as PyAV and the ffmpeg/ffprobe CLI.
+FROM nvcr.io/nvidia/cuda:13.0.2-devel-ubuntu24.04 AS opencv-builder
+
+SHELL ["/bin/bash", "-c"]
+
+ARG OPENCV_PYTHON_REPO=https://github.com/opencv/opencv-python.git
+
+COPY --from=wheels-builder /opt/pixi/bin/pixi /usr/local/bin/pixi
+COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
+COPY --from=pyav-builder /pyav-wheelhouse /pyav-wheelhouse
+
+RUN echo "/opt/ffmpeg/lib" > /etc/ld.so.conf.d/ffmpeg.conf && \
+    ldconfig && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        libaom3 \
+        libdav1d7 \
+        libavif16 \
+        libdrm2 \
+        libgfortran5 \
+        libjpeg-turbo8 \
+        libopenjp2-7 \
+        libopenblas0-pthread \
+        libpcre2-16-0 \
+        libpng16-16t64 \
+        libtiff6 \
+        $(if [ "$(dpkg --print-architecture)" = "amd64" ]; then echo libquadmath0; fi) \
+{% if not redistributable %}        libopenh264-7 \
+{% endif %}        libvpx9 \
+        libwebp7 \
+        libwebpdemux2 \
+        libwebpmux3 \
+        ninja-build \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY pixi.toml pixi.lock /opencv-build/
+
+# Same NVIDIA-wheel patching trick as the main stage so `pixi install -e default`
+# does not stall on pypi.nvidia.com timeouts.
+RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheels-ready \
+    --mount=type=cache,id=pixi-nvidia-wheels,target=/pixi-cache/nvidia-wheels,readonly \
+    cd /opencv-build && \
+    for whl in /pixi-cache/nvidia-wheels/*.whl; do \
+        [ -f "$whl" ] || continue; \
+        filename=$(basename "$whl") && \
+        if grep -q "$filename" pixi.lock; then \
+            sed -i "s|https://pypi\.nvidia\.com/[^\"]*/${filename}\\b|file:///pixi-cache/nvidia-wheels/${filename}|g" pixi.lock; \
+        fi; \
+    done && \
+    export CONDA_OVERRIDE_CUDA=13.0.2 && \
+    export CUDA_PATH="/usr/local/cuda" && \
+    success=false && \
+    for attempt in {1..10}; do \
+        if pixi install -e default --frozen 2>&1; then \
+            success=true && break; \
+        fi; \
+        echo "pixi install attempt $attempt/10 failed, retrying in 3s..." && sleep 3; \
+    done && \
+    pixi clean cache -y && \
+    $success && \
+    locked_pypi_version() { \
+        pixi run --as-is -e default python -c 'import re, sys; from pathlib import Path; package = sys.argv[1]; contents = Path("pixi.lock").read_text(); match = re.search(r"- pypi: [^\n]+\n  name: " + re.escape(package) + r"\n  version: ([^\n]+)", contents); print(match.group(1)) if match else sys.exit(f"missing locked version for {package}")' "$1"; \
+    } && \
+    OPENCV_PYTHON_VERSION="$(locked_pypi_version opencv-python-headless)" && \
+    OPENCV_PYTHON_TAG="${OPENCV_PYTHON_VERSION##*.}" && \
+    git clone --recursive --depth 1 --branch "${OPENCV_PYTHON_TAG}" "${OPENCV_PYTHON_REPO}" /opencv-python-src && \
+    pixi run --as-is -e default bash -c 'cd /opencv-python-src && python find_version.py False True False False' && \
+    FOUND_OPENCV_PYTHON_VERSION=$(pixi run --as-is -e default bash -c 'cd /opencv-python-src && python -c '"'"'namespace = {}; exec(open("cv2/version.py", encoding="utf-8").read(), namespace); print(namespace["opencv_version"])'"'"'') && \
+    if [ "$FOUND_OPENCV_PYTHON_VERSION" != "$OPENCV_PYTHON_VERSION" ]; then \
+        echo "ERROR: opencv-python tag ${OPENCV_PYTHON_TAG} produced version ${FOUND_OPENCV_PYTHON_VERSION}, expected ${OPENCV_PYTHON_VERSION} from pixi.lock"; \
+        exit 1; \
+    fi && \
+    export PKG_CONFIG_PATH="/opt/ffmpeg/lib/pkgconfig" && \
+    export LD_LIBRARY_PATH="/opt/ffmpeg/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" && \
+    export LIBRARY_PATH="/opt/ffmpeg/lib:/usr/local/cuda/lib64:${LIBRARY_PATH:-}" && \
+    pkg-config --modversion libavcodec libavformat libavutil libswscale && \
+    pkg-config --cflags --libs libavcodec libavformat libavutil libswscale && \
+    export ENABLE_HEADLESS=1 && \
+    export CMAKE_ARGS="-DWITH_FFMPEG=ON -DWITH_GTK=OFF -DWITH_QT=OFF -DOPENCV_FFMPEG_SKIP_BUILD_CHECK=ON -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config -DCMAKE_PREFIX_PATH=/opt/ffmpeg -DCMAKE_LIBRARY_PATH=/opt/ffmpeg/lib -DCMAKE_INCLUDE_PATH=/opt/ffmpeg/include -DCMAKE_BUILD_RPATH=/opt/ffmpeg/lib -DCMAKE_INSTALL_RPATH=/opt/ffmpeg/lib" && \
+    mkdir -p /opencv-wheelhouse && \
+    pixi run --as-is -e default pip wheel --no-deps --no-cache-dir \
+        --wheel-dir /opencv-wheelhouse /opencv-python-src{% if 'paddle-ocr' in envs or 'unified' in envs %} && \
+    rm -rf /opencv-python-src/_skbuild && \
+    unset ENABLE_HEADLESS && \
+    pixi run --as-is -e default pip wheel --no-deps --no-cache-dir \
+        --wheel-dir /opencv-wheelhouse /opencv-python-src && \
+    rm -rf /opencv-python-src/_skbuild && \
+    export ENABLE_CONTRIB=1 && \
+    pixi run --as-is -e default pip wheel --no-deps --no-cache-dir \
+        --wheel-dir /opencv-wheelhouse /opencv-python-src{% endif %} && \
+    pixi run --as-is -e default pip uninstall -y opencv-python-headless opencv-python opencv-contrib-python || true && \
+    pixi run --as-is -e default pip install --no-cache-dir --no-deps /opencv-wheelhouse/opencv_python_headless-*.whl && \
+    pixi run --as-is -e default python -c 'import cv2; info = cv2.getBuildInformation(); print(cv2.__version__); print(next((line for line in info.splitlines() if "FFMPEG:" in line), "FFMPEG: <missing>")); raise SystemExit(0 if "FFMPEG:                      YES" in info else 1)' && \
+    patch_lock_wheel() { \
+        package="$1"; \
+        wheel_prefix="$2"; \
+        wheel_path=$(find /pyav-wheelhouse /opencv-wheelhouse -maxdepth 1 -name "${wheel_prefix}*.whl" | sort | head -n 1); \
+        if [ -z "$wheel_path" ]; then \
+            echo "ERROR: missing local wheel for $package ($wheel_prefix)"; \
+            exit 1; \
+        fi; \
+        export LOCK_PACKAGE="$package"; \
+        export LOCK_WHEEL_NAME="$(basename "$wheel_path")"; \
+        export LOCK_WHEEL_SHA="$(sha256sum "$wheel_path" | awk '{print $1}')"; \
+        pixi run --as-is -e default python -c 'import os, re; from pathlib import Path; package = os.environ["LOCK_PACKAGE"]; wheel_name = os.environ["LOCK_WHEEL_NAME"]; wheel_sha = os.environ["LOCK_WHEEL_SHA"]; path = Path("pixi.lock"); contents = path.read_text(); wheel_regex = re.escape(wheel_name.split("-")[0]) + r"-[^\s\"'"'"']+\.whl"; contents = re.sub(r"https://files\.pythonhosted\.org/[^\s\"'"'"']+/" + wheel_regex, f"file:///opt/cosmos-curator-wheelhouse/{wheel_name}", contents); section_pattern = re.compile(r"(- pypi: file:///opt/cosmos-curator-wheelhouse/" + re.escape(wheel_name) + r"\n  name: " + re.escape(package) + r"\n  version: [^\n]+\n  sha256: )[^\n]+"); contents, count = section_pattern.subn(r"\g<1>" + wheel_sha, contents); path.write_text(contents); raise SystemExit(0 if count else f"did not patch sha256 for {package}")'; \
+    } && \
+    patch_lock_wheel av av-17.0.0 && \
+    patch_lock_wheel opencv-python-headless "opencv_python_headless-${OPENCV_PYTHON_VERSION}"{% if 'paddle-ocr' in envs or 'unified' in envs %} && \
+    patch_lock_wheel opencv-python "opencv_python-${OPENCV_PYTHON_VERSION}" && \
+    patch_lock_wheel opencv-contrib-python "opencv_contrib_python-${OPENCV_PYTHON_VERSION}"{% endif %}
 {% endif %}
 
 # ---------------------------------------------------------------------------
@@ -307,9 +428,20 @@ RUN apt-get update \
     # Runtime libraries for source-built FFmpeg
     libaom3 \
     libdav1d7 \
+    libavif16 \
+    libdrm2 \
+    libgfortran5 \
+    libjpeg-turbo8 \
+    libopenjp2-7 \
+    libopenblas0-pthread \
+    libpcre2-16-0 \
+    libpng16-16t64 \
+    libtiff6 \
+    $(if [ "$(dpkg --print-architecture)" = "amd64" ]; then echo libquadmath0; fi) \
 {% if not redistributable %}    libopenh264-7 \
 {% endif %}    libvpx9 \
     libwebp7 \
+    libwebpdemux2 \
     libwebpmux3 \
     # Refresh GPG-related base packages without reintroducing full build tooling
     keyboxd gpgv gpgsm gpgconf gpg-agent \
@@ -383,9 +515,17 @@ ENV HF_HOME="${DEFAULT_WORKSPACE_LOC}/weights/hf_home/" \
     LAION_CACHE_HOME="${DEFAULT_WORKSPACE_LOC}/weights/laion_cache/"
 
 # Set up pixi environments
+{% if slim %}
 COPY --chown=1000:1000 pixi.toml pixi.lock {{code_dir_str}}/
+{% else %}
+COPY --chown=1000:1000 pixi.toml {{code_dir_str}}/
+{% endif %}
 
 {% if not slim %}
+COPY --from=pyav-builder /pyav-wheelhouse /opt/cosmos-curator-wheelhouse
+COPY --from=opencv-builder /opencv-wheelhouse /opt/cosmos-curator-wheelhouse
+COPY --chown=1000:1000 --from=opencv-builder /opencv-build/pixi.lock {{code_dir_str}}/pixi.lock
+
 # ============================================================================
 # NVIDIA CUDA Wheel Pre-download & pixi.lock Patching
 # ============================================================================
@@ -426,21 +566,6 @@ COPY --chown=1000:1000 pixi.toml pixi.lock {{code_dir_str}}/
 #   +------------------+
 #   |  local .whl read |  (no network, no timeout)
 #   +------------------+
-# ============================================================================
-RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheels-ready \
-    --mount=type=cache,id=pixi-nvidia-wheels,target=/pixi-cache/nvidia-wheels,readonly \
-    cd {{code_dir_str}} && \
-    patched=0 && \
-    for whl in /pixi-cache/nvidia-wheels/*.whl; do \
-        [ -f "$whl" ] || continue; \
-        filename=$(basename "$whl") && \
-        if grep -q "$filename" pixi.lock; then \
-            sed -i "s|https://pypi\.nvidia\.com/[^\"]*/${filename}\\b|file:///pixi-cache/nvidia-wheels/${filename}|g" pixi.lock && \
-            patched=$((patched + 1)); \
-        fi; \
-    done && \
-    echo "=== Patched $patched NVIDIA wheel URLs in pixi.lock to use local files ==="
-
 # If we install all the environments in a single layer, it's over 20GB and will cause slurm/NVCF to timeout pulling the
 # layer. Since the cuml environment is large and needs non-overlapping RAPIDS packages, we install it separately.
 #
@@ -460,6 +585,16 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
 RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheels-ready \
     --mount=type=cache,id=pixi-nvidia-wheels,target=/pixi-cache/nvidia-wheels,readonly \
     cd {{code_dir_str}} && \
+    patched=0 && \
+    for whl in /pixi-cache/nvidia-wheels/*.whl; do \
+        [ -f "$whl" ] || continue; \
+        filename=$(basename "$whl") && \
+        if grep -q "$filename" pixi.lock; then \
+            sed -i "s|https://pypi\.nvidia\.com/[^\"]*/${filename}\\b|file:///pixi-cache/nvidia-wheels/${filename}|g" pixi.lock && \
+            patched=$((patched + 1)); \
+        fi; \
+    done && \
+    echo "=== Patched $patched NVIDIA wheel URLs in pixi.lock to use local files ===" && \
 {%- if verbose %}
     echo "=== pixi version ===" && pixi --version && \
 {%- endif %}
@@ -478,14 +613,60 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
         fi; \
         echo "pixi install attempt $attempt/10 failed, retrying in 3s..." && sleep 3; \
     done && \
-    pixi clean cache -y && \
-    $success
+    $success && \
+    for env in {{ envs | reject('equalto', 'cuml') | join(' ') }}; do \
+        if pixi run --as-is -e "$env" python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('av') else 1)"; then \
+            pixi run --as-is -e "$env" pip uninstall -y av && \
+            pixi run --as-is -e "$env" pip install --no-cache-dir /opt/cosmos-curator-wheelhouse/av-17.0.0-*.whl && \
+            pixi run --as-is -e "$env" python -c "import av; print(av.__version__, av.library_versions)"; \
+        fi; \
+        if pixi run --as-is -e "$env" python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('cv2') else 1)"; then \
+            pixi run --as-is -e "$env" pip uninstall -y opencv-python-headless opencv-python opencv-contrib-python || true; \
+            if [ "$env" = "paddle-ocr" ] || [ "$env" = "unified" ]; then \
+                pixi run --as-is -e "$env" pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python-*.whl; \
+            else \
+                pixi run --as-is -e "$env" pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python_headless-*.whl; \
+            fi; \
+            pixi run --as-is -e "$env" python -c 'import cv2; info = cv2.getBuildInformation(); print(cv2.__version__); print(next((line for line in info.splitlines() if "FFMPEG:" in line), "FFMPEG: <missing>")); raise SystemExit(0 if "FFMPEG:                      YES" in info else 1)'; \
+        fi; \
+    done && \
+    found=$(find /opt/ffmpeg /usr/lib /usr/local/lib {{code_dir_str}}/.pixi -name 'libopenh264*' 2>/dev/null) && \
+{% if not redistributable %}    if [ -z "$found" ]; then \
+        echo "ERROR: non-redistributable PyAV/OpenCV rebuild expected libopenh264 but it is not installed."; \
+        exit 1; \
+    fi && \
+{% else %}    if [ -n "$found" ]; then \
+        echo "ERROR: redistributable PyAV/OpenCV rebuild produced or retained libopenh264:"; \
+        echo "$found"; \
+        exit 1; \
+    fi && \
+{% endif %}    if grep -q 'files.pythonhosted.org/.*/av-17.0.0' pixi.lock || \
+       grep -q 'files.pythonhosted.org/.*/opencv_python_headless-' pixi.lock{% if 'paddle-ocr' in envs or 'unified' in envs %} || \
+       grep -q 'files.pythonhosted.org/.*/opencv_python-' pixi.lock || \
+       grep -q 'files.pythonhosted.org/.*/opencv_contrib_python-' pixi.lock{% endif %}; then \
+        echo "ERROR: full image runtime pixi.lock still references bundled PyPI wheels (av/opencv)"; \
+        exit 1; \
+    fi && \
+    for env in {{ envs | reject('equalto', 'cuml') | join(' ') }}; do \
+        pixi run --as-is -e "$env" python -c "print('pixi as-is smoke ok')"; \
+    done && \
+    pixi clean cache -y
 
 # Install the cuml environment separately if requested.
 {% if 'cuml' in envs %}
 RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheels-ready \
     --mount=type=cache,id=pixi-nvidia-wheels,target=/pixi-cache/nvidia-wheels,readonly \
     cd {{code_dir_str}} && \
+    patched=0 && \
+    for whl in /pixi-cache/nvidia-wheels/*.whl; do \
+        [ -f "$whl" ] || continue; \
+        filename=$(basename "$whl") && \
+        if grep -q "$filename" pixi.lock; then \
+            sed -i "s|https://pypi\.nvidia\.com/[^\"]*/${filename}\\b|file:///pixi-cache/nvidia-wheels/${filename}|g" pixi.lock && \
+            patched=$((patched + 1)); \
+        fi; \
+    done && \
+    echo "=== Patched $patched NVIDIA wheel URLs in pixi.lock to use local files ===" && \
     export CONDA_OVERRIDE_CUDA=13.0.2 && \
 {%- if verbose %}
     export RUST_LOG=uv=debug && \
@@ -500,37 +681,10 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
         fi; \
         echo "pixi install attempt $attempt/10 failed, retrying in 3s..." && sleep 3; \
     done && \
-    pixi clean cache -y && \
-    $success
+    $success && \
+    pixi run --as-is -e cuml python -c "print('pixi as-is smoke ok')" && \
+    pixi clean cache -y
 {% endif %}{# cuml #}
-
-# Pixi installs PyAV from PyPI for local/dev and slim-image parity. Full image
-# builds replace it with a source-built wheel linked against /opt/ffmpeg (built
-# by the pyav-builder stage) so Python and the ffmpeg/ffprobe CLI share the same
-# codec policy. Slim images keep the locked PyPI PyAV wheel and use /opt/ffmpeg
-# for CLI work. Post-install, confirm the installed environments match the
-# requested codec policy.
-COPY --from=pyav-builder /pyav-wheelhouse /tmp/pyav-wheelhouse
-
-RUN cd {{code_dir_str}} && \
-    for env in {{ envs | join(' ') }}; do \
-        if pixi run --as-is -e "$env" python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('av') else 1)"; then \
-            pixi run --as-is -e "$env" pip uninstall -y av && \
-            pixi run --as-is -e "$env" pip install --no-cache-dir /tmp/pyav-wheelhouse/av-17.0.0-*.whl && \
-            pixi run --as-is -e "$env" python -c "import av; print(av.__version__, av.library_versions)"; \
-        fi; \
-    done && \
-    found=$(find /opt/ffmpeg /usr/lib /usr/local/lib {{code_dir_str}}/.pixi -name 'libopenh264*' 2>/dev/null) && \
-{% if not redistributable %}    if [ -z "$found" ]; then \
-        echo "ERROR: non-redistributable PyAV rebuild expected libopenh264 but it is not installed."; \
-        exit 1; \
-    fi && \
-{% else %}    if [ -n "$found" ]; then \
-        echo "ERROR: redistributable PyAV rebuild produced or retained libopenh264:"; \
-        echo "$found"; \
-        exit 1; \
-    fi && \
-{% endif %}    rm -rf /tmp/pyav-wheelhouse
 
 # Run any hacky post-install script for each environment
 COPY package/cosmos_curator/envs/ /tmp/cosmos_curator_build_envs
