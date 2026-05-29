@@ -143,7 +143,8 @@ Alternatively, you may execute `./devset.sh` to complete initial setup of enviro
 The `cosmos-curator` command is a host-side deployment CLI installed by the setup steps above. Use it on the host
 to build images, launch local Docker runs, submit Slurm jobs, and manage NVCF resources. Runtime container images are
 focused on pipeline execution and do not guarantee the `cosmos-curator` command or the `cosmos_curator.client` package
-inside the container. In-container commands should use `pixi run --as-is python -m cosmos_curator...`.
+inside the container. In-container commands should use `pixi run --as-is` with the Pixi task aliases shown below, or
+`pixi run --as-is python -m cosmos_curator...` for modules without a task alias.
 
 ## Quick Start for Local Run
 
@@ -178,10 +179,10 @@ The steps below only shows how to run the pipeline.
 cosmos-curator image build --image-name cosmos-curator --image-tag hello-world --envs transformers
 
 # 2. Download the GPT-2 model weights
-cosmos-curator local launch --image-name cosmos-curator --image-tag hello-world -- pixi run --as-is python -m cosmos_curator.core.managers.model_cli download --models gpt2
+cosmos-curator local launch --image-name cosmos-curator --image-tag hello-world -- pixi run --as-is model_download --models gpt2
 
 # 3. Run the hello-world pipeline
-cosmos-curator local launch --image-name cosmos-curator --image-tag hello-world --curator-path . -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+cosmos-curator local launch --image-name cosmos-curator --image-tag hello-world --curator-path . -- pixi run --as-is hello_world
 ```
 
 ### Run the Reference Video Pipeline
@@ -201,7 +202,7 @@ cosmos-curator image build --image-name cosmos-curator --image-tag 1.0.0
    - For the same reason as above, we need to download weights for a few more models and it will take 10+ minutes depends on your network condition.
 
 ```bash
-cosmos-curator local launch --image-name cosmos-curator --image-tag 1.0.0 -- pixi run --as-is python -m cosmos_curator.core.managers.model_cli download
+cosmos-curator local launch --image-name cosmos-curator --image-tag 1.0.0 -- pixi run --as-is model_download
 ```
 
 3. **Run the Split-Annotate Pipeline**
@@ -224,7 +225,7 @@ cosmos-curator local launch --image-name cosmos-curator --image-tag 1.0.0 -- pix
 ```bash
 cosmos-curator local launch \
     --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline split \
+    -- pixi run --as-is video_pipeline split \
     --input-video-path <local or s3 path containing input videos> \
     --output-clip-path <local or s3 path to store output clips and metadatas> \
     --limit 1
@@ -249,7 +250,7 @@ Cosmos Curator can call the Google Gemini API instead of local captioning models
 ```bash
 cosmos-curator local launch \
     --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline split \
+    -- pixi run --as-is video_pipeline split \
     --input-video-path <input path> \
     --output-clip-path <output path> \
     --captioning-algorithm gemini \
@@ -273,7 +274,7 @@ For a second-pass refinement of captions you can call the OpenAI API.
 ```bash
 cosmos-curator local launch \
     --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline split \
+    -- pixi run --as-is video_pipeline split \
     --input-video-path <input path> \
     --output-clip-path <output path> \
     --enhance-captions \
@@ -317,7 +318,7 @@ openai:
 ```bash
 cosmos-curator local launch \
     --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline split \
+    -- pixi run --as-is video_pipeline split \
     --input-video-path <input path> \
     --output-clip-path <output path> \
     --embedding-algorithm openai
@@ -398,7 +399,7 @@ cosmos-curator image build --slim --image-name cosmos-curator --image-tag slim
 # Launch with host source code and pixi environments mounted
 cosmos-curator local launch --image-name cosmos-curator --image-tag slim \
     --curator-path . --pixi-path . \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+    -- pixi run --as-is hello_world
 ```
 
 The `--pixi-path .` option mounts the `.pixi` directory from the given path into the container, so the container
@@ -417,10 +418,10 @@ file or CLI flags, not both:
 
 ```bash
 # Config mode -- all arguments come from the file
-run_pipeline /path/to/config.yaml
+pixi run --as-is video_pipeline /path/to/config.yaml
 
 # CLI mode -- all arguments are passed as flags
-run_pipeline split --input-video-path /workspace/input --output-clip-path /workspace/output
+pixi run --as-is video_pipeline split --input-video-path /workspace/input --output-clip-path /workspace/output
 ```
 
 The config format matches the NVCF invoke payload. The file **must** contain a `pipeline`
@@ -455,7 +456,7 @@ Example launch with a config file:
 cosmos-curator local launch \
     --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
     --extra-volumes /data/models:/config/models,/data/videos:/workspace/input,/data/output:/workspace/output \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline \
+    -- pixi run --as-is video_pipeline \
     /opt/cosmos-curator/examples/osmo/split_config.json
 ```
 
@@ -618,14 +619,14 @@ current directory when it looks like a Cosmos Curator repo.
 If your cluster has default account, partition, and GPU settings, launch with:
 
 ```bash
-cosmos-curator slurm submit -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+cosmos-curator slurm submit -- pixi run --as-is hello_world
 ```
 
 If your cluster requires an account, either pass `--account` or set `SBATCH_ACCOUNT` before submitting:
 
 ```bash
 export SBATCH_ACCOUNT=my_slurm_account
-cosmos-curator slurm submit -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+cosmos-curator slurm submit -- pixi run --as-is hello_world
 ```
 
 Add only the remaining cluster-specific scheduling options your site requires, for example partition, QoS, GPUs, or node
@@ -639,7 +640,7 @@ cosmos-curator slurm submit \
   -G 8 \
   --nodes 1 \
   -J "hello-world" \
-  -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+  -- pixi run --as-is hello_world
 ```
 
 Use `-G 8` for the common GPU request form. `--gres=gpu:8` is also supported; the two options are mutually exclusive.
@@ -694,7 +695,7 @@ cosmos-curator slurm submit \
   -J "hello-world" \
   --mail-user your.email@example.com \
   --mail-type END,FAIL \
-  -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+  -- pixi run --as-is hello_world
 ```
 
 **⚠️ Cluster-Specific Considerations:**
@@ -761,7 +762,7 @@ for i in $(seq 0 $((NUM_BATCHES - 1))); do
     -G 8 \
     --nodes 1 \
     -J "split-batch-${i}" \
-    -- pixi run --as-is python -m cosmos_curator.pipelines.video.run_pipeline split \
+    -- pixi run --as-is video_pipeline split \
       --input-video-path s3://bucket/videos \
       --input-video-list-json-path "$MANIFEST" \
       --output-clip-path s3://bucket/output
@@ -811,7 +812,7 @@ cosmos-curator slurm shell --curator-path . -G 8
 To run a specific command instead of opening `bash`, put it after `--`:
 
 ```bash
-cosmos-curator slurm shell --curator-path . -- pixi run --as-is python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+cosmos-curator slurm shell --curator-path . -- pixi run --as-is hello_world
 ```
 
 For slim images, the shell command installs the Pixi environments listed in the image's `COSMOS_CURATOR_SLIM_ENVS`.
@@ -827,7 +828,7 @@ Inside the container, run commands with `pixi run --as-is` so Pixi uses the envi
 
 ```bash
 cd /opt/cosmos-curator
-pixi run --as-is -e unified python -m cosmos_curator.pipelines.examples.hello_world_pipeline
+pixi run --as-is -e unified hello_world
 ```
 
 Environments not listed with `--pixi-envs` are not installed during startup; install them explicitly inside the
