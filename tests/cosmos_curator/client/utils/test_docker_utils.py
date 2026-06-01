@@ -14,6 +14,9 @@
 # limitations under the License.
 """Tests for Dockerfile generation utilities."""
 
+import re
+import shutil
+import subprocess
 from itertools import pairwise
 from pathlib import Path
 
@@ -25,6 +28,22 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DOCKERFILE_TEMPLATE_PATH = REPO_ROOT / "package" / "cosmos_curator" / "default.dockerfile.jinja2"
 
 
+def _render_dockerfile_path(
+    tmp_path: Path,
+    *,
+    slim: bool,
+    redistributable: bool,
+    conda_env_names: list[str] | None = None,
+) -> Path:
+    return docker_utils.generate_dockerfile(
+        dockerfile_template_path=DOCKERFILE_TEMPLATE_PATH,
+        conda_env_names=["default"] if conda_env_names is None else conda_env_names,
+        dockerfile_output_path=tmp_path / f"Dockerfile-slim-{slim}-redistributable-{redistributable}",
+        slim=slim,
+        redistributable=redistributable,
+    )
+
+
 def _render_dockerfile(
     tmp_path: Path,
     *,
@@ -32,14 +51,22 @@ def _render_dockerfile(
     redistributable: bool,
     conda_env_names: list[str] | None = None,
 ) -> str:
-    dockerfile_path = docker_utils.generate_dockerfile(
-        dockerfile_template_path=DOCKERFILE_TEMPLATE_PATH,
-        conda_env_names=["default"] if conda_env_names is None else conda_env_names,
-        dockerfile_output_path=tmp_path / f"Dockerfile-slim-{slim}-redistributable-{redistributable}",
+    return _render_dockerfile_path(
+        tmp_path,
         slim=slim,
         redistributable=redistributable,
-    )
-    return dockerfile_path.read_text()
+        conda_env_names=conda_env_names,
+    ).read_text()
+
+
+def _write_buildx_parse_check_dockerfile(source_path: Path, output_path: Path) -> None:
+    """Write a BuildKit-checkable Dockerfile that avoids external image pulls."""
+    lines = source_path.read_text().splitlines()
+    if lines and lines[0].startswith("# syntax="):
+        lines = lines[1:]
+    contents = "\n".join(lines) + "\n"
+    contents = re.sub(r"^FROM\s+\S+\s+AS\s+", "FROM scratch AS ", contents, flags=re.MULTILINE)
+    output_path.write_text(contents)
 
 
 def _empty_continuation_lines(contents: str) -> list[int]:
@@ -78,6 +105,38 @@ def _run_blocks(contents: str) -> list[str]:
         blocks.append("\n".join(current_block))
 
     return blocks
+
+
+@pytest.mark.parametrize("slim", [False, True])
+@pytest.mark.parametrize("redistributable", [False, True])
+def test_generated_dockerfile_parses_with_buildx_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    slim: bool,
+    redistributable: bool,
+) -> None:
+    """Rendered Dockerfiles should parse with the BuildKit frontend used by image builds."""
+    monkeypatch.chdir(REPO_ROOT)
+
+    dockerfile_path = _render_dockerfile_path(tmp_path, slim=slim, redistributable=redistributable)
+    check_path = tmp_path / f"{dockerfile_path.name}.parse-check"
+    _write_buildx_parse_check_dockerfile(dockerfile_path, check_path)
+    docker_path = shutil.which("docker")
+    assert docker_path is not None
+
+    result = subprocess.run(  # noqa: S603
+        [docker_path, "buildx", "build", "--check", "-f", str(check_path), "."],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    # Some buildx versions return nonzero when checks emit warnings. Syntax errors
+    # do not reach "Check complete", so this still catches malformed Dockerfiles.
+    assert result.returncode == 0 or "Check complete" in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize("slim", [False, True])
@@ -131,6 +190,7 @@ def test_full_dockerfile_rebuilds_opencv_against_local_ffmpeg(
     assert "WITH_FFMPEG=ON" in contents
     assert "WITH_GTK=OFF" in contents
     assert "WITH_QT=OFF" in contents
+    assert "WITH_TIFF=OFF" in contents
     assert "CMAKE_PREFIX_PATH=/opt/ffmpeg" in contents
     assert "CMAKE_BUILD_RPATH=/opt/ffmpeg/lib" in contents
     assert "pip install --no-cache-dir --no-deps /opencv-wheelhouse/opencv_python_headless-*.whl" in contents
@@ -161,6 +221,7 @@ def test_full_dockerfile_with_paddle_ocr_rebuilds_all_opencv_variants(
     assert "opencv_contrib_python-" in contents
     assert "WITH_GTK=OFF" in contents
     assert "WITH_QT=OFF" in contents
+    assert "WITH_TIFF=OFF" in contents
 
 
 def test_full_dockerfile_with_unified_rebuilds_all_opencv_variants(
@@ -182,6 +243,7 @@ def test_full_dockerfile_with_unified_rebuilds_all_opencv_variants(
     assert "opencv_contrib_python-" in contents
     assert "WITH_GTK=OFF" in contents
     assert "WITH_QT=OFF" in contents
+    assert "WITH_TIFF=OFF" in contents
 
 
 def test_full_dockerfile_replaces_bundled_video_wheels_in_pixi_install_layer(

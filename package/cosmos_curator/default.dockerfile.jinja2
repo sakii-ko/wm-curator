@@ -290,6 +290,8 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
 # PyPI's opencv-python-headless wheels bundle their own FFmpeg shared libs.
 # Rebuilding from source linked against /opt/ffmpeg keeps cv2.VideoCapture /
 # cv2.VideoWriter on the same codec policy as PyAV and the ffmpeg/ffprobe CLI.
+# TIFF support is disabled below because libtiff6 pulls libjbig0, which is
+# GPL-family and cannot ship without legal review.
 FROM nvcr.io/nvidia/cuda:13.0.2-devel-ubuntu24.04 AS opencv-builder
 
 SHELL ["/bin/bash", "-c"]
@@ -318,7 +320,6 @@ RUN echo "/opt/ffmpeg/lib" > /etc/ld.so.conf.d/ffmpeg.conf && \
         libopenblas0-pthread \
         libpcre2-16-0 \
         libpng16-16t64 \
-        libtiff6 \
         $(if [ "$(dpkg --print-architecture)" = "amd64" ]; then echo libquadmath0; fi) \
 {% if not redistributable %}        libopenh264-7 \
 {% endif %}        libvpx9 \
@@ -372,7 +373,7 @@ RUN --mount=type=bind,from=wheels-builder,source=/wheels-ready,target=/tmp/wheel
     pkg-config --modversion libavcodec libavformat libavutil libswscale && \
     pkg-config --cflags --libs libavcodec libavformat libavutil libswscale && \
     export ENABLE_HEADLESS=1 && \
-    export CMAKE_ARGS="-DWITH_FFMPEG=ON -DWITH_GTK=OFF -DWITH_QT=OFF -DOPENCV_FFMPEG_SKIP_BUILD_CHECK=ON -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config -DCMAKE_PREFIX_PATH=/opt/ffmpeg -DCMAKE_LIBRARY_PATH=/opt/ffmpeg/lib -DCMAKE_INCLUDE_PATH=/opt/ffmpeg/include -DCMAKE_BUILD_RPATH=/opt/ffmpeg/lib -DCMAKE_INSTALL_RPATH=/opt/ffmpeg/lib" && \
+    export CMAKE_ARGS="-DWITH_FFMPEG=ON -DWITH_GTK=OFF -DWITH_QT=OFF -DWITH_TIFF=OFF -DOPENCV_FFMPEG_SKIP_BUILD_CHECK=ON -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config -DCMAKE_PREFIX_PATH=/opt/ffmpeg -DCMAKE_LIBRARY_PATH=/opt/ffmpeg/lib -DCMAKE_INCLUDE_PATH=/opt/ffmpeg/include -DCMAKE_BUILD_RPATH=/opt/ffmpeg/lib -DCMAKE_INSTALL_RPATH=/opt/ffmpeg/lib" && \
     mkdir -p /opencv-wheelhouse && \
     pixi run --as-is -e default pip wheel --no-deps --no-cache-dir \
         --wheel-dir /opencv-wheelhouse /opencv-python-src{% if 'paddle-ocr' in envs or 'unified' in envs %} && \
@@ -436,7 +437,6 @@ RUN apt-get update \
     libopenblas0-pthread \
     libpcre2-16-0 \
     libpng16-16t64 \
-    libtiff6 \
     $(if [ "$(dpkg --print-architecture)" = "amd64" ]; then echo libquadmath0; fi) \
 {% if not redistributable %}    libopenh264-7 \
 {% endif %}    libvpx9 \
