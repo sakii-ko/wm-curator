@@ -62,7 +62,7 @@ Cosmos Curator today is mostly a collection of useful video curation pipelines, 
 commands. That is a good starting point. The immediate pain is not that the pipelines lack autonomy. The immediate pain
 is operational:
 
-- Users have to remember benchmark names, command shapes, input paths, output paths, conda environments, and resource
+- Users have to remember benchmark names, command shapes, input paths, output paths, Pixi environments, and resource
   settings.
 - Slurm submission, status polling, log lookup, and artifact collection are manual and cluster-specific.
 - Results are often summarized ad hoc in chat, notebooks, or terminal scrollback.

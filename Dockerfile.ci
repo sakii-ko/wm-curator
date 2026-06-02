@@ -1,4 +1,4 @@
-FROM mambaorg/micromamba:latest
+FROM ghcr.io/prefix-dev/pixi:latest
 
 USER root
 
@@ -6,9 +6,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV KUBECTL_VERSION=v1.34.2
-ENV MAMBA_ROOT_PREFIX=/opt/conda
+ENV PATH=/opt/cosmos-curator/.pixi/envs/dev/bin:/usr/local/bin:${PATH}
 ENV PIP_NO_CACHE_DIR=1
-ENV POETRY_CACHE_DIR=/tmp/pypoetry-cache
+ENV PYTHONNOUSERSITE=1
 
 LABEL ci-keep="true"
 
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gettext-base \
+    git \
     jq \
     skopeo \
     unzip \
@@ -41,18 +42,15 @@ RUN ARCH="$(uname -m)" \
     && install -m 0755 vault /usr/local/bin/vault \
     && rm -f /tmp/vault_agent.zip /tmp/vault
 
-USER $MAMBA_USER
+RUN mkdir -p /opt/cosmos-curator \
+    && chown -R ubuntu:ubuntu /opt/cosmos-curator
 
-COPY --chown=mambauser:mambauser pyproject.toml poetry.lock /tmp/cosmos-curator/
+USER ubuntu
 
-RUN micromamba create -n curator python=3.12.13 poetry pip -y \
-    && RUFF_VERSION="$(micromamba run -n curator python -c 'import tomllib; print(tomllib.load(open("/tmp/cosmos-curator/pyproject.toml", "rb"))["tool"]["poetry"]["group"]["dev"]["dependencies"]["ruff"])')" \
-    && micromamba run -n curator pip install --no-cache-dir awscli coverage "ruff==${RUFF_VERSION}" \
-    && micromamba clean --all --yes
+WORKDIR /opt/cosmos-curator
 
-RUN cd /tmp/cosmos-curator \
-    && micromamba run -n curator poetry config virtualenvs.create false \
-    && micromamba run -n curator poetry install --extras=local --no-interaction --no-root \
-    && (micromamba run -n curator poetry cache clear pypi --all -n || true) \
-    && rm -rf /home/mambauser/.cache/pypoetry /home/mambauser/.cache/pip /tmp/pypoetry-cache /tmp/cosmos-curator
+COPY --chown=ubuntu:ubuntu pixi.toml pixi.lock pyproject.toml setup.py MANIFEST.in README.md LICENSE ./
+COPY --chown=ubuntu:ubuntu cosmos_curator ./cosmos_curator
 
+RUN pixi install --frozen -e dev \
+    && rm -rf /home/ubuntu/.cache/pip /home/ubuntu/.cache/pixi /home/ubuntu/.cache/rattler

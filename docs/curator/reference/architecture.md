@@ -42,7 +42,7 @@ Before we dive into more details, it is helpful to understand the main motivatio
 
 The diagram below illustrates a logical view of a 4-stage pipeline.
 - Each stage has a pool of Ray actors as its stage workers, some are CPU-only and some use GPUs.
-  - An important feature here is each Ray actor can run in specific conda environment. So if the `segmentation model` and `classification model` have dependency conflicts, they can use separate conda environments.
+  - An important feature here is each Ray actor can run in a specific Pixi environment. So if the `segmentation model` and `classification model` have dependency conflicts, they can use separate Pixi environments.
   - This makes adding new models to a pipeline much easier.
 - Each actor works on a separate piece of data, e.g. one or a few videos.
   - This is essentially a data-parallel approach and therefore a stage's actor pool size represents the max throughput of that stage.
@@ -57,7 +57,7 @@ The diagram below illustrates a logical view of a 4-stage pipeline.
 
 To support the logical view above, physically what happens is illustrated below.
 - A single container is started per node (with e.g. 200 CPU cores & 8 GPUs) and joins the Ray cluster.
-  - Each container includes multiple conda environments such that a model requiring a specific conda environment can run anywhere in the Ray cluster.
+  - Each container includes multiple Pixi environments such that a model requiring a specific Pixi environment can run anywhere in the Ray cluster.
 - Each stage creates a pool of Ray actors, each of them is a stateful worker process running one of the nodes.
   - When a stage worker processes a pipeline task, the output is put into Ray object store and an object reference is returned to the main ochestration process.
   - That object reference is scheduled to a worker from the next stage's pool.

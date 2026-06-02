@@ -1,0 +1,7 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include setup.py
+graft cosmos_curator
+graft examples
+global-exclude __pycache__ *.py[cod]

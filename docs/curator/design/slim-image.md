@@ -15,7 +15,7 @@
 
 ## Motivation
 
-1. **Local dev velocity**: A slim image rebuilds in seconds (just source code, no conda install). Mounting the host's
+1. **Local dev velocity**: A slim image rebuilds in seconds (just source code, no Pixi environment install). Mounting the host's
    pixi environments via `--pixi-path` avoids rebuilding the image entirely when iterating on code or dependencies.
 2. **Image size**: Baked images with all environments pre-installed are enormous, causing slow push/pull on GitLab CI,
    NVCF, Slurm, and internal registries (throttling, bandwidth waste, layer timeout failures).
@@ -95,7 +95,7 @@ installed.
 
 6. **Full mode doesn't solve the size problem.** For platforms that need pre-built images (NVCF, air-gapped), the
    image size remains large. Phases 1-2 (removing the FFmpeg source build) help, but the bulk of the image size comes
-   from conda environments and model dependencies, which this design does not address.
+   from Pixi environments and model dependencies, which this design does not address.
 
 ## Task List
 

@@ -11,11 +11,11 @@ Cosmos Curator is a video curation system for AI training data generation, built
 
 ## Development
 
-**Setup**: `git submodule update --init --recursive && ./devset.sh`
+**Setup**: `git submodule update --init --recursive`; `./devset.sh` installs local git hooks and runs a build smoke test.
 
 **Code Quality** (run globally before committing, not just on changed files):
 ```bash
-ruff format && ruff check --fix && mypy
+pixi run ruff format && pixi run ruff check --fix && pixi run mypy
 ```
 
 Pre-commit hooks run ruff automatically. A submodule-check hook warns before committing cosmos-xenna changes.
@@ -26,7 +26,7 @@ Pre-commit hooks run ruff automatically. A submodule-check hook warns before com
 - Mark GPU tests with `@pytest.mark.env("unified")` (or other env name)
 - Place tests in `tests/` mirroring module paths. Uses `--import-mode=importlib`.
 
-**Building**: Poetry frontend with setuptools backend. `poetry build` for client wheel, `cosmos-curator image build` for Docker.
+**Building**: Setuptools backend via PyPA build. `pixi run build` for client wheel, `cosmos-curator image build` for Docker.
 
 **CLI**: `cosmos-curator [local|slurm|nvcf|image|view] --help`
 

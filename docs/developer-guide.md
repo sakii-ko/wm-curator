@@ -31,26 +31,27 @@ Please refer to the following section in [End User Guide](./client/end-user-guid
 - [Initial Setup](./client/end-user-guide.md#initial-setup) for preparaing configurations files and workspace directories, etc.
 - [Setup Environment and Install Dependencies](./client/end-user-guide.md#setup-environment-and-install-dependencies) for setting up Cosmos Curator.
 
-For developers to contribute back to the repo, the following additional steps are needed:
+For developers to contribute back to the repo, install the local git hooks and run a package build smoke test:
 
-To help ease with setup, from within your virtual environment you can run
 ```bash
 ./devset.sh
 ```
 
-Alternatively, you should perform these additional steps.
-```bash
-# Install mypy types
-mypy --install-types
+For an interactive development shell, run:
 
-# Set up pre-commit hooks
-pre-commit install
+```bash
+pixi shell -e dev
+```
+
+For an explicit one-time setup without the smoke test, install the pre-commit hook directly:
+
+```bash
+pixi run pre-commit install
 ```
 
 ### Working with Pixi Environments
 
-Cosmos Curator uses [Pixi](https://pixi.sh) to manage Python environments inside Docker images. As a developer, you may
-need to inspect or work with these environments locally.
+Cosmos Curator uses [Pixi](https://pixi.sh) to manage Python environments for local development and Docker images.
 
 The `pixi.toml` file at the repository root defines all Pixi environments used by Cosmos Curator.
 
@@ -132,6 +133,25 @@ pixi run -e <env-name> python -m <module>
 pixi run -e unified python -c "import torch; print(torch.cuda.is_available())"
 ```
 
+Developer tools support two local workflows. Without activating a shell, use Pixi task aliases from the repository root:
+
+```bash
+pixi run ruff check
+pixi run mypy --pretty
+pixi run pytest tests/test_pixi_dev_commands.py
+pixi run build
+```
+
+Or activate the developer environment once, then run the tools directly:
+
+```bash
+pixi shell -e dev
+ruff check
+mypy --pretty
+pytest tests/test_pixi_dev_commands.py
+python -m build
+```
+
 Note: For pipeline execution, always use the Docker container as shown in the testing section.
 
 ### Interactive Slurm Development
@@ -146,26 +166,32 @@ environment issues.
 This project uses the following development tools:
 1. **ruff**: For code formatting and linting
 2. **mypy**: For static type checking
-3. **poetry**: For dependency management
+3. **Pixi**: For dependency management
 
 Before submitting any changes, format Python files and run the checks from the repository root:
 
 ```bash
-pixi run format
-pixi run lint
+pixi run ruff format
+pixi run ruff check
+pixi run mypy --pretty
 ```
+
+If you are already inside `pixi shell -e dev`, omit `pixi run` and run `ruff format`, `ruff check`, and `mypy --pretty`
+directly.
 
 ## Building the Client package
    - The `cosmos-curator` client can be built as a wheel and installed in a standalone mode, without the need for the rest of the source environment
 ```bash
-poetry build
+pixi run build
 pip3 install dist/cosmos_curator*.whl
 ```
+
+Inside `pixi shell -e dev`, use `python -m build`.
 
 ## Testing
 
 Tests under the [tests/](../tests/) directory can be categorized into 3 levels:
-- Unit tests: for testing critical/complex function which are typically CPU-only and can run in default conda environment.
+- Unit tests: for testing critical/complex function which are typically CPU-only and can run in the default Pixi environment.
 - Model/stage tests: for testing functional correctness of a model, a pipeline stage, and a combination of a few stages, which typically require GPU and should run inside the container.
 - End-to-end pipeline tests: for testing the functionality of reference pipelines.
 
@@ -174,7 +200,8 @@ Tests under the [tests/](../tests/) directory can be categorized into 3 levels:
 Run the CPU-only pytest suite from the repository root:
 
 ```bash
-pixi run cputest
+PYTEST_ADDOPTS='--junitxml=report.xml --cov=cosmos_curator --cov-report=term --cov-report=xml:unit-coverage.xml --cov-report=html:unit-htmlcov' \
+  pixi run pytest -s
 
 ================ test session starts ================
 configfile: pytest.ini
@@ -187,6 +214,8 @@ tests/cosmos_curator/pipelines/video/filtering/motion/test_motion_filter.py .   
 tests/cosmos_curator/pipelines/video/utils/test_decoder_utils.py .............................   [100%]
 ================ 102 passed, 6 deselected, 2 warnings in 2.98s ================
 ```
+
+Inside `pixi shell -e dev`, use the same `PYTEST_ADDOPTS` value with `pytest -s`.
 
 ### Model and Stage Tests
 
@@ -262,9 +291,8 @@ Other large pipelines may still use legacy patterns until migrated; follow the e
 2. **Dependencies**:
    - Maintain the `pyproject.toml` file
    - Document any new dependencies
-   - Use `poetry install --extras=local` to install packages in your virtual environment
-   > Note: You may need to do the following : `export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring` before running `poetry` to avoid getting stuck due to a keyring pop-up when you are running in a headless display environment
-   > Note: From within your virtual environment, you may execute `./devset.sh` to complete inital setup of environment.
+   - Use `pixi shell -e dev` for local development
+   > Note: You may execute `./devset.sh` to install local git hooks and run a package build smoke test.
 
 3. **Code Quality**:
    - Write clean, well-documented code

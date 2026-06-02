@@ -5,7 +5,7 @@
     - [Pipeline Task Class](#pipeline-task-class)
     - [Pipeline Stage Class](#pipeline-stage-class)
     - [Model Class](#model-class)
-    - [Conda Environment Management](#conda-environment-management)
+    - [Pixi Environment Management](#pixi-environment-management)
     - [Run the Pipeline](#run-the-pipeline)
       - [StageSpec Customization](#stagespec-customization)
     - [Writing Artifacts in Multi-Node Clusters](#writing-artifacts-in-multi-node-clusters)
@@ -99,7 +99,7 @@ class _GPT2Stage(CuratorStage):
 ```
 
 4. `stage_setup()`: implements the setup work when a Ray actor for this stage's worker is created.
-   - A subtle but important difference between the `__init__` constructor and this `stage_setup` method is that the constructor runs in the base conda environment while `stage_setup` runs in the conda environment specified by the model. Therefore code to setup the model need to be in this method.
+   - A subtle but important difference between the `__init__` constructor and this `stage_setup` method is that the constructor runs in the base Pixi environment while `stage_setup` runs in the Pixi environment specified by the model. Therefore code to setup the model need to be in this method.
    - The CPU stages without a model can also implement this method if any setup work is needed.
 
 ```python
@@ -124,7 +124,7 @@ The following methods are required to be overriden:
 
 ```python
 class GPT2(ModelInterface):
-    # need override conda_env_name to tell underlying logic which conda env to use
+    # need override conda_env_name to tell underlying logic which Pixi env to use
     @property
     def conda_env_name(self) -> str:
         return "default"
@@ -159,15 +159,15 @@ To help management of models, add a section in [all_models.json](../../../cosmos
 }
 ```
 
-### Conda Environment Management
+### Pixi Environment Management
 
-The `GPT2` model above uses the default conda environment;
+The `GPT2` model above uses the default Pixi environment;
 that corresponds to the environment `default` in [pixi.toml](../../../pixi.toml).
 
 Every `env` needs to be listed in [pixi.toml](../../../pixi.toml).
 Note as a convention enforced by `pixi`, you should use `-` instead of `_` for the `env` name.
 
-Then when building the docker image for running pipelines, use option `--envs` to specify which conda environments to be included in the build.
+Then when building the docker image for running pipelines, use option `--envs` to specify which Pixi environments to be included in the build.
 
 In case you find it hard to configure your `env` using `pixi`, you can add a `post_install.sh` script under `package/cosmos_curator/envs/<env_name>/`.
 We have an example for `paddle-ocr` env which only installs the basic packages in [pixi.toml](../../../pixi.toml)

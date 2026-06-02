@@ -60,9 +60,6 @@ classifiers = [
 Homepage = "https://github.com/nvidia-cosmos/cosmos-curate"
 Repository = "https://github.com/nvidia-cosmos/cosmos-curate.git"
 
-[tool.poetry.scripts]
-cosmos-curator = 'cosmos_curator.client.cli:cosmos_curator'
-
 [project.scripts]
 cosmos-curator = 'cosmos_curator.client.cli:cosmos_curator'
 
@@ -231,57 +228,3 @@ module = [
     "vllm.*",
 ]
 ignore_missing_imports = true
-
-[tool.poetry.group.dev.dependencies]
-mypy = "2.1.0"
-pandas-stubs = "*"
-pre-commit = "4.2.0"
-pyinstrument = "*"
-memray = "*"
-opentelemetry-api = "*"
-opentelemetry-sdk = "*"
-opentelemetry-exporter-otlp-proto-http = "*"
-opentelemetry-instrumentation-botocore = "*"
-opentelemetry-instrumentation-requests = "*"
-opentelemetry-instrumentation-urllib3 = "*"
-opentelemetry-instrumentation-threading = "*"
-opentelemetry-instrumentation-logging = "*"
-opentelemetry-instrumentation-sqlalchemy = "*"
-opentelemetry-instrumentation-fastapi = "*"
-pytest = "*"
-pytest-asyncio = "*"
-pytest-cov = "*"
-pytest-dependency = "*"
-pytest-mock = "*"
-pytest-order = "*"
-pytest-xdist = "*"
-ruff = "0.15.15"
-types-aiofiles = "*"
-types-awscrt = "*"
-types-beautifulsoup4 = "*"
-types-boto3 = "*"
-types-cachetools = "*"
-types-colorama = "*"
-types-greenlet = "*"
-types-jmespath = "*"
-types-jsonschema = "*"
-types-networkx = "*"
-types-openpyxl = "*"
-types-protobuf = "*"
-types-psutil = "*"
-types-psycopg2 = "*"
-types-pycurl = "*"
-types-python-dateutil = "*"
-types-pytz = "*"
-types-pyyaml = "*"
-types-PyYAML = "*"
-types-requests = "*"
-types-setuptools = "*"
-types-s3transfer = "*"
-types-simplejson = "*"
-types-six = "*"
-types-regex = "*"
-types-tabulate = "*"
-types-tensorflow = "*"
-types-toml = "*"
-types-tqdm = "*"

@@ -47,7 +47,7 @@ def generate_dockerfile(  # noqa: PLR0913
 
     Args:
         dockerfile_template_path (pathlib.Path): The path to the Dockerfile template.
-        conda_env_names (List[str]): The list of conda environment names to include in the Docker image.
+        conda_env_names (List[str]): The list of Pixi environment names to include in the Docker image.
         use_local_xenna_build (bool): If True, uses a local build of Xenna.
         code_paths (List[conda_envs.CodePath]): The list of code paths to include in the Docker image.
         dockerfile_output_path (Optional[pathlib.Path]): The path to write the rendered Dockerfile.

@@ -6,10 +6,7 @@ echo "Setting up Vault authentication..."
 # Install dependencies if missing
 if ! which curl >/dev/null 2>&1 || ! which unzip >/dev/null 2>&1; then
   echo "Installing required dependencies..."
-  if which micromamba >/dev/null 2>&1; then
-    # Use micromamba if available (docker runners)
-    micromamba install -y -c conda-forge curl unzip
-  elif which apk >/dev/null 2>&1; then
+  if which apk >/dev/null 2>&1; then
     # Alpine
     apk add --no-cache curl unzip
   elif which apt-get >/dev/null 2>&1; then

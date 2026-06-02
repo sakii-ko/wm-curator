@@ -72,7 +72,7 @@ cosmos-curator/
 │   ├── scripts/            # Startup scripts in various deployment environments
 ├── cosmos-xenna            # Git submodule for https://github.com/nvidia-cosmos/cosmos-xenna
 ├── packages                # Dockerfiles and scripts related to packaging
-│   ├── cosmos_curator       # Dockerfile template and conda environment recipes for building cosmos_curator image
+│   ├── cosmos_curator       # Dockerfile template and Pixi environment post-install scripts
 ├── tests                   # Tests for testing
 │   ├── cosmos_curator
 │       ├── pipelines       # Tests for models and pipeline stages for cosmos_curator

@@ -76,10 +76,10 @@ def build(  # noqa: PLR0913
         str,
         Option(
             help=(
-                "Comma-separated list of conda environments to build into the image. "
-                "Supported values can be found under package/cosmos_curator/envs/."
+                "Comma-separated list of Pixi environments to build into the image. "
+                "Supported values are defined in pixi.toml."
             ),
-            rich_help_panel="conda_envs",
+            rich_help_panel="pixi_envs",
         ),
     ] = "cuml,legacy-transformers,sam3,seedvr,unified",
     use_local_xenna_build: Annotated[
@@ -187,7 +187,7 @@ def build(  # noqa: PLR0913
         ),
     ] = False,
 ) -> None:
-    """Build a docker image with the specified conda environments."""
+    """Build a docker image with the specified Pixi environments."""
     _curator_path = Path(curator_path)
     _dockerfile_output_path = Path(dockerfile_output_path) if dockerfile_output_path else None
     package_path = _curator_path / Path("package") / Path("cosmos_curator")

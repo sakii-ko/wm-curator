@@ -721,7 +721,7 @@ except Exception:
 - `cosmos_curator.pipelines.video.utils.data_model`: Configuration, request, status, and token-count objects
 - Plugin implementations: `vllm_nemotron.py`, `vllm_qwen.py`, `vllm_cosmos_reason1_vl.py`, `vllm_cosmos_reason2_vl.py`
 
-### Conda Environment
+### Pixi Environment
 
 vLLM models require the **`unified`** Pixi environment:
 ```bash

@@ -17,16 +17,18 @@ default_language_version:
   python: python3.12
 
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.13.2
-    hooks:
-      - id: ruff
-        args: [ "--config=pyproject.toml", "--fix" ]
-      - id: ruff-format
-        args: [ "--config=pyproject.toml" ]
-
   - repo: local
     hooks:
+      - id: ruff
+        name: ruff
+        entry: pixi run ruff check --fix --force-exclude --config=pyproject.toml
+        language: system
+        types_or: [python, pyi, jupyter]
+      - id: ruff-format
+        name: ruff format
+        entry: pixi run ruff format --force-exclude --config=pyproject.toml
+        language: system
+        types_or: [python, pyi, jupyter]
       - id: submodule-check
         name: "WARNING: You are about to update the version of submodule cosmos-xenna, Are you sure? - y/N: "
         entry: .githooks/submodule-check.sh

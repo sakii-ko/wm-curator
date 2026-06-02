@@ -109,42 +109,33 @@ docker login --username '$oauthtoken' nvcr.io
    - Azure blob storage is also supported but is tested much less extensively.
      - If using Azure blob storage, `~/.azure/credentials` should be configured properly.
 
-1. Set up the environment and install dependencies (This provides a CLI for the steps described in the platform sections of this guide)
-    - It is strongly recommended to use a Python virtual environment management system that can specify the Python version, such as
-      [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html),
-      [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html),
-      [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html),
-      [uv](https://docs.astral.sh/uv/),
-      etc.
-      - Also it is best to prevent packages under `$HOME/.local/` being used in the virtual environment,
-        you can set environment variable **`export PYTHONNOUSERSITE=1`** to exclude user site-package directory.
-    - In case you are running in a headless display environment,
-      you may need to set environment variable **`export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring`**
-      before running `poetry` to avoid getting stuck due to a keyring pop-up.
+1. Set up the environment and install dependencies. This provides the host-side CLI for the platform sections of this guide.
 
 ```bash
-# 1. Create virtual environment (using micromamba as an example)
-micromamba create -n cosmos-curator -c conda-forge python=3.12.12 poetry
-micromamba activate cosmos-curator
+# 1. Install Pixi if it is not already available
+curl -fsSL https://pixi.sh/install.sh | sh
+export PATH="$HOME/.pixi/bin:$PATH"
 
 # 2. Clone the repository and update `cosmos-xenna` submodule
 git clone --recurse-submodules https://github.com/nvidia-cosmos/cosmos-curate.git cosmos-curator
 cd cosmos-curator
 
 # 3. Install dependencies
-poetry install --extras=local
+pixi install --frozen -e dev
 
 # 4. Verify the CLI tool is available
-cosmos-curator --help
+pixi run cosmos-curator --help
 ```
 
-Alternatively, you may execute `./devset.sh` to complete initial setup of environment **from within your virtual environment**.
+Developers may also execute `./devset.sh` from the repository root to install local git hooks and run a package build
+smoke test.
 
-The `cosmos-curator` command is a host-side deployment CLI installed by the setup steps above. Use it on the host
-to build images, launch local Docker runs, submit Slurm jobs, and manage NVCF resources. Runtime container images are
-focused on pipeline execution and do not guarantee the `cosmos-curator` command or the `cosmos_curator.client` package
-inside the container. In-container commands should use `pixi run --as-is` with the Pixi task aliases shown below, or
-`pixi run --as-is python -m cosmos_curator...` for modules without a task alias.
+The `cosmos-curator` command is a host-side deployment CLI available through `pixi run cosmos-curator ...`, or directly
+after running `pixi shell -e dev`. Use it on the host to build images, launch local Docker runs, submit Slurm jobs, and
+manage NVCF resources. Runtime container images are focused on pipeline execution and do not guarantee the
+`cosmos-curator` command or the `cosmos_curator.client` package inside the container. In-container commands should use
+`pixi run --as-is` with the Pixi task aliases shown below, or `pixi run --as-is python -m cosmos_curator...` for modules
+without a task alias.
 
 ## Quick Start for Local Run
 
@@ -175,7 +166,7 @@ The steps below only shows how to run the pipeline.
 ```bash
 # 1. Build a docker image for hello-world pipeline
 #    - The hello-world pipeline uses the GPT-2 model
-#    - GPT-2 runs in the default conda environment
+#    - GPT-2 runs in the default Pixi environment
 cosmos-curator image build --image-name cosmos-curator --image-tag hello-world --envs default
 
 # 2. Download the GPT-2 model weights
@@ -191,7 +182,7 @@ This section of the instructions references the concept of local paths. Note tha
 
 1. **Build a docker image.**
    - Unlike the hello-world example, we run more than one models in this pipeline.
-   - It's not always easy to run different models in the same python environment; so we need to build a new image with more conda environments included.
+   - It's not always easy to run different models in the same Python environment; so we need to build a new image with more Pixi environments included.
    - This could take up to 30 minutes for a fresh new build.
 
 ```bash
@@ -925,7 +916,7 @@ More details can be found in [Observability Guide](../curator/guides/observabili
 The `cosmos-curator` client can be built as a wheel and installed in a standalone mode, without the need for the rest of the source environment
 
 ```bash
-poetry build
+pixi run build
 pip3 install dist/cosmos_curator*.whl
 ```
 

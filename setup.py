@@ -21,6 +21,7 @@ and configures the package for distribution.
 """
 
 import shutil
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -142,7 +143,14 @@ def build_package() -> None:
         shutil.copytree(examples_src, examples_dst)
 
 
-build_package()
+is_editable_install = any(command in sys.argv for command in ("develop", "editable_wheel"))
+if is_editable_install:
+    package_search_dir = "."
+    package_dir = {}
+else:
+    build_package()
+    package_search_dir = build_dir
+    package_dir = {"": build_dir}
 
 setup(
     name=name,
@@ -150,9 +158,9 @@ setup(
     license=lic,
     author=authors,
     description=description,
-    packages=find_packages(where=build_dir, include=[name, f"{name}.*"]),
+    packages=find_packages(where=package_search_dir, include=[name, f"{name}.*"]),
     include_package_data=True,
-    package_dir={"": build_dir},
+    package_dir=package_dir,
     package_data={
         name: ["examples/**/*"],
         f"{name}.client.nvcf_cli.ncf.launcher": ["helm_values/*"],

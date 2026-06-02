@@ -4,9 +4,9 @@
 #
 # If a locally-built cosmos-xenna wheel artifact is present (downloaded from
 # the build_xenna_wheels matrix job), pip-install the wheel matching the host
-# architecture over the poetry-installed cosmos-xenna so lint/test jobs run
-# against the unreleased ref selected by XENNA_REF + the 'use-local-xenna-
-# build' MR label.
+# architecture into the active Pixi environment so lint/test jobs run against
+# the unreleased ref selected by XENNA_REF + the 'use-local-xenna-build' MR
+# label.
 #
 # This is a no-op when the wheel artifact is absent (i.e. when the label is
 # not set), so it is safe to call unconditionally from setup_curator. The
@@ -23,7 +23,7 @@ wheels=("${WHEEL_DIR}"/cosmos_xenna-*manylinux*_"${ARCH}".whl)
 shopt -u nullglob
 
 if [[ ${#wheels[@]} -eq 0 ]]; then
-    echo "No locally-built cosmos-xenna ${ARCH} wheel found at '${WHEEL_DIR}'; using the poetry-installed version."
+    echo "No locally-built cosmos-xenna ${ARCH} wheel found at '${WHEEL_DIR}'; using the Pixi-installed version."
     exit 0
 fi
 
@@ -35,7 +35,7 @@ if [[ ${#wheels[@]} -gt 1 ]]; then
 fi
 
 wheel="${wheels[0]}"
-echo "Installing locally-built cosmos-xenna wheel over the poetry-installed version: ${wheel}"
+echo "Installing locally-built cosmos-xenna wheel into the active Pixi environment: ${wheel}"
 python -m pip install --force-reinstall --no-deps "${wheel}"
 
 # Surface the active cosmos-xenna install path so the install is verifiable

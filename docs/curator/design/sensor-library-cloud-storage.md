@@ -211,8 +211,8 @@ HTTP-free because the stream is already at offset 0 when each phase starts.
 
 Prerequisites:
 
-- `smart_open >= 7` and PyAV `>= 17` in the Python env (the
-  `cosmos-curate` micromamba env or any pixi env). Older PyAV silently
+- `smart_open >= 7` and PyAV `>= 17` in the Python env (for example, the
+  relevant Pixi environment). Older PyAV silently
   makes every `FROM_HEADER` measurement raise.
 - Working AWS credentials for the target bucket (verified with
   `aws s3 ls s3://<bucket>/`).

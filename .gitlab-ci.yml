@@ -40,7 +40,7 @@ variables:
   CURATOR_SLIM_IMAGE: ${CI_REGISTRY_IMAGE}/curator-slim
   CURATOR_DISTRIBUTABLE_IMAGE: ${CI_REGISTRY_IMAGE}/curator-distributable
   CI_BUILDER_IMAGE_REPO: ${CI_REGISTRY_IMAGE}/ci-builder
-  CI_BUILDER_IMAGE: ${CI_BUILDER_IMAGE_REPO}:latest
+  CI_BUILDER_IMAGE: ${CI_BUILDER_IMAGE_REPO}:pixi
   BUILDX_BUILDER_NAME: ci-cosmos-builder
 
   # Pytest configuration
@@ -251,7 +251,7 @@ stages:
   # Rules for the redistributable image:
   # - Always on post-merge to main / protected pushes, and on ordinary web
   #   triggers, so the post-merge pipeline produces all three images (regular,
-  #   slim, distributable) at the same moment from the same apt/conda/pixi state.
+  #   slim, distributable) at the same moment from the same apt/Pixi state.
   # - On MR pipelines: only when the image/runtime surface changes, or when
   #   the explicit `build-all-images` MR label is set as an escape hatch.
   distributable_rules: &distributable_rules
@@ -304,50 +304,44 @@ stages:
     docker login -u gitlab-ci-token -p ${CI_JOB_TOKEN} "${CI_REGISTRY}"
     echo "$PERF_REGISTRY_KEY" | docker login nvcr.io/${PERF_NGC_NVCF_ORG_ID} --username '$oauthtoken' --password-stdin
 
-  # Set up micromamba environment for Python dependencies
-  setup_micromamba: &setup_micromamba |
-    # We now use locally installed micromamba
-    # Shell runner: /usr/local/bin/micromamba
-    # Docker runner: /usr/bin/micromamba (if using the micromamba Docker image)
-    # Configure micromamba environment
-    export MAMBA_ROOT_PREFIX="$(pwd)/micromamba"
-    eval "$(micromamba shell hook -s posix)"
-    # Create Python environment for curator
-    micromamba create -n curator python=${PYTHON_VERSION} poetry -y
-    micromamba activate curator
+  # Install Pixi when a custom runner does not provide the shared /usr/local/bin
+  # binary. Shell and ARM runners already have Pixi preinstalled there.
+  install_pixi_if_missing: &install_pixi_if_missing |
+    export PATH="/usr/local/bin:${HOME}/.pixi/bin:${PATH}"
+    if ! command -v pixi >/dev/null 2>&1; then
+      command -v curl
+      curl -fsSL https://pixi.sh/install.sh | PIXI_HOME="${HOME}/.pixi" PIXI_NO_PATH_UPDATE=1 sh
+    fi
+    command -v pixi
 
-  # Activate the prebuilt curator environment from ci-builder image
+  # Install and activate the Pixi dev environment on shell runners.
+  setup_pixi_dev: &setup_pixi_dev |
+    export PATH="/usr/local/bin:${HOME}/.pixi/bin:${PATH}"
+    command -v pixi
+    export PIXI_CACHE_DIR="${PIXI_CACHE_DIR:-${CI_PROJECT_DIR}/.pixi/cache}"
+    export PYTHONNOUSERSITE=1
+    pixi install --frozen -e dev
+    eval "$(pixi shell-hook -e dev -s bash)"
+
+  # Activate the prebuilt Pixi dev environment from the ci-builder image.
   setup_ci_builder_env: &setup_ci_builder_env |
-    export MAMBA_ROOT_PREFIX=/opt/conda
-    eval "$(micromamba shell hook -s posix)"
-    micromamba activate curator
+    export PYTHONNOUSERSITE=1
+    export PATH="/opt/cosmos-curator/.pixi/envs/dev/bin:/usr/local/bin:${PATH}"
+    eval "$(pixi shell-hook --manifest-path /opt/cosmos-curator/pixi.toml -e dev -s bash)"
 
-  # Activate an existing micromamba environment
-  activate_micromamba: &activate_micromamba |
-    # Configure micromamba environment
-    export MAMBA_ROOT_PREFIX="$(pwd)/micromamba"
-    eval "$(micromamba shell hook -s posix)"
-    # Create Python environment for curator
-    micromamba activate curator
-
-  # Clean up micromamba environment
-  teardown_micromamba: &teardown_micromamba |
-    micromamba deactivate || true
-    micromamba env remove -n curator -y || true
-
-  # Install curator full requirements. When the build_xenna_wheels matrix job
+  # Install the checked-out curator package. When the build_xenna_wheels matrix job
   # has produced a wheel (i.e. on MR pipelines with the 'use-local-xenna-build'
-  # label), pip-install the host-arch wheel over the poetry-resolved
+  # label), pip-install the host-arch wheel over the pixi-resolved
   # cosmos-xenna so lint/test jobs run against XENNA_REF instead of the
   # PyPI-pinned release. The helper is a no-op when no wheel artifact is
   # present.
   setup_curator: &setup_curator |
-    poetry install --extras=local --no-interaction
+    python -m pip install --no-deps -e .
     bash .gitlab/scripts/install_local_xenna_wheel_if_present.sh
 
-  # Install curator CLI requirements
+  # Install the checked-out curator CLI package.
   setup_curator_cli: &setup_curator_cli |
-    poetry install --no-interaction
+    python -m pip install --no-deps -e .
 
   # Configure cosmos-curator nvcf CLI
   configure_nvcf_cli: &configure_nvcf_cli |
@@ -443,12 +437,11 @@ unit_tests:
       --cov-report=html:unit-htmlcov
   rules: *pre_post_merge_rules
   script:
-    - *setup_micromamba
+    - *setup_pixi_dev
     - *setup_curator
     - pytest -s
     # Save the raw coverage data file
     - cp .coverage .coverage.unit_tests || true
-    - *teardown_micromamba
   artifacts:
     when: always
     reports:
@@ -473,7 +466,8 @@ client_wheel_smoke:
   rules: *pre_post_merge_rules
   script:
     - *setup_ci_builder_env
-    - poetry build -f wheel --no-interaction
+    - *setup_curator_cli
+    - python -m build -w
     - |
       tmpdir="$(mktemp -d)"
       trap 'rm -rf "$tmpdir"' EXIT
@@ -531,7 +525,7 @@ client_wheel_smoke:
     # Set up environment
     - *docker_login
     - *setup_buildx_builder
-    - *setup_micromamba
+    - *setup_pixi_dev
     - *setup_curator_cli
     - source .gitlab/scripts/common.sh
     - get_cache_refs "${BUILD_IMAGE_REPO}" "${PLATFORM}"
@@ -572,7 +566,6 @@ client_wheel_smoke:
       --push \
       --no-load
     - echo "Built and pushed ${BUILD_IMAGE_REPO}:${IMAGE_TAG}-${PLATFORM} from curator commit [${CI_COMMIT_SHA}]"
-    - *teardown_micromamba
   retry:
     max: 2
     when: always
@@ -590,7 +583,7 @@ build_deploy_curator_slim_arch:
 
 # Redistributable image: same Python + pixi envs as the regular curator image,
 # but built with the narrower redistributable runtime policy. Built post-merge
-# alongside regular + slim so all three share the exact same apt/conda/pixi
+# alongside regular + slim so all three share the exact same apt/Pixi
 # state at build time. On MRs, only built when the image/runtime surface changes
 # (see distributable_rules) or the `build-all-images` label is set.
 build_deploy_curator_distributable_arch:
@@ -811,21 +804,11 @@ slurm_end_to_end:
     ENROOT_CONFIG_PATH: "${CI_BUILDS_DIR}/.enroot"
     SLURM_E2E_S3_PROFILE_NAME: "default"
   before_script:
-    # Install tools directly without micromamba (SLURM runner doesn't have it); use uv to pin Python
     - source .gitlab/vault/vault-auth.sh
-    - export PATH="$HOME/.local/bin:${PATH}"
-    - curl -LsSf https://astral.sh/uv/install.sh | sh
-    - uv python install ${PYTHON_VERSION}
-    - uv venv --python ${PYTHON_VERSION} venv
-    - source venv/bin/activate
-    - pip install --upgrade pip
-    - pip install poetry awscli
-    - poetry install --no-interaction  # Install cosmos-curator CLI
+    - *install_pixi_if_missing
+    - *setup_pixi_dev
   script:
-    - source venv/bin/activate
     - .gitlab/scripts/slurm_end_to_end.sh
-  after_script:
-    - rm -rf venv || true
   retry:
     max: 2
     when: always
@@ -1040,14 +1023,30 @@ build-packages:
       aud: ${VAULT_ADDR}
   before_script:
     - source .gitlab/vault/vault-auth.sh
-    - *setup_micromamba
+    - *setup_pixi_dev
     - TIMESTAMP=$(date -d ${CI_COMMIT_TIMESTAMP} +%s)
     - VERSION=$(grep -m 1 'version = ' pyproject.toml | cut -d'"' -f2)
-    - PKG_VERSION="${VERSION}.dev${TIMESTAMP}"
+    - export PKG_VERSION="${VERSION}.dev${TIMESTAMP}"
     - echo "Building package for ${PKG_VERSION}"
-    - pip install twine==6.1.0 --disable-pip-version-check
-    - poetry version "${PKG_VERSION}"
-    - poetry build --no-interaction
+    - |
+      python - <<'PY'
+      import os
+      import re
+      from pathlib import Path
+
+      path = Path("pyproject.toml")
+      version = os.environ["PKG_VERSION"]
+      contents, count = re.subn(
+          r'(?m)^version = "[^"]+"$',
+          f'version = "{version}"',
+          path.read_text(encoding="utf-8"),
+          count=1,
+      )
+      if count != 1:
+          raise SystemExit("Expected exactly one project version in pyproject.toml")
+      path.write_text(contents, encoding="utf-8")
+      PY
+    - python -m build
   script:
     - twine upload --skip-existing -u gitlab-ci-token -p ${CI_JOB_TOKEN} --repository-url
       "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" dist/*

@@ -18,16 +18,16 @@
 These tests are structural guards for the Pixi developer commands rather than
 substitutes for running the commands themselves. They verify that:
 
-- Pixi dev `ruff` and `mypy` versions stay aligned with Poetry dev pins, which
-  prevents drift between `pixi.toml` and `pyproject.toml`.
-- Pixi carries the pytest plugins required by local CPU test commands.
+- Pixi carries the tools needed for local development, CI checks, and package
+  builds.
 - The Pixi `dev` feature stays isolated from runtime environments and image
   defaults so lint tooling is not installed in production containers.
-- The developer guide documents the supported command entry points.
 """
 
 import tomllib
 from pathlib import Path
+
+import yaml
 
 from cosmos_curator.client.image_cli.image_app import _parse_envs
 
@@ -38,31 +38,52 @@ def _read_repo_file(relative_path: str) -> str:
     return (_REPO_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_developer_tool_versions_match_poetry() -> None:
-    """Verify Pixi uses the same ruff and mypy versions as Poetry."""
+def _read_ci_job(job_name: str) -> dict[str, object]:
+    ci_config = yaml.safe_load(_read_repo_file(".gitlab-ci.yml"))
+    assert isinstance(ci_config, dict)
+    job = ci_config[job_name]
+    assert isinstance(job, dict)
+    return job
+
+
+def _script_lines(script: object) -> list[str]:
+    assert isinstance(script, list)
+    script_lines = []
+    for command in script:
+        assert isinstance(command, str)
+        script_lines.append(command)
+    return script_lines
+
+
+def test_developer_tools_are_declared_in_pixi_dev() -> None:
+    """Verify Pixi is the source of truth for developer tooling."""
     pixi_config = tomllib.loads(_read_repo_file("pixi.toml"))
-    pyproject_config = tomllib.loads(_read_repo_file("pyproject.toml"))
 
+    conda_dependencies = pixi_config.get("feature", {}).get("dev", {}).get("dependencies")
     dev_dependencies = pixi_config.get("feature", {}).get("dev", {}).get("pypi-dependencies")
-    poetry_dev_dependencies = (
-        pyproject_config.get("tool", {})
-        .get("poetry", {})
-        .get("group", {})
-        .get("dev", {})
-        .get(
-            "dependencies",
-        )
-    )
+    dev_tasks = pixi_config.get("feature", {}).get("dev", {}).get("tasks")
+    assert isinstance(conda_dependencies, dict)
     assert isinstance(dev_dependencies, dict)
-    assert isinstance(poetry_dev_dependencies, dict)
+    assert isinstance(dev_tasks, dict)
 
-    for dependency_name in ("ruff", "mypy"):
+    for dependency_name in ("mypy", "ruff", "twine"):
         pixi_dependency = dev_dependencies[dependency_name]
-        poetry_dependency = poetry_dev_dependencies[dependency_name]
-
         assert isinstance(pixi_dependency, str)
-        assert isinstance(poetry_dependency, str)
-        assert pixi_dependency == f"=={poetry_dependency}"
+        assert pixi_dependency.startswith("==")
+
+    assert conda_dependencies["pre-commit"] == "==4.2.0"
+    assert "python-build" in conda_dependencies
+    assert "cosmos-curator" in dev_dependencies
+    assert "awscli" in dev_dependencies
+    assert "awscli-plugin-endpoint" in dev_dependencies
+    required_tasks = {"build", "cosmos-curator", "mypy", "pre-commit", "pytest", "ruff"}
+    assert required_tasks.issubset(dev_tasks)
+    for task_name in required_tasks:
+        task_command = dev_tasks[task_name]
+        assert isinstance(task_command, str)
+        assert task_command
+
+    assert dev_tasks["cosmos-curator"] == "python -m cosmos_curator.client.cli"
 
 
 def test_local_test_plugins_are_available_in_pixi_dev() -> None:
@@ -89,6 +110,43 @@ def test_developer_commands_run_in_dev_environment_only() -> None:
     for environment_name, features in environments.items():
         if environment_name != "dev":
             assert "dev" not in set(features)
+
+
+def test_pre_commit_ruff_hooks_use_pixi_dev_environment() -> None:
+    """Verify pre-commit uses the same Ruff version as the Pixi dev environment."""
+    pre_commit_config = yaml.safe_load(_read_repo_file(".pre-commit-config.yaml"))
+    assert isinstance(pre_commit_config, dict)
+
+    repos = pre_commit_config["repos"]
+    assert isinstance(repos, list)
+    assert all(repo.get("repo") != "https://github.com/astral-sh/ruff-pre-commit" for repo in repos)
+
+    local_repo = next(repo for repo in repos if repo.get("repo") == "local")
+    hooks = local_repo["hooks"]
+    assert isinstance(hooks, list)
+    hooks_by_id = {hook["id"]: hook for hook in hooks}
+
+    assert hooks_by_id["ruff"]["entry"] == "pixi run ruff check --fix --force-exclude --config=pyproject.toml"
+    assert hooks_by_id["ruff-format"]["entry"] == "pixi run ruff format --force-exclude --config=pyproject.toml"
+
+
+def test_slurm_end_to_end_uses_pixi_dev_for_submit_cli() -> None:
+    """Verify the host-side Slurm submit CLI runs from Pixi's Python 3.12 dev environment."""
+    slurm_job = _read_ci_job("slurm_end_to_end")
+    before_script = _script_lines(slurm_job["before_script"])
+    script = _script_lines(slurm_job["script"])
+    commands = "\n".join([*before_script, *script])
+    pixi_bootstrap_index = next(index for index, command in enumerate(before_script) if "pixi.sh/install.sh" in command)
+    pixi_setup_index = next(
+        index for index, command in enumerate(before_script) if "pixi install --frozen -e dev" in command
+    )
+
+    assert pixi_bootstrap_index < pixi_setup_index
+    assert "pixi install --frozen -e dev" in commands
+    assert ".gitlab/scripts/slurm_end_to_end.sh" in script
+    assert "pip install -e ." not in commands
+    assert "source venv/bin/activate" not in commands
+    assert "uv venv" not in commands
 
 
 def test_image_cli_default_envs_do_not_include_dev() -> None:

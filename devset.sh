@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# This script is used to quickly help setup dev environment
+# Install local developer hooks and run a packaging smoke test.
 
-poetry install --extras=local
-poetry run pre-commit install
-poetry build
+set -euo pipefail
+
+pixi run pre-commit install
+pixi run build

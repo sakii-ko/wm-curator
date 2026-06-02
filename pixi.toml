@@ -83,9 +83,13 @@ video_pipeline = "python -m cosmos_curator.pipelines.video.run_pipeline"
 channels = ["conda-forge"]
 
 [feature.dev.dependencies]
+pre-commit = "==4.2.0"
 pytest-mock = "*"
+python-build = "*"
 
 [feature.dev.pypi-dependencies]
+awscli = "*"
+awscli-plugin-endpoint = "*"
 cosmos-curator = { path = ".", editable = true }
 fabric = "==3.2.2"
 invoke = "==3.0.3"
@@ -93,6 +97,7 @@ mypy = "==2.1.0"
 openai = "*"
 pandas-stubs = "*"
 ruff = "==0.15.15"
+twine = "==6.1.0"
 types-aiofiles = "*"
 types-boto3 = "*"
 types-psutil = "*"
@@ -105,9 +110,12 @@ types-toml = "*"
 types-tqdm = "*"
 
 [feature.dev.tasks]
-cputest = "PYTEST_ADDOPTS='--junitxml=report.xml --cov=cosmos_curator --cov-report=term --cov-report=xml:unit-coverage.xml --cov-report=html:unit-htmlcov' pytest -s"
-format = "ruff format"
-lint = "ruff format --check && ruff check && mypy --pretty"
+build = "python -m build"
+cosmos-curator = "python -m cosmos_curator.client.cli"
+mypy = "mypy"
+pre-commit = "pre-commit"
+pytest = "pytest"
+ruff = "ruff"
 
 [feature.core.target.linux-aarch64.dependencies]
 # Add CUDA toolchain packages on aarch64 -- these are automatic dependencies on linux-64.

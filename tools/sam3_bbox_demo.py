@@ -27,12 +27,12 @@ Usage (inside the sam3 pixi env):
         --fps 10
 
 Run via cosmos-curator local launch:
-    micromamba run -n cosmos-curator cosmos-curator local launch --curator-path . -- \
-        "pixi run -e sam3 python tools/sam3_bbox_demo.py \
-         --video /config/videos/toothless.mp4 \
-         --prompts 'a dragon' 'a viking' \
-         --output /config/output/toothless_tracked.mp4 \
-         --fps 10"
+    pixi run cosmos-curator local launch --curator-path . -- \
+        pixi run --as-is -e sam3 python tools/sam3_bbox_demo.py \
+        --video /config/videos/toothless.mp4 \
+        --prompts "a dragon" "a viking" \
+        --output /config/output/toothless_tracked.mp4 \
+        --fps 10
 """
 
 import argparse

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Stores information about the available conda envs and contains utilities for building them."""
+"""Stores information about the available Pixi environments and contains utilities for building them."""
 
 import sys
 from pathlib import Path
