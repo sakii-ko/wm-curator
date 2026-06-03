@@ -67,62 +67,6 @@ cosmos-curator = 'cosmos_curator.client.cli:cosmos_curator'
 requires = ["setuptools==80.7.1", "jinja2>=3.1.6", "tomli>=2.2.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[project.optional-dependencies]
-local = [
-    "aiofiles",
-    "astral",
-    "attrs",
-    "av==17.0.0",  # 17.0.1 deadlocks in CodecContext.__dealloc__ during multi-threaded decode; unpin once PyAV releases a fix
-    "awscli",
-    "awscli_plugin_endpoint",
-    "azure-identity==1.22.0",
-    "azure-storage-blob==12.26.0b1",
-    "boto3",
-    "cattrs",
-    "click<8.3.0",
-    "easydict",
-    "fastapi",
-    "gpustat",
-    "google-genai>=1.48.0",
-    "huggingface_hub",
-    "jinja2",
-    "kubernetes>=28.0",
-    "loguru",
-    "ngcsdk",
-    "numpy>2,<2.3",  # opencv-python-headless requires >=2; numba 0.61.x requires <2.3
-    "nvtx==0.2.11",
-    "openai",
-    "opencv-python-headless",
-    "pandas>=3,<3.1",
-    "Pillow>=12.2.0",  # CVE-2026-40192: patched in 12.2.0+
-    "prometheus_client==0.21.1",
-    "psutil==7.0.0",
-    "psycopg2-binary",
-    "pyarrow",
-    "pylance>=0.39.0",
-    "nvidia-ml-py",
-    "pyproj",
-    "requests==2.32.3",
-    "rich==14.0.0",
-    "scikit-image",
-    "scipy",
-    "setuptools==80.7.1",
-    "sqlalchemy",
-    "tabulate",
-    "tenacity",
-    "timezonefinder",
-    "toml",
-    "torch",
-    "torchvision",
-    "tqdm==4.67.1",
-    "transformers<5.0",
-    "typer[all]>=0.21.0",
-    "uvicorn",
-    "webdataset==0.2.111",
-    "fabric (>=3.2.2,<4.0.0)",
-    "cosmos-xenna==0.4.3",
-]
-
 [tool.setuptools.package-data]
 # Ship non-Python data files inside the wheel. Needed so that runtime
 # ``importlib.resources`` lookups (e.g. prompt templates used by

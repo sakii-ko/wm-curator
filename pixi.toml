@@ -79,6 +79,19 @@ hello_world = "python -m cosmos_curator.pipelines.examples.hello_world_pipeline"
 model_download = "python -m cosmos_curator.core.managers.model_cli download"
 video_pipeline = "python -m cosmos_curator.pipelines.video.run_pipeline"
 
+[feature.dev-hooks]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.dev-hooks.dependencies]
+python = ">=3.12.13,<3.13"
+pip = "*"
+pre-commit = "==4.2.0"
+python-build = "*"
+
+[feature.dev-hooks.pypi-dependencies]
+ruff = "==0.15.15"
+
 [feature.dev]
 channels = ["conda-forge"]
 
@@ -272,6 +285,7 @@ transformers = ">=5.0.0"
 cuml = ["cuml", "tracing"]
 default = ["core", "transformers", "tracing", "profiling"]
 dev = ["core", "transformers", "tracing", "profiling", "dev"]
+dev-hooks = { features = ["dev-hooks"], no-default-feature = true }
 legacy-transformers = ["core", "legacy-transformers", "tracing", "profiling"]
 model-download = ["model-download", "tracing"]
 paddle-ocr = ["core", "paddle-ocr", "tracing", "profiling"]

@@ -97,7 +97,7 @@ def test_local_test_plugins_are_available_in_pixi_dev() -> None:
 
 
 def test_developer_commands_run_in_dev_environment_only() -> None:
-    """Verify developer tooling is isolated from runtime Pixi environments."""
+    """Verify developer tooling is isolated from production runtime Pixi environments."""
     pixi_config = tomllib.loads(_read_repo_file("pixi.toml"))
     dev_feature = pixi_config.get("feature", {}).get("dev", {})
 
@@ -108,12 +108,37 @@ def test_developer_commands_run_in_dev_environment_only() -> None:
     assert "transformers" not in environments
     assert set(environments["dev"]) == {"core", "transformers", "tracing", "profiling", "dev"}
     for environment_name, features in environments.items():
-        if environment_name != "dev":
+        if environment_name not in {"dev", "dev-hooks"}:
             assert "dev" not in set(features)
 
 
-def test_pre_commit_ruff_hooks_use_pixi_dev_environment() -> None:
-    """Verify pre-commit uses the same Ruff version as the Pixi dev environment."""
+def test_dev_hooks_environment_supports_cross_platform_presubmit() -> None:
+    """Verify the minimal pre-submit environment can solve on macOS."""
+    pixi_config = tomllib.loads(_read_repo_file("pixi.toml"))
+
+    dev_dependencies = pixi_config.get("feature", {}).get("dev", {}).get("pypi-dependencies")
+    dev_hooks_feature = pixi_config.get("feature", {}).get("dev-hooks", {})
+    dev_hooks_dependencies = dev_hooks_feature.get("dependencies")
+    dev_hooks_pypi_dependencies = dev_hooks_feature.get("pypi-dependencies")
+    environments = pixi_config.get("environments")
+    assert isinstance(dev_dependencies, dict)
+    assert isinstance(dev_hooks_dependencies, dict)
+    assert isinstance(dev_hooks_pypi_dependencies, dict)
+    assert isinstance(environments, dict)
+
+    assert dev_hooks_feature["channels"] == ["conda-forge"]
+    assert dev_hooks_feature["platforms"] == ["linux-64", "linux-aarch64", "osx-arm64"]
+    assert dev_hooks_dependencies["python"] == ">=3.12.13,<3.13"
+    assert dev_hooks_dependencies["pre-commit"].startswith("=="), (
+        "pre-commit should be pinned to an exact version for reproducibility"
+    )
+    assert "python-build" in dev_hooks_dependencies
+    assert dev_hooks_pypi_dependencies["ruff"] == dev_dependencies["ruff"]
+    assert environments["dev-hooks"] == {"features": ["dev-hooks"], "no-default-feature": True}
+
+
+def test_pre_commit_ruff_hooks_use_pixi_dev_hooks_environment() -> None:
+    """Verify pre-commit avoids Linux-only runtime dependencies."""
     pre_commit_config = yaml.safe_load(_read_repo_file(".pre-commit-config.yaml"))
     assert isinstance(pre_commit_config, dict)
 
@@ -126,8 +151,12 @@ def test_pre_commit_ruff_hooks_use_pixi_dev_environment() -> None:
     assert isinstance(hooks, list)
     hooks_by_id = {hook["id"]: hook for hook in hooks}
 
-    assert hooks_by_id["ruff"]["entry"] == "pixi run ruff check --fix --force-exclude --config=pyproject.toml"
-    assert hooks_by_id["ruff-format"]["entry"] == "pixi run ruff format --force-exclude --config=pyproject.toml"
+    assert hooks_by_id["ruff"]["entry"] == (
+        "pixi run -e dev-hooks ruff check --fix --force-exclude --config=pyproject.toml"
+    )
+    assert hooks_by_id["ruff-format"]["entry"] == (
+        "pixi run -e dev-hooks ruff format --force-exclude --config=pyproject.toml"
+    )
 
 
 def test_slurm_end_to_end_uses_pixi_dev_for_submit_cli() -> None:

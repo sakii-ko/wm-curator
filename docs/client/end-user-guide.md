@@ -130,6 +130,10 @@ pixi run cosmos-curator --help
 Developers may also execute `./devset.sh` from the repository root to install local git hooks and run a package build
 smoke test.
 
+macOS is not a supported runtime platform for Cosmos Curator pipelines. Apple Silicon developers can use the lightweight
+`dev-hooks` Pixi environment for pre-commit formatting checks, but full CPU/GPU tests and pipeline execution should run
+on Linux or inside the project container.
+
 The `cosmos-curator` command is a host-side deployment CLI available through `pixi run cosmos-curator ...`, or directly
 after running `pixi shell -e dev`. Use it on the host to build images, launch local Docker runs, submit Slurm jobs, and
 manage NVCF resources. Runtime container images are focused on pipeline execution and do not guarantee the

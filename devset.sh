@@ -4,5 +4,5 @@
 
 set -euo pipefail
 
-pixi run pre-commit install
-pixi run build
+pixi run -e dev-hooks pre-commit install
+pixi run -e dev-hooks python -m build
