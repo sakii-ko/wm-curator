@@ -69,6 +69,42 @@ def _write_buildx_parse_check_dockerfile(source_path: Path, output_path: Path) -
     output_path.write_text(contents)
 
 
+_MIN_BUILDX_CHECK_VERSION = (0, 12)
+
+
+def _buildx_supports_check(buildx_command: list[str]) -> bool:
+    """Return True if buildx runs and is new enough for `build --check` (v0.12+)."""
+    result = subprocess.run(  # noqa: S603
+        [*buildx_command, "version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    match = re.search(r"v(\d+)\.(\d+)", result.stdout)
+    return match is not None and (int(match.group(1)), int(match.group(2))) >= _MIN_BUILDX_CHECK_VERSION
+
+
+def _resolve_buildx_command() -> list[str] | None:
+    """Return a buildx invocation that supports `build --check`, or None.
+
+    buildx can be a Docker CLI plugin (invoked as `docker buildx`) or a standalone
+    binary (e.g. Homebrew's `docker-buildx` on macOS, which is not necessarily
+    registered as a `docker buildx` plugin). `--check` requires buildx v0.12+.
+    """
+    docker_path = shutil.which("docker")
+    if docker_path is not None and _buildx_supports_check([docker_path, "buildx"]):
+        return [docker_path, "buildx"]
+
+    standalone = shutil.which("docker-buildx")
+    if standalone is not None and _buildx_supports_check([standalone]):
+        return [standalone]
+
+    return None
+
+
 def _empty_continuation_lines(contents: str) -> list[int]:
     lines = contents.splitlines()
     return [
@@ -122,11 +158,13 @@ def test_generated_dockerfile_parses_with_buildx_check(
     dockerfile_path = _render_dockerfile_path(tmp_path, slim=slim, redistributable=redistributable)
     check_path = tmp_path / f"{dockerfile_path.name}.parse-check"
     _write_buildx_parse_check_dockerfile(dockerfile_path, check_path)
-    docker_path = shutil.which("docker")
-    assert docker_path is not None
+
+    buildx_command = _resolve_buildx_command()
+    if buildx_command is None:
+        pytest.skip("buildx with --check support (v0.12+) is not available")
 
     result = subprocess.run(  # noqa: S603
-        [docker_path, "buildx", "build", "--check", "-f", str(check_path), "."],
+        [*buildx_command, "build", "--check", "-f", str(check_path), "."],
         cwd=REPO_ROOT,
         text=True,
         stdout=subprocess.PIPE,
