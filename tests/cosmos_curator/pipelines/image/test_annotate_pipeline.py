@@ -26,7 +26,12 @@ import pytest
 from cosmos_curator.core.interfaces.stage_interface import CuratorStageSpec
 from cosmos_curator.core.utils.config.config import ConfigFileData, Gemini
 from cosmos_curator.core.utils.data.lazy_data import LazyData
-from cosmos_curator.pipelines.image.annotate_pipeline import _assemble_stages, add_annotate_command, write_summary
+from cosmos_curator.pipelines.image.annotate_pipeline import (
+    _assemble_stages,
+    add_annotate_command,
+    nvcf_run_annotate,
+    write_summary,
+)
 from cosmos_curator.pipelines.image.captioning import image_api_caption_stages
 from cosmos_curator.pipelines.image.captioning.image_api_caption_stages import (
     ImageGeminiCaptionStage,
@@ -48,6 +53,45 @@ def test_add_annotate_command_registers_subcommand(tmp_path: pathlib.Path) -> No
     args = parser.parse_args(["annotate", "--input-image-path", str(tmp_path / "in"), "--output-path", str(tmp_path)])
     assert args.command == "annotate"
     assert callable(args.func)
+
+
+def test_nvcf_run_annotate_fills_defaults_and_preserves_required_args(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NVCF-style image annotate runs should fill parser defaults before execution."""
+    captured: dict[str, argparse.Namespace] = {}
+
+    class _NoopProfileScope:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> bool:
+            return False
+
+    def fake_annotate(args: argparse.Namespace) -> None:
+        captured["args"] = args
+
+    monkeypatch.setattr("cosmos_curator.pipelines.image.annotate_pipeline.annotate", fake_annotate)
+    monkeypatch.setattr(
+        "cosmos_curator.pipelines.image.annotate_pipeline.profiling_scope",
+        lambda _args: _NoopProfileScope(),
+    )
+
+    args = argparse.Namespace(
+        input_image_path=str(tmp_path / "in"),
+        output_path=str(tmp_path / "out"),
+        generate_captions=False,
+    )
+
+    nvcf_run_annotate(args)
+
+    assert captured["args"] is args
+    assert args.input_image_path == str(tmp_path / "in")
+    assert args.output_path == str(tmp_path / "out")
+    assert args.generate_captions is False
+    assert args.captioning_algorithm == "qwen"
+    assert args.generate_embeddings is True
+    assert args.limit == 0
 
 
 def test_filter_toggles_parse_boolean_optional_forms(tmp_path: pathlib.Path) -> None:

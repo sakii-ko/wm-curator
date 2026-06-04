@@ -1,0 +1,12 @@
+{
+    "pipeline": "annotate",
+    "args": {
+        "input_image_path": "FILL_IN",
+        "output_path": "FILL_IN",
+        "generate_embeddings": true,
+        "generate_captions": true,
+        "captioning_algorithm": "qwen",
+        "embedding_algorithm": "internvideo2",
+        "limit": 0
+    }
+}

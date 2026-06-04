@@ -25,6 +25,7 @@ import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -32,6 +33,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from cosmos_curator.core.cf import nvcf_main
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # HTTP status codes
 HTTP_OK = 200
@@ -635,6 +639,64 @@ class TestFastAPIEndpoints:
 
             assert response.status_code == HTTP_BAD_REQUEST
             assert "request_id" in response.json()["error"]
+
+    def test_run_pipeline_dispatches_annotate(
+        self, test_client: TestClient, mock_request_id: str, tmp_path: Path
+    ) -> None:
+        """Test /v1/run_pipeline routes image annotate invokes to the public entry point."""
+        fake_manager = MagicMock()
+        fake_manager.Value.return_value = SimpleNamespace(value=False)
+        fake_manager.Queue.return_value = queue.Queue()
+        fake_manager.list.return_value = []
+        fake_thread = MagicMock()
+        fake_stop_event = threading.Event()
+        captured: dict[str, object] = {}
+
+        def fake_annotate(args: argparse.Namespace) -> None:
+            captured["pipeline_args"] = args
+
+        def fake_execute_pipeline(
+            _wrapper: object,
+            func: "Callable[[argparse.Namespace], None]",
+            request_id: str,
+            pipeline_args: argparse.Namespace,
+            *_args: object,
+        ) -> None:
+            captured["request_id"] = request_id
+            func(pipeline_args)
+
+        with (
+            patch.dict(nvcf_main.using_nvcf_status, {"get_req_sts": False}),
+            patch("cosmos_curator.core.cf.nvcf_main.Manager", return_value=fake_manager),
+            patch("cosmos_curator.core.cf.nvcf_main._setup_request", return_value=(fake_thread, fake_stop_event)),
+            patch("cosmos_curator.core.cf.nvcf_main.get_asset_output_path", return_value=str(tmp_path / "out")),
+            patch("cosmos_curator.core.cf.nvcf_main.input_assets_present", return_value=False),
+            patch("cosmos_curator.core.cf.nvcf_main.execute_pipeline", side_effect=fake_execute_pipeline),
+            patch("cosmos_curator.core.cf.nvcf_main.nvcf_run_annotate", side_effect=fake_annotate),
+            patch("cosmos_curator.core.cf.nvcf_main.gather_and_upload_outputs"),
+        ):
+            response = test_client.post(
+                "/v1/run_pipeline",
+                headers={"NVCF-REQID": mock_request_id},
+                json={
+                    "pipeline": "annotate",
+                    "args": {
+                        "input_image_path": str(tmp_path / "in"),
+                        "output_path": str(tmp_path / "out"),
+                        "limit": 1,
+                    },
+                },
+            )
+
+        assert response.status_code == HTTP_OK
+        assert captured["request_id"] == mock_request_id
+        pipeline_args = captured["pipeline_args"]
+        assert isinstance(pipeline_args, argparse.Namespace)
+        assert pipeline_args.input_image_path == str(tmp_path / "in")
+        assert pipeline_args.output_path == str(tmp_path / "out")
+        assert pipeline_args.limit == 1
+        assert fake_stop_event.is_set()
+        fake_thread.join.assert_called_once()
 
 
 class TestProcessExecution:

@@ -129,6 +129,25 @@ cosmos-curator local launch \
   --limit 10
 ```
 
+Config-file invocation:
+
+```yaml
+pipeline: annotate
+input_image_path: /path/to/images
+output_path: /path/to/output
+generate_captions: false
+limit: 10
+```
+
+```bash
+cosmos-curator local launch \
+  --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
+  -- pixi run python3 -m cosmos_curator.pipelines.image.run_pipeline /path/to/config.yaml
+```
+
+The same NVCF-style nested `args` format is supported; see
+`examples/nvcf/function/invoke_image_annotate.json`.
+
 Captioning with Gemini:
 
 ```bash

@@ -63,6 +63,7 @@ from cosmos_curator.core.utils.storage.presigned_s3_zip import (
     gather_and_upload_outputs,
     handle_presigned_urls,
 )
+from cosmos_curator.pipelines.image.annotate_pipeline import nvcf_run_annotate
 from cosmos_curator.pipelines.video.dedup_pipeline import nvcf_run_semdedup
 from cosmos_curator.pipelines.video.sharding_pipeline import nvcf_run_shard
 from cosmos_curator.pipelines.video.splitting_pipeline import nvcf_run_split
@@ -817,6 +818,27 @@ async def curate_video(request: Request) -> JSONResponse:  # noqa: C901, PLR0912
             execute_pipeline(
                 _run_in_process,
                 nvcf_run_shard,
+                request_id,
+                pipeline_args,
+                log_queue,
+                ipc_status,
+                stop_event,
+            )
+        elif pipeline_type == "annotate":
+            has_input_assets = input_assets_present(request)
+            if has_input_assets and not getattr(pipeline_args, "input_image_path", None):
+                pipeline_args.input_image_path = get_asset_input_dir(request)
+            if not getattr(pipeline_args, "output_path", None):
+                pipeline_args.output_path = get_asset_output_path(request)
+
+            if not getattr(pipeline_args, "input_image_path", None):
+                _value_error("Invalid Pipeline args: input_image_path must be provided")
+            if not getattr(pipeline_args, "output_path", None):
+                _value_error("Invalid Pipeline args: output_path must be provided")
+
+            execute_pipeline(
+                _run_in_process,
+                nvcf_run_annotate,
                 request_id,
                 pipeline_args,
                 log_queue,

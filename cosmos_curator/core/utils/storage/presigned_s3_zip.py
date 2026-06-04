@@ -485,7 +485,9 @@ def download_and_extract_zip(presigned_url: str) -> str:
         return fut.result()
 
 
-def handle_presigned_urls(pipeline_type: str, pipeline_args: argparse.Namespace) -> argparse.Namespace:
+def handle_presigned_urls(  # noqa: C901, PLR0912
+    pipeline_type: str, pipeline_args: argparse.Namespace
+) -> argparse.Namespace:
     """Update *pipeline_args* in-place based on any presigned URLs present."""
     if getattr(pipeline_args, "input_presigned_s3_url", None):
         logger.info("Input presigned URL detected - downloading …")
@@ -495,6 +497,8 @@ def handle_presigned_urls(pipeline_type: str, pipeline_args: argparse.Namespace)
             pipeline_args.input_video_path = extracted_path
         elif pipeline_type == "semantic-dedup":
             pipeline_args.input_embeddings_path = extracted_path
+        elif pipeline_type == "annotate":
+            pipeline_args.input_image_path = extracted_path
         else:
             logger.warning(f"Unsupported pipeline type '{pipeline_type}' for presigned input URL.")
 
@@ -512,6 +516,12 @@ def handle_presigned_urls(pipeline_type: str, pipeline_args: argparse.Namespace)
         elif pipeline_type == "semantic-dedup":
             if not getattr(pipeline_args, "output_path", None):
                 pipeline_args.output_path = tempfile.mkdtemp(prefix="output_dedup_")
+                logger.warning(
+                    f"No output_path provided; using temporary directory {pipeline_args.output_path}",
+                )
+        elif pipeline_type == "annotate":
+            if not getattr(pipeline_args, "output_path", None):
+                pipeline_args.output_path = tempfile.mkdtemp(prefix="output_annotate_")
                 logger.warning(
                     f"No output_path provided; using temporary directory {pipeline_args.output_path}",
                 )
@@ -587,7 +597,7 @@ def gather_outputs_from_all_nodes(output_directory: str) -> None:
             logger.warning(f"Gather outputs failed: {exc}")
 
 
-def _get_output_path(pipeline_type: str, args: argparse.Namespace) -> str | None:
+def _get_output_path(pipeline_type: str, args: argparse.Namespace) -> str | None:  # noqa: PLR0911
     """Get the output path for the given pipeline type and args."""
     if pipeline_type == "split":
         if getattr(args, "output_clip_path", None) is None:
@@ -597,6 +607,11 @@ def _get_output_path(pipeline_type: str, args: argparse.Namespace) -> str | None
     if pipeline_type == "semantic-dedup":
         if getattr(args, "output_path", None) is None:
             logger.warning("output_path for semantic-dedup pipeline is not set?")
+            return None
+        return str(args.output_path)
+    if pipeline_type == "annotate":
+        if getattr(args, "output_path", None) is None:
+            logger.warning("output_path for annotate pipeline is not set?")
             return None
         return str(args.output_path)
     logger.warning(f"Unsupported pipeline type '{pipeline_type}' for presigned output URL.")
@@ -651,6 +666,6 @@ def gather_and_upload_outputs(pipeline_type: str, args: argparse.Namespace) -> N
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"Failed to gather/upload outputs: {exc}")
     finally:
-        if "output_split_" in output_path or "output_dedup_" in output_path:
+        if "output_split_" in output_path or "output_dedup_" in output_path or "output_annotate_" in output_path:
             with contextlib.suppress(OSError):
                 shutil.rmtree(output_path)

@@ -32,9 +32,12 @@ import pytest
 from cosmos_curator.core.utils.storage.presigned_s3_zip import (
     _create_zip_archive,
     _download_and_extract_zip_single_node,
+    _get_output_path,
     _validate_archive_size,
     _validate_upload_completion,
     _write_split_metadata,
+    gather_and_upload_outputs,
+    handle_presigned_urls,
     zip_and_upload_directory,
     zip_and_upload_directory_multipart,
 )
@@ -227,6 +230,79 @@ def test_write_split_metadata_rebuilds_all_captions_when_opted_in(monkeypatch: p
     )
 
     assert called is True
+
+
+def test_handle_presigned_urls_maps_annotate_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Annotate presigned input ZIPs should populate input_image_path."""
+    extracted_path = str(tmp_path / "extracted_images")
+    monkeypatch.setattr(
+        "cosmos_curator.core.utils.storage.presigned_s3_zip.download_and_extract_zip",
+        lambda _url: extracted_path,
+    )
+
+    args = argparse.Namespace(input_presigned_s3_url="https://example.test/input.zip")
+
+    result = handle_presigned_urls("annotate", args)
+
+    assert result is args
+    assert args.input_image_path == extracted_path
+
+
+def test_handle_presigned_urls_creates_annotate_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Annotate presigned outputs should use a temporary output_path when omitted."""
+    output_path = str(tmp_path / "output_annotate_abc")
+
+    def fake_mkdtemp(*, prefix: str) -> str:
+        assert prefix == "output_annotate_"
+        return output_path
+
+    monkeypatch.setattr(
+        "cosmos_curator.core.utils.storage.presigned_s3_zip.tempfile.mkdtemp",
+        fake_mkdtemp,
+    )
+    args = argparse.Namespace(output_presigned_s3_url="https://example.test/output.zip")
+
+    result = handle_presigned_urls("annotate", args)
+
+    assert result is args
+    assert args.output_path == output_path
+
+
+def test_get_output_path_supports_annotate(tmp_path: Path) -> None:
+    """Annotate presigned uploads should read output_path like semantic-dedup."""
+    output_path = str(tmp_path / "annotate-output")
+    args = argparse.Namespace(output_path=output_path)
+
+    assert _get_output_path("annotate", args) == output_path
+
+
+def test_gather_and_upload_outputs_cleans_annotate_temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Temporary annotate output dirs should be removed after presigned upload."""
+    output_path = tmp_path / "output_annotate_abc"
+    output_path.mkdir()
+    (output_path / "summary.json").write_text("{}", encoding="utf-8")
+    called: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        "cosmos_curator.core.utils.storage.presigned_s3_zip.gather_outputs_from_all_nodes",
+        lambda path: called.setdefault("gather", path),
+    )
+    monkeypatch.setattr(
+        "cosmos_curator.core.utils.storage.presigned_s3_zip.zip_and_upload_directory",
+        lambda path, url: called.setdefault("upload", f"{path}|{url}"),
+    )
+
+    gather_and_upload_outputs(
+        "annotate",
+        argparse.Namespace(
+            output_path=str(output_path),
+            output_presigned_s3_url="https://example.test/output.zip",
+        ),
+    )
+
+    assert called["gather"] == str(output_path)
+    assert called["upload"] == f"{output_path}|https://example.test/output.zip"
+    assert not output_path.exists()
 
 
 def test_zip_and_upload_directory_multipart(tmp_path: Path) -> None:

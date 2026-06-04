@@ -23,7 +23,9 @@ from loguru import logger
 
 from cosmos_curator.core.interfaces.pipeline_interface import run_pipeline
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageSpec
+from cosmos_curator.core.utils.config import args_utils
 from cosmos_curator.core.utils.infra.performance_utils import dump_and_write_perf_stats
+from cosmos_curator.core.utils.infra.profiling import profiling_scope
 from cosmos_curator.core.utils.misc.retry_utils import do_with_retries
 from cosmos_curator.core.utils.storage.storage_utils import (
     create_path,
@@ -327,6 +329,13 @@ def annotate(args: argparse.Namespace) -> None:
         f"Image annotate pipeline: {pipeline_run_time_min:.2f} min processing, {total_elapsed:.2f} min total "
         f"for {num_tasks} image(s), {len(output_tasks)} task(s) returned."
     )
+
+
+def nvcf_run_annotate(args: argparse.Namespace) -> None:
+    """Run the image annotate pipeline from an NVCF-style argument namespace."""
+    args_utils.fill_default_args(args, _setup_parser)
+    with profiling_scope(args):
+        annotate(args)
 
 
 def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
