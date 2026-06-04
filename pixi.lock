@@ -6728,6 +6728,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/wheel-0.47.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - pypi: direct+https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/transformers-cosmos3
+      - pypi: direct+https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/vllm-cosmos3
       - pypi: https://files.pythonhosted.org/packages/02/07/413ee98909fb863b8209965c42d9707d26cefb7f309b82922946e7cc6e0e/ngcsdk-4.19.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/04/88/14f2f4a2b922d8b39be45bf63d79e6cd3a9b2f248b2fcb98a69b12af12f5/sentencepiece-0.2.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/08/f6/af32e23e563971ffb0fb86be52bc5be5c2c118858ffc119bf6a9039b173d/lxml-6.1.1-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl
@@ -7259,6 +7261,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/wheel-0.47.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - pypi: direct+https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/transformers-cosmos3
+      - pypi: direct+https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/vllm-cosmos3
       - pypi: https://files.pythonhosted.org/packages/00/c0/637721f3cd5bb8bd16105a1a08efd781fc12f449931bdb3a4d0cfd63fa55/av-17.0.0-cp311-abi3-manylinux_2_28_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/01/d5/405a0ae4e6b081754a3609c1c97c63a950e000a2def16046f1e736933a0e/aiohttp-3.14.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/02/07/413ee98909fb863b8209965c42d9707d26cefb7f309b82922946e7cc6e0e/ngcsdk-4.19.1-py3-none-any.whl
@@ -18779,6 +18783,19 @@ packages:
   - typer>=0.21.0
   - urllib3>=1.26.18,<3
   requires_python: '>=3.12,<3.13'
+- pypi: direct+https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/transformers-cosmos3
+  name: transformers-cosmos3
+  version: 0.1.0
+  requires_dist:
+  - transformers>=4.57
+  requires_python: '>=3.10'
+- pypi: direct+https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/vllm-cosmos3
+  name: vllm-cosmos3
+  version: 0.1.0
+  requires_dist:
+  - transformers-cosmos3
+  - vllm>=0.19
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/00/c0/637721f3cd5bb8bd16105a1a08efd781fc12f449931bdb3a4d0cfd63fa55/av-17.0.0-cp311-abi3-manylinux_2_28_aarch64.whl
   name: av
   version: 17.0.0

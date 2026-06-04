@@ -146,8 +146,8 @@ from cosmos_curator.pipelines.video.utils.video_pipe_input import (
 
 QWEN2_CAPTION_ALGOS = {"qwen"}
 QWEN3_CAPTION_ALGOS = {
-    "cosmos3_nano_reasoner",
-    "cosmos3_super_reasoner",
+    "cosmos3_nano",
+    "cosmos3_super",
     "qwen3_5_27b",
     "qwen3_6_27b",
     "qwen3_6_27b_fp8",
@@ -165,9 +165,15 @@ VLLM_VIDEO_MIN_PIXELS_PER_FRAME = 100_352
 VLLM_VIDEO_MAX_PIXELS_PER_FRAME = 602_112
 
 
-def _clamp_num_gpus_for_qwen3_235b(model_variant: str, num_gpus: int) -> int:
-    """Warn and clamp num_gpus to the minimum required for large Qwen3-235B variants."""
+def _clamp_num_gpus_for_model(model_variant: str, num_gpus: int) -> int:
+    """Warn and clamp num_gpus to the minimum required for large vLLM caption/filter models.
+
+    Despite the historical name, this handles any vLLM variant with a hard minimum:
+    - qwen3_vl_235b / qwen3_vl_235b_fp8 (8/4 GPUs depending on per-GPU memory)
+    - cosmos3_super (TP=4 minimum on H100 per the model card)
+    """
     _QWEN3_VL_235B_FP8_MIN_GPUS = 4
+    _COSMOS3_SUPER_MIN_GPUS = 4
     if model_variant == "qwen3_vl_235b":
         min_gpus = _get_qwen3_vl_235b_min_gpus()
         if num_gpus < min_gpus:
@@ -179,6 +185,12 @@ def _clamp_num_gpus_for_qwen3_235b(model_variant: str, num_gpus: int) -> int:
             f"setting num_gpus to {_QWEN3_VL_235B_FP8_MIN_GPUS}"
         )
         return _QWEN3_VL_235B_FP8_MIN_GPUS
+    elif model_variant == "cosmos3_super" and num_gpus < _COSMOS3_SUPER_MIN_GPUS:
+        logger.warning(
+            f"cosmos3_super reasoner head requires at least {_COSMOS3_SUPER_MIN_GPUS} GPUs on H100 per the model "
+            f"card, setting num_gpus to {_COSMOS3_SUPER_MIN_GPUS}"
+        )
+        return _COSMOS3_SUPER_MIN_GPUS
     return num_gpus
 
 
@@ -542,8 +554,8 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
         )
 
     # --- VLM semantic filter and/or video classifier (optional) ---
-    vlm_filter_num_gpus = _clamp_num_gpus_for_qwen3_235b(args.vlm_filter_model_variant, args.vlm_filter_num_gpus)
-    video_classifier_num_gpus = _clamp_num_gpus_for_qwen3_235b(
+    vlm_filter_num_gpus = _clamp_num_gpus_for_model(args.vlm_filter_model_variant, args.vlm_filter_num_gpus)
+    video_classifier_num_gpus = _clamp_num_gpus_for_model(
         args.video_classifier_model_variant, args.video_classifier_num_gpus
     )
     vlm_filter_cfg = (
@@ -700,7 +712,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             window_config.preprocess_dtype = args.qwen_preprocess_dtype
             window_config.model_does_preprocess = args.qwen_model_does_preprocess
 
-            vllm_config.num_gpus = _clamp_num_gpus_for_qwen3_235b(caption_algo, vllm_config.num_gpus)
+            vllm_config.num_gpus = _clamp_num_gpus_for_model(caption_algo, vllm_config.num_gpus)
 
             if caption_algo not in QWEN2_CAPTION_ALGOS and not window_config.model_does_preprocess:
                 logger.warning(
@@ -890,7 +902,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             # CLI args are not reused after this point.
             event_variant = args.event_caption_vllm_async_model_name
             current_num_gpus = args.event_caption_vllm_async_num_gpus or 1
-            args.event_caption_vllm_async_num_gpus = _clamp_num_gpus_for_qwen3_235b(event_variant, current_num_gpus)
+            args.event_caption_vllm_async_num_gpus = _clamp_num_gpus_for_model(event_variant, current_num_gpus)
 
             # Build a sampling config from the same global --vllm-sampling-*
             # flags used by the per-window captioner so per-event vllm_async

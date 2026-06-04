@@ -39,8 +39,16 @@ VLLM_CAPTION_ALGOS: frozenset[str] = frozenset(
         "qwen3_vl_235b",
         "qwen3_vl_235b_fp8",
     }
-    | {"cosmos_r1", "cosmos_r2", "cosmos3_nano_reasoner", "cosmos3_super_reasoner"}
+    | {"cosmos_r1", "cosmos_r2", "cosmos3_nano", "cosmos3_super"}
 )
+
+# Sync vLLM variants for which worker lifetime recycling is disabled. The large
+# in-process cosmos3 omni engines (TP >= 4) do not recycle cleanly: a force-restart
+# at the generic 120-minute GPU-stage lifetime spawns the replacement worker on the
+# same GPUs before the old TP engine releases its memory, tripping the GPU-clean
+# startup guard and killing the run mid-flight. Recycling is intentionally left
+# intact for all other sync vLLM models until they are explicitly validated without it.
+_VLLM_SYNC_NO_RECYCLE_VARIANTS: frozenset[str] = frozenset({"cosmos3_nano", "cosmos3_super"})
 
 
 @attrs.define(frozen=True)
@@ -225,6 +233,10 @@ def _build_captioning_caption_stage(config: CaptioningConfig) -> CuratorStage | 
                     caption_quality_flags_enabled=config.caption_quality_flags_enabled,
                 ),
                 num_setup_attempts_python=config.caption_setup_attempts,
+                # None preserves the default lifetime recycling for all models except the
+                # large cosmos3 omni engines (see _VLLM_SYNC_NO_RECYCLE_VARIANTS), which
+                # disable it (0) to avoid the GPU-clean startup collision on restart.
+                worker_max_lifetime_m=0 if vcfg.model_variant in _VLLM_SYNC_NO_RECYCLE_VARIANTS else None,
             )
         case GeminiConfig() as gcfg:
             return GeminiCaptionStage(

@@ -36,6 +36,8 @@ def _get_default_models() -> list[str]:
             # internal temporary entries
             continue
         if model in {
+            "cosmos3_nano",
+            "cosmos3_super",
             "qwen3_5_27b",
             "qwen3_6_27b",
             "qwen3_6_27b_fp8",
@@ -44,10 +46,7 @@ def _get_default_models() -> list[str]:
             "qwen3_vl_235b",
             "qwen3_vl_235b_fp8",
         }:
-            # too large for new users
-            continue
-        if model in {"cosmos3_nano_reasoner", "cosmos3_super_reasoner"}:
-            # HF-gated, opt-in only
+            # too large for new users (cosmos3_{nano,super} are 32 GB / 128 GB omnimodels)
             continue
         if model == "gpt_oss_20b":
             # large and only for enhanced caption

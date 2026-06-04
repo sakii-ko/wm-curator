@@ -238,6 +238,22 @@ cbor2 = ">=5.9" # CVE remediation: cbor2 5.9+ (unified env; fixes vs vulnerable 
 cvcuda-cu13 = "*" # not available on conda-forge
 PyNvVideoCodec = ">=2.0.4,<2.1" # not available on conda-forge - pinned for ffmpeg vulns
 vllm = "==0.21.0" # not available on conda-forge
+# transformers-cosmos3 registers the cosmos3_omni HF AutoConfig type; vllm-cosmos3
+# registers Cosmos3ReasonerForConditionalGeneration for the nvidia/Cosmos3-Nano +
+# Cosmos3-Super omnimodel reasoning head. Both are subdirectory packages of the
+# NVIDIA/cosmos-framework monorepo, installed from the archive tarball (no git
+# binary needed in the build container) pinned to a commit for a reproducible lock.
+# They must both be declared here: uv only honors vllm-cosmos3's `[tool.uv.sources]`
+# for a root project, so vllm-cosmos3's transformers-cosmos3 requirement is
+# satisfied by this explicit pin instead.
+#
+# The `subdirectory = "..."` key selects which package to build from the tarball.
+# The `#subdirectory=...` URL fragment is also required and load-bearing: pixi keys
+# source packages by URL, so two deps sharing the identical tarball URL collapse to
+# one (vllm-cosmos3 gets silently dropped). The differing fragment makes the URLs
+# distinct; do not remove it.
+transformers-cosmos3 = { url = "https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/transformers-cosmos3", subdirectory = "packages/transformers-cosmos3" }
+vllm-cosmos3 = { url = "https://github.com/NVIDIA/cosmos-framework/archive/cbaf5b9b22abd59a68a25c4504733d97e3435923.tar.gz#subdirectory=packages/vllm-cosmos3", subdirectory = "packages/vllm-cosmos3" }
 paddlepaddle = { version = "==3.2.*", index = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"} # CPU-only; no CUDA runtime conflict with torch (unlike paddlepaddle-gpu)
 paddleocr = "==2.10.*"
 
