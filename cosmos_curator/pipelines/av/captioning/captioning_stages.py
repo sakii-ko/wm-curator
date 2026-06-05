@@ -319,7 +319,7 @@ class QwenInputPreparationStage(CuratorStage):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     def stage_setup(self) -> None:
         """Set up the QwenInputPreparationStage."""

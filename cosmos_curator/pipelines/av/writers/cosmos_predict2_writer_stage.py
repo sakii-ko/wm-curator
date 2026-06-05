@@ -648,7 +648,7 @@ class CosmosPredict2WriterStage(CuratorStage):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     def stage_setup(self) -> None:
         """Set up the CosmosPredict2WriterStage.
@@ -714,7 +714,7 @@ class CosmosPredict2WriterStage(CuratorStage):
         # Additional cleanup if needed
 
 
-@ray.remote(num_gpus=1, runtime_env=PixiRuntimeEnv("unified"))
+@ray.remote(num_gpus=1, runtime_env=PixiRuntimeEnv("default"))
 def generate_cosmos_predict2_prefix_cache(  # noqa: PLR0913
     output_prefix: str,
     dataset_name: str,

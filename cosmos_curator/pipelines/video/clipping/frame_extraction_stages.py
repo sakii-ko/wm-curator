@@ -26,13 +26,12 @@ from loguru import logger
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageResource
 from cosmos_curator.core.utils.config.operation_context import make_pipeline_named_temporary_file
 from cosmos_curator.core.utils.infra.performance_utils import StageTimer
-from cosmos_curator.core.utils.model import pixi_utils
 from cosmos_curator.pipelines.video.utils.data_model import SplitPipeTask
 
-if pixi_utils.is_running_in_env("unified") and torch.cuda.is_available():
-    from cosmos_curator.pipelines.video.utils.nvcodec_utils import PyNvcFrameExtractor
-else:
-    PyNvcFrameExtractor = None
+# Importing this module is cheap: nvcodec_utils defers its GPU library imports until a
+# PyNvcFrameExtractor is actually constructed (in stage_setup, on a GPU worker), so the
+# pipeline driver never initializes a CUDA context just by importing this stage.
+from cosmos_curator.pipelines.video.utils.nvcodec_utils import PyNvcFrameExtractor
 
 
 def get_frames_from_ffmpeg(
@@ -110,8 +109,8 @@ class VideoFrameExtractionStage(CuratorStage):
     def stage_setup(self) -> None:
         """Initialize stage resources and configuration."""
         if self.decoder_mode == "pynvc":
-            if PyNvcFrameExtractor is None:
-                msg = "decoder_mode='pynvc' requires running inside the 'unified' environment with GPU support."
+            if not torch.cuda.is_available():
+                msg = "decoder_mode='pynvc' requires running inside the 'default' environment with GPU support."
                 raise RuntimeError(msg)
             self.pynvc_frame_extractor = PyNvcFrameExtractor(self.output_hw[1], self.output_hw[0], batch_size=64)
 
@@ -123,7 +122,7 @@ class VideoFrameExtractionStage(CuratorStage):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     @nvtx.annotate("VideoFrameExtractionStage")  # type: ignore[untyped-decorator]
     def process_data(self, tasks: list[SplitPipeTask]) -> list[SplitPipeTask] | None:

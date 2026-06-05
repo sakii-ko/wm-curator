@@ -26,7 +26,7 @@ from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, 
 
 _PLUGIN_CLASSES: tuple[type, ...] = ()
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from cosmos_curator.models.vllm_cosmos_reason1_vl import (
         VllmCosmosReason1VL,
         _extract_from_reasoning_format,
@@ -39,10 +39,10 @@ if pixi_utils.is_running_in_env("unified"):
     _PLUGIN_CLASSES = (VllmCosmosReason1VL, VllmCosmosReason2VL)
 
 if not _PLUGIN_CLASSES:
-    pytest.skip("Cosmos Reason vLLM tests require unified environment", allow_module_level=True)
+    pytest.skip("Cosmos Reason vLLM tests require default environment", allow_module_level=True)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("plugin_cls", _PLUGIN_CLASSES, ids=lambda cls: cls.model_variant())
 def test_make_llm_input_cosmos_reason(plugin_cls: type[VllmCosmosReason1VL]) -> None:
     """Test make_llm_input for Cosmos-Reason plugins."""
@@ -67,7 +67,7 @@ def test_make_llm_input_cosmos_reason(plugin_cls: type[VllmCosmosReason1VL]) -> 
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_cosmos_reason1_does_not_emit_size_when_cap_is_set() -> None:
     """Cosmos-Reason1 support is enforced by fetch_video(), not request-level size."""
     mock_processor = MagicMock()
@@ -82,7 +82,7 @@ def test_cosmos_reason1_does_not_emit_size_when_cap_is_set() -> None:
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_cosmos_reason2_emits_top_level_qwen3_size_when_cap_is_set() -> None:
     """Cosmos-Reason2 uses request-level Qwen3 processor sizing."""
     mock_processor = MagicMock()
@@ -103,7 +103,7 @@ def test_cosmos_reason2_emits_top_level_qwen3_size_when_cap_is_set() -> None:
     assert "mm_processor_kwargs" not in result["multi_modal_data"]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_extract_from_reasoning_format() -> None:
     """Test that decode extracts <answer>...</answer> content."""
     text = "<think>some thoughts</think>\n<answer>final caption</answer>"
@@ -114,7 +114,7 @@ def test_extract_from_reasoning_format() -> None:
     assert _extract_from_reasoning_format(plain) == plain
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_prompt_uses_chat_template() -> None:
     """Ensure make_prompt uses processor.apply_chat_template and wires video correctly."""
     mock_processor = MagicMock()
@@ -130,7 +130,7 @@ def test_make_prompt_uses_chat_template() -> None:
     assert video_metadata == metadata
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("plugin_cls", _PLUGIN_CLASSES, ids=lambda cls: cls.model_variant())
 def test_make_refined_llm_request(plugin_cls: type[VllmCosmosReason1VL]) -> None:
     """Test refine flow creates a new request preserving video and updating prompt."""
@@ -161,7 +161,7 @@ def test_make_refined_llm_request(plugin_cls: type[VllmCosmosReason1VL]) -> None
     assert refined.inputs["mm_processor_kwargs"] == size_kwargs
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_stage2_refine_prompt_equivalence_with_real_processor() -> None:
     """Integration test: verify refine prompt equivalence using the real processor.
 

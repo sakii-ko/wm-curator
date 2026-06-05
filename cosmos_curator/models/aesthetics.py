@@ -125,7 +125,7 @@ class AestheticScorer(ModelInterface):
             Name of the conda environment.
 
         """
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:

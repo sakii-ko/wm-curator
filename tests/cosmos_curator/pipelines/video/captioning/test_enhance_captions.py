@@ -34,7 +34,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (  # type: ignore[im
 )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("model_variant", ["qwen_lm", "gpt_oss_20b", "openai"])
 def test_enhance_caption_lm_variants(
     model_variant: str,

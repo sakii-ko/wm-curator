@@ -30,7 +30,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     WindowConfig,
 )
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import torch
     from vllm import SamplingParams
 
@@ -60,7 +60,7 @@ else:
 @pytest.fixture(autouse=True)
 def patch_vllm_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch _VLLM_PLUGINS dict with {"mock": MockVllmPlugin} for every test in this module."""
-    if pixi_utils.is_running_in_env("unified"):
+    if pixi_utils.is_running_in_env("default"):
         monkeypatch.setitem(
             _VLLM_PLUGINS,
             "mock",
@@ -71,21 +71,21 @@ def patch_vllm_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
                 monkeypatch.delitem(_VLLM_PLUGINS, k)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_get_vllm_plugin_raises() -> None:
     """Test _get_vllm_plugin raises ValueError for invalid variant."""
     with pytest.raises(ValueError, match=r".*"):
         _get_vllm_plugin("invalid")
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_model() -> None:
     """vllm_model should return "llm"."""
     cfg = VllmConfig(model_variant="mock")
     assert isinstance(vllm_model(cfg), MockLLM)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_sampling_params() -> None:
     """Test sampling_params."""
     temperature = 0.1
@@ -109,7 +109,7 @@ def test_sampling_params() -> None:
     assert sp.max_tokens == max_tokens
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_auto_processor() -> None:
     """Test auto_processor.
 
@@ -119,7 +119,7 @@ def test_auto_processor() -> None:
     assert auto_processor(vllm_config) is not None
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_metadata() -> None:
     """Test make_metadata."""
     width = 32
@@ -141,14 +141,14 @@ def test_make_metadata() -> None:
         assert not metadata[i]["do_sample_frames"]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_metadata_raises() -> None:
     """Test make_metadata raises ValueError for non-4D tensors."""
     with pytest.raises(ValueError, match=r".*"):
         make_metadata([torch.zeros((3, 32, 32))], WindowConfig(sampling_fps=1.0))
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_model_inputs() -> None:
     """Test make_model_inputs."""
     videos = [torch.zeros((2, 3, 32, 32)) for _ in range(5)]
@@ -169,7 +169,7 @@ def test_make_model_inputs() -> None:
         assert mm_data["video"][0][1] == metadata[i]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_generate() -> None:
     """Test vllm_generate."""
     llm = MockLLM()
@@ -183,7 +183,7 @@ def test_vllm_generate() -> None:
     assert captions_text == expected_captions
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_process_vllm_output() -> None:
     """Test process_vllm_output."""
     vllm_plugin = _get_vllm_plugin("mock")
@@ -198,7 +198,7 @@ def test_process_vllm_output() -> None:
     assert all(r.finish_reason == "stop" for r in finished)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_process_vllm_output_raises() -> None:
     """Test process_vllm_output raises TypeError for non-RequestOutput output."""
     request_output = [object()]
@@ -206,7 +206,7 @@ def test_process_vllm_output_raises() -> None:
         process_vllm_output(request_output, {}, VllmConfig(model_variant="mock"))  # type: ignore[arg-type]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_process_vllm_output_not_finished() -> None:
     """Test that no output is returned when no requests are finished."""
     requests = [VllmCaptionRequest(request_id=f"id{i}", inputs={"i": i}) for i in range(5)]
@@ -217,7 +217,7 @@ def test_process_vllm_output_not_finished() -> None:
     assert len(finished) == 0
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("stage2", [False, True])
 def test_caption_no_inflight_batching(*, stage2: bool) -> None:
     """Test _caption_no_inflight_batching."""
@@ -249,7 +249,7 @@ def test_caption_no_inflight_batching(*, stage2: bool) -> None:
     assert all(result.finish_reason == "stop" for result in results)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @patch("cosmos_curator.models.vllm_interface.process_vllm_output")
 def test_caption_no_inflight_batching_raises(mock_process_vllm_output: MagicMock) -> None:
     """Test _caption_no_inflight_batching raises RuntimeError on length mismatch."""
@@ -267,7 +267,7 @@ def test_caption_no_inflight_batching_raises(mock_process_vllm_output: MagicMock
         )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("stage2", [False, True])
 def test_caption_no_inflight_batching_preserves_order(*, stage2: bool) -> None:
     """Non-inflight batching must return captions in original input order with mixed stage2 prompts.
@@ -321,7 +321,7 @@ def test_caption_no_inflight_batching_preserves_order(*, stage2: bool) -> None:
         assert stage2_indices == sorted(stage2_indices)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("stage2", [False, True])
 def test_caption_inflight_batching(*, stage2: bool) -> None:
     """Test _caption_inflight_batching."""
@@ -354,7 +354,7 @@ def test_caption_inflight_batching(*, stage2: bool) -> None:
     assert all(result.finish_reason == "stop" for result in results)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_caption_negative_inflight_raises() -> None:
     """vllm_caption should validate non-negative inflight param."""
     with pytest.raises(ValueError, match=r"must be >= 0"):
@@ -370,7 +370,7 @@ def test_vllm_caption_negative_inflight_raises() -> None:
         )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_caption_stage2_prompts_mismatch_raises() -> None:
     """vllm_caption should validate stage2_prompts length matches model_inputs length."""
     with pytest.raises(ValueError, match=r"must be same length"):
@@ -386,7 +386,7 @@ def test_vllm_caption_stage2_prompts_mismatch_raises() -> None:
         )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("inflight", [False, True])
 @patch("cosmos_curator.models.vllm_interface._caption_inflight_batching")
 @patch("cosmos_curator.models.vllm_interface._caption_no_inflight_batching")
@@ -415,7 +415,7 @@ def test_vllm_caption_dispatch(mock_no_ifb: MagicMock, mock_ifb: MagicMock, *, i
     )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("shape", "values_normalized", "prefix"),
     [
@@ -502,7 +502,7 @@ def test_save_frames_as_pngs(
             assert img_array.shape == (height, width, channels)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("stage2", [False, True])
 def test_caption_inflight_batching_preserves_order(*, stage2: bool) -> None:
     """Inflight batching must return captions in input order even when the engine finishes requests out of order.
@@ -555,7 +555,7 @@ def test_caption_inflight_batching_preserves_order(*, stage2: bool) -> None:
     assert caption_indices[1:] == sorted(caption_indices[1:])
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @patch("cosmos_curator.models.vllm_interface.process_vllm_output")
 @patch("cosmos_curator.models.vllm_interface.vllm_generate")
 def test_caption_no_inflight_batching_terminal_finish_reason_wins(

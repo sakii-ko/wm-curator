@@ -27,7 +27,7 @@ Drift tripwire: each test asserts that the constants the async path reads
 match the constants sync ``model()`` reads, so a future regression that
 diverges sync vs async tuning is caught locally.
 
-These tests require the ``unified`` pixi env (vLLM installed).
+These tests require the ``default`` pixi env (vLLM installed).
 """
 
 import importlib
@@ -38,18 +38,18 @@ import pytest
 from cosmos_curator.core.utils.model import pixi_utils
 from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig, VllmConfig
 
-# Heavy vLLM imports are env-gated: the ``unified`` pixi env carries vLLM
+# Heavy vLLM imports are env-gated: the ``default`` pixi env carries vLLM
 # and the plugin modules; in the default CPU collection env we still want
 # the module to import (so test selection / discovery works) but the
 # tests themselves are skipped via ``pytestmark``.  ``VllmCosmosReason2VL``
 # joined this set as part of cosmos_r2 onboarding -- import it from the
 # same conditional so test bodies do not need a per-test local import.
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from cosmos_curator.models import vllm_cosmos_reason1_vl, vllm_nemotron, vllm_qwen
     from cosmos_curator.models.vllm_cosmos_reason2_vl import VllmCosmosReason2VL
 
 
-pytestmark = pytest.mark.env("unified")
+pytestmark = pytest.mark.env("default")
 
 
 def _async_cfg(**overrides: object) -> VllmAsyncConfig:

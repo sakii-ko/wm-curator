@@ -22,7 +22,7 @@ import torch
 from cosmos_curator.core.utils.model import pixi_utils
 from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, VllmConfig
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from cosmos_curator.models.vllm_qwen import (
         VllmQwen,
         VllmQwen3VL,
@@ -37,7 +37,7 @@ if pixi_utils.is_running_in_env("unified"):
     _MODEL_VARIANT = VllmQwen7B.model_variant()
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen() -> None:
     """Test make_llm_input (video path)."""
     # Mock the tokenizer to return a tensor that can be indexed and converted to list
@@ -65,7 +65,7 @@ def test_make_llm_input_qwen() -> None:
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen_image() -> None:
     """Test make_llm_input with use_image_input=True (image pipeline path)."""
     mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
@@ -86,7 +86,7 @@ def test_make_llm_input_qwen_image() -> None:
     assert result["multi_modal_data"]["image"].shape == (1, 3, 32, 32)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen3vl_image() -> None:
     """Test VllmQwen3VL.make_llm_input with use_image_input=True (image path)."""
     mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
@@ -106,7 +106,7 @@ def test_make_llm_input_qwen3vl_image() -> None:
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_message() -> None:
     """Test make_message function (video path)."""
     prompt = "Test prompt"
@@ -119,7 +119,7 @@ def test_make_message() -> None:
     assert len(content) == 2
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_message_image() -> None:
     """Test make_message with use_image=True (image pipeline path)."""
     prompt = "Describe the image"
@@ -133,7 +133,7 @@ def test_make_message_image() -> None:
     assert content[1]["text"] == prompt
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_prompt() -> None:
     """Test make_prompt function (video path)."""
     # Mock the tokenizer to return a tensor that can be indexed and converted to list
@@ -154,7 +154,7 @@ def test_make_prompt() -> None:
     assert video_metadata == metadata
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen3vl_video() -> None:
     """Test VllmQwen3VL.make_llm_input uses the same video payload format as base Qwen."""
     mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
@@ -177,7 +177,7 @@ def test_make_llm_input_qwen3vl_video() -> None:
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("num_frames", [2, 3])
 def test_qwen3_video_size_kwargs_scales_edges_by_frame_count(num_frames: int) -> None:
     """Qwen3 processor size is expressed as a whole-video budget."""
@@ -191,7 +191,7 @@ def test_qwen3_video_size_kwargs_scales_edges_by_frame_count(num_frames: int) ->
     }
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_qwen3_video_size_kwargs_boundary_min_equals_max() -> None:
     """At the lower boundary, the fixed floor and user cap translate to the same whole-video budget."""
     result = qwen3_video_size_kwargs(3, VIDEO_MIN_PIXELS)
@@ -199,7 +199,7 @@ def test_qwen3_video_size_kwargs_boundary_min_equals_max() -> None:
     assert result["size"]["shortest_edge"] == result["size"]["longest_edge"]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen3vl_video_emits_top_level_size() -> None:
     """Qwen3 video inputs carry request-level processor size when the sync cap is set."""
     mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
@@ -221,7 +221,7 @@ def test_make_llm_input_qwen3vl_video_emits_top_level_size() -> None:
     assert "mm_processor_kwargs" not in result["multi_modal_data"]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen_does_not_emit_size_when_cap_is_set() -> None:
     """Qwen2.5 support is enforced by fetch_video(), not request-level size."""
     mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
@@ -237,7 +237,7 @@ def test_make_llm_input_qwen_does_not_emit_size_when_cap_is_set() -> None:
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_qwen3vl_image_does_not_emit_video_size_when_cap_is_set() -> None:
     """Image inputs do not receive video processor sizing."""
     mock_tensor = torch.tensor([[1, 2, 3, 4, 5]])
@@ -252,7 +252,7 @@ def test_make_llm_input_qwen3vl_image_does_not_emit_video_size_when_cap_is_set()
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_qwen_stage2_refine_preserves_mm_processor_kwargs() -> None:
     """Stage-2 refinement keeps request-level processor sizing from stage 1."""
     mock_processor = MagicMock()
@@ -275,7 +275,7 @@ def test_qwen_stage2_refine_preserves_mm_processor_kwargs() -> None:
     assert refined.inputs["mm_processor_kwargs"] == size_kwargs
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_prompt_image() -> None:
     """Test make_prompt with use_image=True (image pipeline path)."""
     mock_tensor = torch.tensor([[10, 20, 30, 40]])
@@ -294,7 +294,7 @@ def test_make_prompt_image() -> None:
     assert result["multi_modal_data"]["image"].shape == (1, 3, 32, 32)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("raw_text", "expected"),
     [
@@ -367,7 +367,7 @@ def test_strip_qwen3_reasoning(raw_text: str, expected: str) -> None:
     assert _strip_qwen3_reasoning(raw_text) == expected
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_qwen3vl_decode_returns_empty_on_truncated_reasoning() -> None:
     """Truncation mid-reasoning (finish_reason='length' + no </think>) yields empty.
 
@@ -383,7 +383,7 @@ def test_qwen3vl_decode_returns_empty_on_truncated_reasoning() -> None:
     assert VllmQwen3VL.decode(raw_output) == ""
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_qwen3vl_decode_passes_through_on_clean_finish_without_tags() -> None:
     """Non-truncated output without ``</think>`` is passed through unchanged.
 
@@ -398,7 +398,7 @@ def test_qwen3vl_decode_passes_through_on_clean_finish_without_tags() -> None:
     assert VllmQwen3VL.decode(raw_output) == "The video shows snowy mountains."
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_qwen3vl_decode_strips_reasoning_on_clean_finish() -> None:
     """The happy path: reasoning block before answer, finish_reason='stop'."""
     raw_output = MagicMock()

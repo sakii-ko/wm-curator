@@ -279,7 +279,7 @@ def _skip_if_weights_missing(model_variant: str) -> None:
     pytest.skip(f"Model weights for {model_variant} not found at {weights_dir}{hint}")
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("model_variant", ["qwen", "cosmos_r1", "cosmos_r2", "qwen3_5_27b"])
 def test_vllm_caption_generation(
     sample_captioning_task: SplitPipeTask, sequential_runner: RunnerInterface, model_variant: str
@@ -365,7 +365,7 @@ def test_vllm_caption_generation(
             )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_caption_regression_signals(
     sample_captioning_task: SplitPipeTask,
     sequential_runner: RunnerInterface,

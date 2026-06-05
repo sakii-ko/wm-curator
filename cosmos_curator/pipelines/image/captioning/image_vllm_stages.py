@@ -45,7 +45,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
 
 IMAGE_FACTOR = 28
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import torch
     from PIL import Image as PILImage
     from torchvision import transforms  # type: ignore[import-untyped]
@@ -74,7 +74,7 @@ class _ImageVllmModelInfo(ModelInterface):
 
     @property
     def conda_env_name(self) -> str:
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:
@@ -322,7 +322,7 @@ def _scatter_captions(  # noqa: PLR0913
 
 
 def _clear_model_inputs(tasks: list[ImagePipeTask]) -> None:
-    """Drop prep payloads before returning tasks to a non-unified downstream stage."""
+    """Drop prep payloads before returning tasks to a non-default downstream stage."""
     for task in tasks:
         task.image.model_input.clear()
 
@@ -360,7 +360,7 @@ class ImageVllmPrepStage(CuratorStage):
     @property
     def conda_env_name(self) -> str:
         """Unified env for torch/vLLM."""
-        return "unified"
+        return "default"
 
     def stage_setup(self) -> None:
         """Load processor for the configured model variant."""
@@ -447,7 +447,7 @@ class ImageVllmCaptionStage(CuratorStage):
     @property
     def conda_env_name(self) -> str:
         """Unified env for vLLM."""
-        return "unified"
+        return "default"
 
     @property
     def model(self) -> ModelInterface:

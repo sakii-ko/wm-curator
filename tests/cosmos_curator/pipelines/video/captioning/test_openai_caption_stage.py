@@ -53,7 +53,7 @@ def _make_task(mp4_bytes: bytes | None, *, num_windows: int = 1) -> SplitPipeTas
 
 def _make_stage(monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> OpenAICaptionStage:
     """Create a stage with the openai module patched so import-guarded code works."""
-    # Ensure openai is importable in test (it may not live in "unified" env).
+    # Ensure openai is importable in test (it may not live in "default" env).
     monkeypatch.setattr(openai_caption_stage, "openai", _fake_openai_module(), raising=False)
     defaults: dict[str, object] = {
         "model_name": "test-model",

@@ -114,7 +114,7 @@ if TYPE_CHECKING:
     from cosmos_curator.models.vllm_interface import VllmWindowResult
     from cosmos_curator.models.vllm_plugin import VllmPlugin
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from vllm.utils.gc_utils import freeze_gc_heap
     from vllm.v1.engine.async_llm import AsyncLLM
     from vllm.v1.engine.exceptions import EngineDeadError
@@ -160,7 +160,7 @@ class _VllmAsyncModel(ModelInterface):
     @property
     def conda_env_name(self) -> str:
         """Return the conda environment where vLLM is installed."""
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:
@@ -432,8 +432,8 @@ class VllmAsyncCaptionStage(SingleInferenceCaptionStage, ContinuousInterface):  
 
     @property
     def conda_env_name(self) -> str:
-        """Use the unified environment (vllm + transformers packages live there)."""
-        return "unified"
+        """Use the default environment (vllm + transformers packages live there)."""
+        return "default"
 
     # Env vars to unset in the worker process.
     #

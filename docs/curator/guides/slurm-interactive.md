@@ -116,7 +116,7 @@ pixi info --extended | grep "Cache dir"
 If `.pixi/envs` is missing, install the required environments from inside the container:
 
 ```bash
-pixi install --frozen -e default -e unified -e cuml -e legacy-transformers -e model-download -e paddle-ocr -e seedvr
+pixi install --frozen -e default -e cuml -e legacy-transformers -e model-download -e paddle-ocr -e seedvr
 ```
 
 For active dependency development, omit `--frozen` only when you expect Pixi to update the lockfile. Use `--frozen` when
@@ -198,7 +198,6 @@ If `pixi run --as-is` fails with a missing environment, run the install step aga
 
 ```bash
 pixi install --frozen -e default
-pixi install --frozen -e unified
 ```
 
 If Cosmos Curator cannot find the config file, verify the mount target:

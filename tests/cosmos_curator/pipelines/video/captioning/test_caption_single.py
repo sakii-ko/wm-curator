@@ -19,7 +19,7 @@ Exercises the new :class:`SingleInferenceCaptionStage`-shaped entry
 point so ``PerEventCaptionStage`` can rely on a uniform
 ``caption_single(prompt, video_bytes) -> str`` contract across all four
 backends. Heavy backends (``VllmCaptionStage``, ``VllmAsyncCaptionStage``)
-are gated with the ``unified`` env marker; the CPU-only OpenAI / Gemini
+are gated with the ``default`` env marker; the CPU-only OpenAI / Gemini
 paths run on every test invocation.
 """
 
@@ -295,11 +295,11 @@ def test_gemini_caption_single_extracts_text_from_candidates(monkeypatch: pytest
 
 
 # ---------------------------------------------------------------------------
-# VllmCaptionStage.caption_single — env=unified
+# VllmCaptionStage.caption_single — env=default
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_caption_single_returns_text_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """``caption_single`` decodes once, builds one llm_input, and returns engine text."""
     from cosmos_curator.pipelines.video.captioning import vllm_caption_stage as vcs  # noqa: PLC0415
@@ -331,7 +331,7 @@ def test_vllm_caption_single_returns_text_on_success(monkeypatch: pytest.MonkeyP
     fake_engine.generate.assert_called_once()
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_caption_single_clears_video_max_pixels_without_mutating_stage_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -372,7 +372,7 @@ def test_vllm_caption_single_clears_video_max_pixels_without_mutating_stage_conf
     assert stage._vllm_config.video_max_pixels_per_frame == 602112
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_caption_single_raises_on_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty engine output raises ``RuntimeError`` with finish_reason in the message."""
     from cosmos_curator.pipelines.video.captioning import vllm_caption_stage as vcs  # noqa: PLC0415
@@ -399,11 +399,11 @@ def test_vllm_caption_single_raises_on_empty(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # ---------------------------------------------------------------------------
-# VllmAsyncCaptionStage.caption_single — env=unified
+# VllmAsyncCaptionStage.caption_single — env=default
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_async_caption_single_returns_text_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """``caption_single`` builds one llm_input, drives ``engine.generate`` to completion."""
     from cosmos_curator.pipelines.video.captioning import vllm_async_stage as vas  # noqa: PLC0415
@@ -440,7 +440,7 @@ def test_vllm_async_caption_single_returns_text_on_success(monkeypatch: pytest.M
             stage._caption_single_runner = None
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_async_caption_single_raises_on_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty engine output raises ``RuntimeError`` with finish_reason in the message."""
     from cosmos_curator.pipelines.video.captioning import vllm_async_stage as vas  # noqa: PLC0415
@@ -490,7 +490,7 @@ def test_vllm_async_caption_single_raises_on_empty(monkeypatch: pytest.MonkeyPat
 # upper bound so the off-by-one can't reappear.
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_decode_video_for_caption_single_uses_inclusive_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -529,7 +529,7 @@ def test_vllm_decode_video_for_caption_single_uses_inclusive_window(
     assert window.end == 99  # total_frames=100, inclusive upper bound
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_decode_video_for_caption_single_qwen3_uses_inclusive_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -565,7 +565,7 @@ def test_vllm_decode_video_for_caption_single_qwen3_uses_inclusive_window(
     assert window_range[0].end == 63  # total_frames=64, inclusive upper bound
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_async_decode_video_for_caption_single_uses_inclusive_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -604,7 +604,7 @@ def test_vllm_async_decode_video_for_caption_single_uses_inclusive_window(
     assert window.end == 99  # total_frames=100, inclusive upper bound
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_vllm_async_decode_video_for_caption_single_qwen3_uses_inclusive_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

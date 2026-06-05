@@ -276,7 +276,7 @@ def test_build_processor_uses_qwen_ray_data_scheduler_defaults(monkeypatch: pyte
     assert "experimental" not in config
     assert config["batch_size"] == 4
     assert config["concurrency"] == (1, 2)
-    assert config["runtime_env"] == {"pixi": "unified", "gpu": True}
+    assert config["runtime_env"] == {"pixi": "default", "gpu": True}
 
 
 def test_max_caption_workers_uses_gpu_ceiling() -> None:

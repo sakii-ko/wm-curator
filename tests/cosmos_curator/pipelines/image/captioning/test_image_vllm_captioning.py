@@ -32,7 +32,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
 )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_image_vllm_caption_generation(
     sample_image_task: ImagePipeTask,
     sequential_runner: RunnerInterface,

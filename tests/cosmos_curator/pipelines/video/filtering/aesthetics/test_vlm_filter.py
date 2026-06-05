@@ -60,7 +60,7 @@ def sample_filtering_task(sample_video_data: bytes) -> SplitPipeTask:
     )
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_generate_embedding(sample_filtering_task: SplitPipeTask, sequential_runner: RunnerInterface) -> None:
     """Test the vLLM filtering result."""
     filtering_prompt = "blue car"
@@ -85,13 +85,13 @@ def test_generate_embedding(sample_filtering_task: SplitPipeTask, sequential_run
         assert "qwen_rejection_reasons" in clip.filter_windows[0].caption
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_qwen_video_classifier_classifications(
     sample_filtering_task: SplitPipeTask, sequential_runner: RunnerInterface
 ) -> None:
     """Test that the vLLM video classifier sets qwen_type_classification on each clip.
 
-    Run with: cosmos-curator local launch --curator-path . -- pixi run --as-is -e unified pytest -m env
+    Run with: cosmos-curator local launch --curator-path . -- pixi run --as-is -e default pytest -m env
         tests/cosmos_curator/pipelines/video/filtering/aesthetics/test_qwen_filter.py
         -k test_qwen_video_classifier_classifications -v
 

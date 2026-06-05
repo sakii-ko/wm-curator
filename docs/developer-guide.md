@@ -118,8 +118,8 @@ pixi list -e <env-name>
 # For a specific package
 pixi list -e <env-name> <package-name>
 
-# Example: see the pytorch packages in the 'unified' environment
-pixi list -e unified pytorch
+# Example: see the pytorch packages in the 'default' environment
+pixi list -e default pytorch
 ```
 
 #### Running Commands in Pixi Environments
@@ -133,8 +133,8 @@ pixi run python -m <module>
 # Run in a specific environment
 pixi run -e <env-name> python -m <module>
 
-# Example: check if PyTorch is CUDA enabled in the unified environment
-pixi run -e unified python -c "import torch; print(torch.cuda.is_available())"
+# Example: check if PyTorch is CUDA enabled in the default environment
+pixi run -e default python -c "import torch; print(torch.cuda.is_available())"
 ```
 
 Developer tools support two local workflows. Without activating a shell, use Pixi task aliases from the repository root:
@@ -230,7 +230,7 @@ Launch the docker container locally and run the `gputest` task, which runs the
 env-marked model and stage tests:
 
 ```bash
-for conda_env in default legacy-transformers unified; do
+for conda_env in default legacy-transformers; do
    cosmos-curator local launch --image-name cosmos-curator --image-tag 1.0.0 --curator-path . \
    -- pixi run --as-is -e $conda_env gputest;
 done

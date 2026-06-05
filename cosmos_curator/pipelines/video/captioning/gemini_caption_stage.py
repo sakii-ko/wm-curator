@@ -173,8 +173,8 @@ class ApiPrepStage(CuratorStage):
 
     @property
     def conda_env_name(self) -> str:
-        """Use the unified environment for window preparation."""
-        return "unified"
+        """Use the default environment for window preparation."""
+        return "default"
 
     def _prep_windows(self, video: Video) -> None:
         """Create windows for the provided video."""

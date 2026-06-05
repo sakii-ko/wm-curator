@@ -38,7 +38,7 @@ from cosmos_curator.pipelines.image.utils.data_model import ImagePipeTask
 if TYPE_CHECKING:
     import openai
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import openai
 
 
@@ -343,8 +343,8 @@ class ImageOpenAIEmbeddingStage(CuratorStage):
 
     @property
     def conda_env_name(self) -> str:
-        """Return the conda environment name (openai package lives in unified)."""
-        return "unified"
+        """Return the conda environment name (openai package lives in default)."""
+        return "default"
 
     def stage_setup(self) -> None:
         """Create the OpenAI API client using credentials from the config file."""

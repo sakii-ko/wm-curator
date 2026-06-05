@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     import openai
 
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import openai
 
 
@@ -99,8 +99,8 @@ class OpenAIEmbeddingStage(CuratorStage):
 
     @property
     def conda_env_name(self) -> str:
-        """Use the unified environment (openai package lives there)."""
-        return "unified"
+        """Use the default environment (openai package lives there)."""
+        return "default"
 
     def stage_setup(self) -> None:
         """Create the OpenAI API client using credentials from the config file."""

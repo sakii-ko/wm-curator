@@ -547,7 +547,7 @@ class TransNetV2(ModelInterface):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:

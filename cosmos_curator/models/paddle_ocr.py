@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     import paddle.inference  # type: ignore[import-not-found]
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-if pixi_utils.is_running_in_env("paddle-ocr") or pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("paddle-ocr") or pixi_utils.is_running_in_env("default"):
     import paddle  # type: ignore[import-not-found]
     import paddle.inference  # type: ignore[import-not-found]
     from paddleocr import PaddleOCR
@@ -468,9 +468,9 @@ class PaddleOCRModel(ModelInterface):
         """Return the conda environment name for this model.
 
         GPU mode (default) runs in paddle-ocr (paddlepaddle-gpu via post_install).
-        CPU mode runs in unified (paddlepaddle CPU, no torch conflict).
+        CPU mode runs in default (paddlepaddle CPU, no torch conflict).
         """
-        return "paddle-ocr" if self._use_gpu else "unified"
+        return "paddle-ocr" if self._use_gpu else "default"
 
     @property
     def model_id_names(self) -> list[str]:

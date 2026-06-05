@@ -32,7 +32,7 @@
 
 - Default (full) — pre-installs pixi environments at build time. Best for platforms without shared/persistent storage
   (NVCF, air-gapped deployments). With no `--envs` flag, installs all environments. With `--envs env1,env2,...`,
-  installs only the specified subset (e.g. `--envs default,unified`).
+  installs only the specified subset (e.g. `--envs default,seedvr`).
 - `--slim` — lockfile (`pixi.toml` + `pixi.lock`) and source code only. `--envs` selects which environments to
   install at runtime (same default as full mode). The image stores the env list in `COSMOS_CURATOR_SLIM_ENVS` and the
   launch flow runs `pixi install --frozen` before the user command. Combined with `--pixi-path .`, this is ideal for
@@ -67,7 +67,7 @@ validation and assumes environments are already installed. This is a safety guar
 optimization: if an environment is missing, the command fails immediately instead of silently installing on the fly
 (which could hang, race with concurrent Ray workers, or produce non-reproducible results). The invariant holds for both
 image modes — full images pre-install at build time, slim images pre-install via the warmup step. The only exception is
-local dev commands outside a container (e.g. `pixi run -e unified python ...`), where environments may not yet be
+local dev commands outside a container (e.g. `pixi run -e default python ...`), where environments may not yet be
 installed.
 
 ## Limitations and risks

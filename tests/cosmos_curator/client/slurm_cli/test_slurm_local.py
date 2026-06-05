@@ -349,7 +349,7 @@ def test_slurm_shell_pixi_envs_overrides_slim_warmup_envs(tmp_path: Path) -> Non
                 str(tmp_path / "cache"),
                 "--no-mount-s3-creds",
                 "--pixi-envs",
-                "model-download,default,unified",
+                "model-download,default,seedvr",
                 "--",
                 "bash",
             ],
@@ -360,7 +360,7 @@ def test_slurm_shell_pixi_envs_overrides_slim_warmup_envs(tmp_path: Path) -> Non
     subprocess_env = mock_call.call_args.kwargs["env"]
     env_keys = _container_env_keys(srun_cmd)
     assert "COSMOS_CURATOR_SLIM_ENVS" in env_keys
-    assert subprocess_env["COSMOS_CURATOR_SLIM_ENVS"] == "model-download,default,unified"
+    assert subprocess_env["COSMOS_CURATOR_SLIM_ENVS"] == "model-download,default,seedvr"
 
     container_command = srun_cmd[srun_cmd.index("bash") + 2]
     assert "pixi install --frozen -e ${COSMOS_CURATOR_SLIM_ENVS//,/ -e }" in container_command

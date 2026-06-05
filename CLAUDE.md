@@ -22,8 +22,8 @@ Pre-commit hooks run ruff automatically. A submodule-check hook warns before com
 
 **Testing**:
 - CPU tests: `pytest` (env-marked tests are excluded by default via `pytest.ini`)
-- GPU tests: `cosmos-curator local launch --curator-path . -- pixi run --as-is -e [default|unified] pytest -m env tests/`
-- Mark GPU tests with `@pytest.mark.env("unified")` (or other env name)
+- GPU tests: `cosmos-curator local launch --curator-path . -- pixi run --as-is -e default gputest` (the `gputest` task scopes `-m env` to `tests/cosmos_curator/{pipelines,models}`; running `pytest -m env tests/` instead fails collection on dev-only client/benchmark deps like `fabric`/`invoke`). Requires model weights staged in the local workspace (`model_download`).
+- Mark GPU tests with `@pytest.mark.env("default")` (or other env name)
 - Place tests in `tests/` mirroring module paths. Uses `--import-mode=importlib`.
 
 **Building**: Setuptools backend via PyPA build. `pixi run build` for client wheel, `cosmos-curator image build` for Docker.
@@ -69,7 +69,7 @@ See `cosmos_curator/pipelines/examples/hello_world_pipeline.py` and `docs/curato
 
 ## Pixi Environments
 
-Defined in `pixi.toml`: `default` (core), `unified` (vllm/advanced models), `transformers`, `legacy-transformers`, `cuml`, `model-download`, `paddle-ocr`
+Defined in `pixi.toml`: `default` (core + vLLM/CVCUDA/PaddleOCR-CPU/advanced models), `transformers`, `legacy-transformers`, `cuml`, `model-download`, `paddle-ocr`, `seedvr`, `sam3`
 
 Stages specify `conda_env_name` property to run in specific environments, enabling dependency isolation.
 

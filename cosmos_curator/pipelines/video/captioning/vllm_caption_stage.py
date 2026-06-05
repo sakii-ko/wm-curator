@@ -70,7 +70,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     get_video_from_task,
 )
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     if TYPE_CHECKING:
         from transformers import AutoProcessor
         from vllm import LLM, SamplingParams
@@ -288,7 +288,7 @@ class VllmModelInterface(ModelInterface):
     @property
     def conda_env_name(self) -> str:
         """Get the conda environment name."""
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:
@@ -379,7 +379,7 @@ class VllmPrepStage(CuratorStage):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     def stage_setup(self) -> None:
         """Set up the model for processing."""
@@ -946,7 +946,7 @@ class VllmCaptionStage(SingleInferenceCaptionStage):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     @property
     def resources(self) -> CuratorStageResource:

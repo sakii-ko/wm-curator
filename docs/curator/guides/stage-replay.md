@@ -485,7 +485,7 @@ Stage replay respects the `conda_env_name` property:
 class VllmCaptionStage(CuratorStage):
     @property
     def conda_env_name(self) -> str:
-        return "unified"  # Replays in "unified" Pixi environment
+        return "default"  # Replays in "default" Pixi environment
 ```
 
 This ensures GPU models, dependencies, and configurations match the original pipeline.

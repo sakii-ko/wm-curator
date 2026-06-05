@@ -13,7 +13,7 @@ Key capabilities:
 - For remote: Uses OpenAI API with model selection
 - Formats prompts with chat templates for consistent behavior across backends
 - Supports batching and provides `make_chat_lm_input` helper
-- Designed for the "unified" conda environment and emits NVTX ranges
+- Designed for the "default" conda environment and emits NVTX ranges
 """
 
 from typing import TYPE_CHECKING, cast
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from openai import OpenAI as OpenAIClient
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from openai import OpenAI as OpenAIClient
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
@@ -99,7 +99,7 @@ class ChatLM(ModelInterface):
     @property
     def conda_env_name(self) -> str:
         """Get the conda environment name used for this model."""
-        return "unified"
+        return "default"
 
     @property
     def requires_gpu(self) -> bool:

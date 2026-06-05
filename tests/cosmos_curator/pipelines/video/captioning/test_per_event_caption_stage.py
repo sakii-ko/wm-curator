@@ -316,9 +316,9 @@ def test_per_event_resources_forward_from_inner() -> None:
 
 def test_per_event_conda_env_forwards_from_inner() -> None:
     """``conda_env_name`` propagates from the inner stage so weights download in the right env."""
-    inner = _FakeInner(conda_env_name="unified")
+    inner = _FakeInner(conda_env_name="default")
     stage = PerEventCaptionStage(inner=inner)
-    assert stage.conda_env_name == "unified"
+    assert stage.conda_env_name == "default"
 
 
 def test_per_event_secondary_name_includes_inner() -> None:

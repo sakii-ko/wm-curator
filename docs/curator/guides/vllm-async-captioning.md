@@ -401,7 +401,7 @@ surface during captioning. Failures that surface during
 ### CUBLAS_STATUS_INVALID_VALUE
 
 CUDA library mismatch -- system cuBLAS loaded instead of PyTorch's
-bundled version. The `unified` pixi environment resolves this.
+bundled version. The `default` pixi environment resolves this.
 
 ### Extra environment variables
 

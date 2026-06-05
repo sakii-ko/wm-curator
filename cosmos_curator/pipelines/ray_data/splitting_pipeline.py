@@ -271,7 +271,7 @@ def _apply_split_stage(ds: ray.data.Dataset, args: argparse.Namespace, *, downlo
             num_cpus=decode_cpus,
             num_gpus=args.transnetv2_gpus_per_worker,
             compute=ActorPoolStrategy(min_size=1, max_size=download_slots, initial_size=1),
-            runtime_env=ray_data_gpu_runtime_env("unified"),
+            runtime_env=ray_data_gpu_runtime_env("default"),
             scheduling_strategy="DEFAULT",
         )
 

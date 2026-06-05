@@ -53,7 +53,7 @@ Ensure the description is clear, precise, and paints a compelling picture of the
 """
 
 # pyright: reportMissingImports=false
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from transformers import AutoProcessor
     from vllm import LLM, SamplingParams
 
@@ -236,7 +236,7 @@ class QwenVL(ModelInterface):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:

@@ -262,18 +262,18 @@ def test_full_dockerfile_with_paddle_ocr_rebuilds_all_opencv_variants(
     assert "WITH_TIFF=OFF" in contents
 
 
-def test_full_dockerfile_with_unified_rebuilds_all_opencv_variants(
+def test_full_dockerfile_default_rebuilds_all_opencv_variants(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unified includes PaddleOCR and needs the non-headless OpenCV wheels too."""
+    """Default now includes PaddleOCR and needs the non-headless OpenCV wheels too."""
     monkeypatch.chdir(REPO_ROOT)
 
     contents = _render_dockerfile(
         tmp_path,
         slim=False,
         redistributable=True,
-        conda_env_names=["default", "unified"],
+        conda_env_names=["default"],
     )
 
     assert "/opt/cosmos-curator-wheelhouse/opencv_python-*.whl" in contents
@@ -299,7 +299,7 @@ def test_full_dockerfile_replaces_bundled_video_wheels_in_pixi_install_layer(
     assert "pip uninstall -y av" in install_block
     assert "pip install --no-cache-dir /opt/cosmos-curator-wheelhouse/av-17.0.0-*.whl" in install_block
     assert "pip uninstall -y opencv-python-headless opencv-python opencv-contrib-python" in install_block
-    assert 'if [ "$env" = "paddle-ocr" ] || [ "$env" = "unified" ]; then' in install_block
+    assert 'if [ "$env" = "paddle-ocr" ] || [ "$env" = "default" ]; then' in install_block
     assert "pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python-*.whl" in install_block
     assert (
         "pip install --no-cache-dir --no-deps /opt/cosmos-curator-wheelhouse/opencv_python_headless-*.whl"

@@ -1607,8 +1607,8 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         action="store_true",
         default=False,
         help=(
-            "Run artificial text detection on CPU (unified env) instead of GPU (paddle-ocr env).\n"
-            "Use this when the paddle-ocr environment is not installed (e.g. the main/unified image)."
+            "Run artificial text detection on CPU (default env) instead of GPU (paddle-ocr env).\n"
+            "Use this when the paddle-ocr environment is not installed (e.g. the main/default image)."
         ),
     )
     parser.add_argument(

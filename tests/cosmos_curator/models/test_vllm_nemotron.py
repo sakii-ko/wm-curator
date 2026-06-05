@@ -23,13 +23,13 @@ import torch
 from cosmos_curator.core.utils.model import pixi_utils
 from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, VllmConfig
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from cosmos_curator.models.vllm_nemotron import VllmNemotronNano12Bv2VL, make_message, make_prompt
 
     _MODEL_VARIANT = VllmNemotronNano12Bv2VL.model_variant()
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_llm_input_nemotron() -> None:
     """Test make_llm_input_nemotron function."""
     # Mock the tokenizer to return a tensor that can be indexed and converted to list
@@ -63,7 +63,7 @@ def test_make_llm_input_nemotron() -> None:
     assert "mm_processor_kwargs" not in result
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_message() -> None:
     """Test make_message function."""
     prompt = "Test prompt"
@@ -76,7 +76,7 @@ def test_make_message() -> None:
     assert len(content) == 2
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_prompt() -> None:
     """Test make_prompt function."""
     # Mock the tokenizer to return a tensor that can be indexed and converted to list
@@ -103,7 +103,7 @@ def test_make_prompt() -> None:
     assert result["multi_modal_data"]["video"][1]["fps"] == metadata["fps"]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_make_refined_llm_request_nemotron() -> None:
     """Test refine flow creates a new request preserving video (numpy path) and updating prompt."""
     mock_processor = MagicMock()

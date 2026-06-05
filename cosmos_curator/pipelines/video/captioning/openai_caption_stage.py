@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     import openai
 
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import openai
 
 
@@ -130,8 +130,8 @@ class OpenAICaptionStage(SingleInferenceCaptionStage):
 
     @property
     def conda_env_name(self) -> str:
-        """Use the unified environment (openai package lives there)."""
-        return "unified"
+        """Use the default environment (openai package lives there)."""
+        return "default"
 
     @property
     def stage_batch_size(self) -> int:

@@ -686,7 +686,7 @@ def test_processor():
     assert len(tokens.input_ids) > 0
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.skip(reason="Requires model weights and GPU")
 def test_model():
     """Test model can be instantiated."""
@@ -772,7 +772,7 @@ pytest tests/models/test_vllm_mymodel.py -v
 
 # Integration tests (requires GPU and model weights)
 cosmos-curator local launch --curator-path . -- \
-    pixi run --as-is -e unified pytest tests/models/test_vllm_mymodel.py -m env -v
+    pixi run --as-is -e default pytest tests/models/test_vllm_mymodel.py -m env -v
 ```
 
 ### Integration Test
@@ -780,7 +780,7 @@ cosmos-curator local launch --curator-path . -- \
 Test end-to-end captioning:
 
 ```python
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.slow
 def test_mymodel_e2e_captioning():
     """End-to-end test for MyModel plugin."""

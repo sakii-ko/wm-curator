@@ -723,9 +723,9 @@ except Exception:
 
 ### Pixi Environment
 
-vLLM models require the **`unified`** Pixi environment:
+vLLM models require the **`default`** Pixi environment:
 ```bash
-pixi run --as-is -e unified pytest -m env tests/
+pixi run --as-is -e default pytest -m env tests/
 ```
 
 ## Testing Strategies
@@ -765,7 +765,7 @@ pixi run --as-is -e unified pytest -m env tests/
 
 1. **End-to-End Captioning**
    ```python
-   @pytest.mark.env("unified")  # GPU required
+   @pytest.mark.env("default")  # GPU required
    def test_vllm_caption_e2e():
        config = VllmConfig(model_variant="qwen")
        llm = vllm_model(config)

@@ -793,7 +793,7 @@ def _instrument_libraries() -> None:
 
     Only instrumentors whose target library is importable are activated;
     the rest are silently skipped.  This makes the function safe to call
-    in any Pixi environment (e.g. ``default``, ``unified``,
+    in any Pixi environment (e.g. ``default``,
     ``model-download``) regardless of which libraries are installed.
 
     The ``tracing`` feature in ``pixi.toml`` installs all instrumentor

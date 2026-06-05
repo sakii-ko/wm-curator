@@ -24,7 +24,7 @@ import torch
 from cosmos_curator.core.interfaces.model_interface import ModelInterface
 from cosmos_curator.core.utils.model import model_utils, pixi_utils
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from torchvision import transforms  # type: ignore[import-untyped]
     from transformers import CLIPModel
 else:
@@ -43,7 +43,7 @@ class _CLIPImageEmbeddings(torch.nn.Module):
 
         # torchvision transforms that match CLIP preprocessor_config.json:
         if transforms is None:
-            msg = "torchvision.transforms is unavailable; ensure you're in the 'unified' environment"
+            msg = "torchvision.transforms is unavailable; ensure you're in the 'default' environment"
             raise RuntimeError(msg)
         self.transforms = transforms.Compose(
             [
@@ -89,7 +89,7 @@ class CLIPImageEmbeddings(ModelInterface):
             The conda environment name.
 
         """
-        return "unified"
+        return "default"
 
     @property
     def model_id_names(self) -> list[str]:

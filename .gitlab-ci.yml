@@ -1158,12 +1158,12 @@ k8s_gpu_tests:
     - export PIXI_CACHE_DIR=/cache/pixi
     - export CONDA_OVERRIDE_CUDA=13.0.2
     - pushd /opt/cosmos-curator
-    - pixi install --frozen -e default -e unified -e legacy-transformers -e model-download
+    - pixi install --frozen -e default -e legacy-transformers -e model-download
     # If build_xenna_wheels uploaded an artifact, override the pixi-installed
     # cosmos-xenna in each env with the locally-built wheel. No-op otherwise.
     - WHEEL_DIR="${CI_PROJECT_DIR}/cosmos-xenna/target/wheels"
       bash "${CI_PROJECT_DIR}/.gitlab/scripts/install_local_xenna_into_pixi.sh"
-      default unified legacy-transformers model-download
+      default legacy-transformers model-download
     - popd
   script:
     - .gitlab/scripts/k8s_gpu_tests.sh

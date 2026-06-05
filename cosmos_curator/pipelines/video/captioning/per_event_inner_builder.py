@@ -145,7 +145,7 @@ def _build_vllm_async_inner(
         msg = "vllm_async_config is required when event-caption-backend='vllm_async'"
         raise ValueError(msg)
     # Lazy import: vllm_async_stage imports cosmos_xenna's continuous-stage
-    # plumbing and (in the unified env) vLLM itself; keep CPU-only test
+    # plumbing and (in the default env) vLLM itself; keep CPU-only test
     # collection of this module fast by importing only on demand.
     from cosmos_curator.pipelines.video.captioning import vllm_async_stage as vllm_async_module  # noqa: PLC0415
     from cosmos_curator.pipelines.video.captioning.vllm_async_stage import VllmAsyncCaptionStage  # noqa: PLC0415

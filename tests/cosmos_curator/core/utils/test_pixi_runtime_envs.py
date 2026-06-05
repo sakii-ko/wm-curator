@@ -20,23 +20,23 @@ from cosmos_curator.core.utils.pixi_runtime_envs import PixiRuntimeEnv, ray_data
 
 def test_pixi_runtime_env_sets_pixi_executable() -> None:
     """Pixi runtime envs launch Python inside the requested Pixi environment."""
-    env = PixiRuntimeEnv("unified")
+    env = PixiRuntimeEnv("default")
 
-    assert env.get("py_executable") == "pixi run --as-is -e unified python"
+    assert env.get("py_executable") == "pixi run --as-is -e default python"
     assert "env_vars" not in env
 
 
 def test_ray_data_gpu_runtime_env_enables_ray_cuda_masking() -> None:
     """Ray Data GPU runtime envs restore Ray's CUDA device masking."""
-    env = ray_data_gpu_runtime_env("unified")
+    env = ray_data_gpu_runtime_env("default")
 
-    assert env.get("py_executable") == "pixi run --as-is -e unified python"
+    assert env.get("py_executable") == "pixi run --as-is -e default python"
     assert env.get("env_vars") == {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "0"}
 
 
 def test_ray_data_gpu_runtime_env_merges_extra_env_vars() -> None:
     """GPU runtime env callers can pass additional actor environment variables."""
-    env = ray_data_gpu_runtime_env("unified", env_vars={"EXTRA": "1"})
+    env = ray_data_gpu_runtime_env("default", env_vars={"EXTRA": "1"})
 
     assert env["env_vars"] == {
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "0",
@@ -46,6 +46,6 @@ def test_ray_data_gpu_runtime_env_merges_extra_env_vars() -> None:
 
 def test_ray_data_gpu_runtime_env_preserves_cuda_masking_override() -> None:
     """GPU runtime env callers cannot accidentally disable Ray CUDA masking."""
-    env = ray_data_gpu_runtime_env("unified", env_vars={"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
+    env = ray_data_gpu_runtime_env("default", env_vars={"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
 
     assert env["env_vars"] == {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "0"}

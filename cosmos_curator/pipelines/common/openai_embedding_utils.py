@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     import openai
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import openai
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 

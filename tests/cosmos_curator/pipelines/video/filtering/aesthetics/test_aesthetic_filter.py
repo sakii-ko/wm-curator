@@ -35,7 +35,7 @@ EXPECTED_AESTHETIC_SCORE_MIN: float = 3.7989
 TOLERANCE: float = 0.002
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_aesthetic_filter_setup() -> None:
     """Test that the aesthetic filter stage can be set up properly."""
     aesthetic_filter_stage = AestheticFilterStage(
@@ -53,7 +53,7 @@ def test_aesthetic_filter_setup() -> None:
     aesthetic_filter_stage.destroy()
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_aesthetic_score_calculation_mean(
     sample_filtering_task: SplitPipeTask, sequential_runner: RunnerInterface
 ) -> None:
@@ -90,7 +90,7 @@ def test_aesthetic_score_calculation_mean(
     assert "AestheticFilterStage" in result_task.stage_perf
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_aesthetic_score_calculation_min(
     sample_filtering_task: SplitPipeTask, sequential_runner: RunnerInterface
 ) -> None:
@@ -127,7 +127,7 @@ def test_aesthetic_score_calculation_min(
     assert "AestheticFilterStage" in result_task.stage_perf
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("score_threshold", "should_be_filtered"),
     [

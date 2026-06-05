@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from google import genai
     from google.genai import types as genai_types
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import openai
     from google import genai
     from google.api_core.exceptions import DeadlineExceeded
@@ -257,7 +257,7 @@ class ImageOpenAIPrepStage(CuratorStage):
     @property
     def conda_env_name(self) -> str:
         """Return the conda environment name required by this stage."""
-        return "unified"
+        return "default"
 
     @nvtx.annotate("ImageOpenAIPrepStage")  # type: ignore[untyped-decorator]
     def process_data(self, tasks: list[ImagePipeTask]) -> list[ImagePipeTask] | None:
@@ -345,7 +345,7 @@ class ImageGeminiCaptionStage(CuratorStage):
     @property
     def conda_env_name(self) -> str:
         """Return the conda environment name required by this stage."""
-        return "unified"
+        return "default"
 
     @property
     def stage_batch_size(self) -> int:
@@ -479,7 +479,7 @@ class ImageOpenAICaptionStage(CuratorStage):
     @property
     def conda_env_name(self) -> str:
         """Return the conda environment name required by this stage."""
-        return "unified"
+        return "default"
 
     @property
     def stage_batch_size(self) -> int:

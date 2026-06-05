@@ -229,7 +229,7 @@ commitment.
 
 ## Pixi Multi-Environment Support
 
-Stages that require specific Pixi environments (e.g. `default`, `unified`) pass `runtime_env=PixiRuntimeEnv(name)`
+Stages that require specific Pixi environments (e.g. `default`, `legacy-transformers`) pass `runtime_env=PixiRuntimeEnv(name)`
 as a `map_batches` kwarg. This is the same `PixiRuntimeEnv` already used by the Xenna path — it is a
 `ray.runtime_env.RuntimeEnv` subclass that configures `pixi run` as the Python executable.
 

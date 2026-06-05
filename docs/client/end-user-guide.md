@@ -867,14 +867,14 @@ To reduce startup time during focused development, warm up only the environments
 ```bash
 cosmos-curator slurm shell \
   --curator-path . \
-  --pixi-envs model-download,default,unified \
+  --pixi-envs model-download,default \
 ```
 
 Inside the container, run commands with `pixi run --as-is` so Pixi uses the environments installed during startup:
 
 ```bash
 cd /opt/cosmos-curator
-pixi run --as-is -e unified hello-world
+pixi run --as-is -e default hello-world
 ```
 
 Environments not listed with `--pixi-envs` are not installed during startup; install them explicitly inside the

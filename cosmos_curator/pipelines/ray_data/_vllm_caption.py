@@ -501,7 +501,7 @@ def caption_window_rows(
             sampling_config=resolved_vllm_config.sampling_config,
         ),
         num_cpus=resolved_vllm_config.num_cpus_for_prepare,
-        runtime_env=PixiRuntimeEnv("unified"),
+        runtime_env=PixiRuntimeEnv("default"),
     )
 
     processor = _build_processor(
@@ -551,7 +551,7 @@ def _build_processor(
                 model_source=model_source,
                 batch_size=vllm_config.batch_size,
                 concurrency=(1, caption_workers),
-                runtime_env=ray_data_gpu_runtime_env("unified"),
+                runtime_env=ray_data_gpu_runtime_env("default"),
                 should_continue_on_error=True,
                 chat_template_stage=False,
                 tokenize_stage=False,

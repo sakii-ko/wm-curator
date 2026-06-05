@@ -32,7 +32,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
 from cosmos_curator.pipelines.video.utils.decoder_utils import DEFAULT_TRANSCODE_BITRATE_M, get_frame_count
 from cosmos_curator.pipelines.video.utils.windowing_types import WindowFrameInfo
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     from cosmos_curator.pipelines.video.utils.vision_process import fetch_video
 
 

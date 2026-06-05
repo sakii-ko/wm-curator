@@ -217,7 +217,7 @@ def test_image_classifier_stage_allow_list_rejection_includes_reasons() -> None:
     assert "planet_earth" in task.image.qwen_rejection_reasons
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_gpu_image_semantic_filter_rejects_sample_fixture(
     sample_image_task: ImagePipeTask,
     sequential_runner: RunnerInterface,
@@ -256,7 +256,7 @@ def test_gpu_image_semantic_filter_rejects_sample_fixture(
     assert "synthetic image" in image.qwen_rejection_reasons
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_gpu_image_classifier_populates_labels_without_caption_or_embedding_stages(
     sample_image_task: ImagePipeTask,
     sequential_runner: RunnerInterface,

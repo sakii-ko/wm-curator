@@ -290,7 +290,7 @@ command:
     - --output-dir
     - "{output_dir}"
 defaults:
-  pixi_env: unified
+  pixi_env: default
   nodes: 1
   gres: "gpu:8"
   timeout: "02:00:00"

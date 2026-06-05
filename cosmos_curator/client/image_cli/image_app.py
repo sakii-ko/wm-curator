@@ -81,7 +81,7 @@ def build(  # noqa: PLR0913
             ),
             rich_help_panel="pixi_envs",
         ),
-    ] = "cuml,legacy-transformers,sam3,seedvr,unified",
+    ] = "cuml,legacy-transformers,sam3,seedvr",
     use_local_xenna_build: Annotated[
         bool,
         Option(

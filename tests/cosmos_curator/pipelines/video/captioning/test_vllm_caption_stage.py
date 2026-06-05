@@ -40,7 +40,7 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     WindowConfig,
 )
 
-if pixi_utils.is_running_in_env("unified"):
+if pixi_utils.is_running_in_env("default"):
     import torch
 
     from cosmos_curator.models.vllm_interface import _VLLM_PLUGINS, VllmWindowResult
@@ -60,7 +60,7 @@ else:
 
     @attrs.define
     class VllmWindowResult:
-        """Fallback result shape used when the unified environment is unavailable."""
+        """Fallback result shape used when the default environment is unavailable."""
 
         text: str
         finish_reason: str | None
@@ -75,7 +75,7 @@ UUID_2 = UUID("00000000-0000-0000-0000-000000000002")
 UUID_3 = UUID("00000000-0000-0000-0000-000000000003")
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_get_video_from_task_success() -> None:
     """Test get_video_from_task."""
     task = SplitPipeTask(session_id="test-session", video=Video(input_video=Path("test.mp4")))
@@ -83,7 +83,7 @@ def test_get_video_from_task_success() -> None:
     assert video.input_video == Path("test.mp4")
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_get_video_from_task_fail() -> None:
     """Test get_video_from_task."""
     task = 10
@@ -91,7 +91,7 @@ def test_get_video_from_task_fail() -> None:
         get_video_from_task(task)  # type: ignore[type-var]
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("config_variant", "raises"),
     [(k, nullcontext()) for k in _VLLM_MODELS] + [("_fail_model", pytest.raises(ValueError, match=r".*"))],
@@ -107,7 +107,7 @@ def test_vllm_model_interface_model_id_names(config_variant: str, raises: Abstra
             assert isinstance(model_id_name, str)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("tasks", "expected_windows", "raises"),
     [
@@ -239,7 +239,7 @@ def test_get_windows_from_tasks(
             assert actual_window.end_frame == expected_window.end_frame
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("keep_mp4", [False, True])
 def test_free_vllm_inputs_clears_inputs_and_optionally_mp4(*, keep_mp4: bool) -> None:
     """Validate model inputs are removed and mp4_bytes handled per flag."""
@@ -272,7 +272,7 @@ def test_free_vllm_inputs_clears_inputs_and_optionally_mp4(*, keep_mp4: bool) ->
             assert w.mp4_bytes.resolve() is None
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("windows_count", "frames_count", "raises"),
     [
@@ -316,7 +316,7 @@ def test_prep_windows_model_input_assignment(  # noqa: PLR0913
             assert isinstance(llm_input, dict)
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("model_variant", VALID_VARIANTS)
 @patch("cosmos_curator.pipelines.video.captioning.vllm_caption_stage.windowing_utils.make_windows_for_video")
 def test_prep_windows_raises_without_processor(mock_make_windows: MagicMock, model_variant: str) -> None:
@@ -334,7 +334,7 @@ def test_prep_windows_raises_without_processor(mock_make_windows: MagicMock, mod
         stage._prep_windows(video, "prompt")
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("stage2_prompt_text", "stage2_caption"),
     [
@@ -364,7 +364,7 @@ def test_get_stage2_prompts(stage2_prompt_text: str | None, *, stage2_caption: b
             assert prompt is None
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize("verbose", [True, False])
 def test_scatter_captions(*, verbose: bool) -> None:
     """Test _scatter_captions."""
@@ -475,7 +475,7 @@ def test_process_data_skips_caption_quality_flags_for_filter_windows(monkeypatch
     quality_mock.assert_not_called()
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 @pytest.mark.parametrize(
     ("copy_weights_to"),
     [
@@ -562,7 +562,7 @@ def test_setup_on_node_copies_weights(
             assert existing_dirs[0] == mock_source_dir
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_setup_on_node_raises_when_source_directory_missing(tmp_path: Path) -> None:
     """Test VllmCaptionStage.stage_setup_on_node raises error when source directory doesn't exist."""
     # Create VllmConfig with copy_weights_to
@@ -588,7 +588,7 @@ def test_setup_on_node_raises_when_source_directory_missing(tmp_path: Path) -> N
             stage.stage_setup_on_node()
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 def test_setup_on_node_handles_copy_failure(tmp_path: Path) -> None:
     """Test VllmCaptionStage.stage_setup_on_node handles copy failures gracefully."""
     # Create VllmConfig with copy_weights_to

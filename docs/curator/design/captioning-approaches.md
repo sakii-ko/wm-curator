@@ -19,8 +19,8 @@ and how models are integrated.
             VLLM ASYNC (3-stage pipeline)
 +---------------------------------------------------------------+
 |  VllmAsyncPrepStage     VllmAsyncPrompt     VllmAsyncCaption  |
-|  (CPU, unified)         RenderStage          Stage             |
-|  - decode frames        (CPU, unified)      (GPU, unified)     |
+|  (CPU, default)         RenderStage          Stage             |
+|  - decode frames        (CPU, default)      (GPU, default)     |
 |  - build TextPrompt     - Renderer (CPU)    - engine.generate  |
 |                         - TextPrompt ->       (ProcessorInputs)|
 |                           ProcessorInputs   - stage-2 refine   |

@@ -57,9 +57,9 @@ class TestVllmAsyncModel:
         with pytest.raises(ValueError, match="not supported"):
             _VllmAsyncModel("custom-org/my-model")
 
-    def test_conda_env_name_is_unified(self) -> None:
-        """conda_env_name returns 'unified' (where vLLM is installed)."""
-        assert _VllmAsyncModel("qwen").conda_env_name == "unified"
+    def test_conda_env_name_is_default(self) -> None:
+        """conda_env_name returns 'default' (where vLLM is installed)."""
+        assert _VllmAsyncModel("qwen").conda_env_name == "default"
 
     def test_setup_is_noop(self) -> None:
         """setup() succeeds without side effects (engine loads weights)."""
@@ -242,9 +242,9 @@ def _make_stage(*, keep_mp4: bool) -> VllmAsyncCaptionStage:
 
 
 def _stub_normalize_vllm_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub ``_normalize_vllm_result`` so ``_scatter_one`` runs outside ``unified`` env.
+    """Stub ``_normalize_vllm_result`` so ``_scatter_one`` runs outside ``default`` env.
 
-    The real symbol is imported only when the ``unified`` pixi env loads
+    The real symbol is imported only when the ``default`` pixi env loads
     vLLM; mocking it lets the focused ``keep_mp4`` test run in the default
     CPU env without dragging in heavy dependencies.
     """
@@ -650,7 +650,7 @@ class TestIterRequestsEmptyInputsSentinel:
         assert requests[2].stage2_prompt is None
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 class TestAsyncCaptionerEmptyInputsShortCircuits:
     """``_AsyncCaptioner.run`` short-circuits empty-``inputs`` sentinels.
 
@@ -712,7 +712,7 @@ class TestGatherInputsContract:
     payload dicts have exactly one stage-side alias
     (``window.model_input``) until the captioner takes over.
 
-    ``_get_windows_from_tasks`` is only imported in the ``unified``
+    ``_get_windows_from_tasks`` is only imported in the ``default``
     pixi env (it lives behind a conda gate in ``vllm_async_stage``).
     Mocking it lets this contract test run in the default CPU env
     without dragging in vLLM dependencies.
@@ -814,13 +814,13 @@ class TestPayloadAliasRelease:
         assert ref() is not None, "clearing request alone must not release while window.model_input holds it"
 
 
-@pytest.mark.env("unified")
+@pytest.mark.env("default")
 class TestAsyncCaptionerHandleCompletedReleasesInputs:
     """``_AsyncCaptioner._handle_completed`` clears ``req.inputs`` at every terminal path.
 
     Verifies the production ``_handle_completed`` method releases the
     payload-dict alias on every exit branch (success, stage-2 refine,
-    retry exhausted, fatal error).  Requires the ``unified`` env
+    retry exhausted, fatal error).  Requires the ``default`` env
     because ``_AsyncCaptioner`` lives in ``vllm_interface.py``, which
     imports vLLM at module level; local imports inside the test
     helpers keep this file CPU-importable for the rest of the tests.

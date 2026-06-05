@@ -26,15 +26,27 @@ from typing import Any
 import nvtx  # type: ignore[import-untyped]
 import torch
 
-from cosmos_curator.core.utils.model import pixi_utils
+# Heavy GPU libraries are imported lazily (see _ensure_nvcodec_imports) so that simply
+# importing this module does not initialize a CUDA context. This keeps the pipeline driver
+# process off the GPU; the imports only run inside GPU workers that actually decode video.
+cvcuda: Any = None
+Nvc: Any = None
+pixel_format_to_cvcuda_code: dict[Any, Any] = {}
 
-if pixi_utils.is_running_in_env("unified"):
-    import cvcuda  # type: ignore[import-untyped]
-    import PyNvVideoCodec as Nvc  # type: ignore[import-untyped]
 
-    pixel_format_to_cvcuda_code = {
-        Nvc.Pixel_Format.YUV444: cvcuda.ColorConversion.YUV2RGB,  # type: ignore[import-untyped]
-        Nvc.Pixel_Format.NV12: cvcuda.ColorConversion.YUV2RGB_NV12,  # type: ignore[import-untyped]
+def _ensure_nvcodec_imports() -> None:
+    """Import cvcuda / PyNvVideoCodec on first use and populate the module-level globals."""
+    if cvcuda is not None:
+        return
+    import cvcuda as _cvcuda  # type: ignore[import-untyped]  # noqa: PLC0415
+    import PyNvVideoCodec as _Nvc  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    module_globals = globals()
+    module_globals["cvcuda"] = _cvcuda
+    module_globals["Nvc"] = _Nvc
+    module_globals["pixel_format_to_cvcuda_code"] = {
+        _Nvc.Pixel_Format.YUV444: _cvcuda.ColorConversion.YUV2RGB,
+        _Nvc.Pixel_Format.NV12: _cvcuda.ColorConversion.YUV2RGB_NV12,
     }
 
 
@@ -334,6 +346,7 @@ class PyNvcFrameExtractor:
             batch_size: Number of frames to process in each batch.
 
         """
+        _ensure_nvcodec_imports()
         device_id = 0
         cvcuda_stream = cvcuda.Stream()
         self.torch_stream = torch.cuda.ExternalStream(cvcuda_stream.handle)

@@ -139,7 +139,8 @@ def test_developer_commands_run_in_dev_environment_only() -> None:
     environments = pixi_config.get("environments")
     assert isinstance(environments, dict)
     assert "transformers" not in environments
-    assert set(environments["dev"]) == {"core", "transformers", "tracing", "profiling", "dev"}
+    assert set(environments["dev"]) == {"core", "transformers", "unified", "tracing", "profiling", "dev"}
+    assert set(environments["default"]) == {"core", "transformers", "unified", "tracing", "profiling"}
     for environment_name, features in environments.items():
         if environment_name not in {"dev", "dev-hooks"}:
             assert "dev" not in set(features)
@@ -222,7 +223,7 @@ def test_nvcf_split_benchmark_runs_as_package_module() -> None:
 def test_image_cli_default_envs_do_not_include_dev() -> None:
     """Verify image env parsing does not add the developer tooling environment by default."""
     default_envs = set(_parse_envs(""))
-    configured_runtime_envs = set(_parse_envs("cuml,legacy-transformers,sam3,seedvr,unified"))
+    configured_runtime_envs = set(_parse_envs("cuml,legacy-transformers,sam3,seedvr"))
 
     assert "dev" not in default_envs
     assert "dev" not in configured_runtime_envs
