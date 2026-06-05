@@ -2,6 +2,99 @@
 
 ## Latest
 
+## [2.1.0]
+
+### Released
+
+- 2026-06-05
+
+### Breaking Changes
+
+- Make the split-pipeline aggregate caption artifact opt-in:
+  - `v0/all_window_captions.json` is no longer written by default.
+  - Use `--write-all-caption-json` or `write_all_caption_json: true` to emit it.
+  - Remove the old `--no-write-all-caption-json` flag.
+- Change image annotate filter toggles from `enable|disable` arguments to boolean flags:
+  - Use `--semantic-filter` / `--no-semantic-filter`.
+  - Use `--image-classifier` / `--no-image-classifier`.
+- Replace Poetry-based development and package builds with Pixi and `setuptools-scm`:
+  - `poetry.lock`, Poetry dependency groups, and `poetry build` flows are removed.
+  - Package versions are now derived from Git tags.
+  - Use `pixi run build` or `python -m build` for wheel builds.
+- Remove the redundant `transformers` Pixi environment; use `default`, `legacy-transformers`, or
+  `unified` as appropriate.
+
+### Added
+
+- Cosmos 3 omnimodel reasoner-head support for vLLM video captioning and VLM stages, with
+  `cosmos3_nano` and `cosmos3_super` variants.
+- Model registry entries for `nvidia/Cosmos3-Nano`, `nvidia/Cosmos3-Super`, and
+  `BAAI/bge-small-en-v1.5`.
+- Config-driven split-output comparison tool under
+  `cosmos_curator.pipelines.video.split_comparison`, including:
+  - summary, per-clip metadata, aesthetic score, motion score, caption-similarity, and MP4
+    `VideoIndex` comparisons;
+  - Ray Data execution for metadata and video-index comparison stages;
+  - JSON and Lance report output;
+  - a `--print-default-config` helper for bootstrapping comparison configs.
+- `cosmos-curator slurm import-image` command for importing Docker/Enroot images through Slurm,
+  with remote login-node support, output naming, overwrite control, and retries.
+- Image annotate config-mode and NVCF execution support, including flat YAML and nested JSON
+  payloads and an `invoke_image_annotate.json` example.
+- Pixi task aliases for common runtime commands: `hello-world`, `model-download`, `video-pipeline`,
+  and `gputest`.
+- Cross-platform `dev-hooks` Pixi environment for pre-commit hooks, plus `nvtop` and `nvitop` in the
+  developer environment.
+- Storage helpers for resolving `smart_open` parameters and detecting missing local/S3 objects.
+
+### Fixed
+
+- Upgrade `cosmos-xenna` to v0.4.3 and harden vLLM captioning recovery when actors or vLLM
+  `EngineCore` subprocesses die.
+- Reap orphaned vLLM `EngineCore` processes before worker setup and add a liveness watchdog so wedged
+  workers can be replaced by Xenna.
+- Disable worker lifetime recycling for large Cosmos 3 sync vLLM stages to avoid GPU-memory
+  collisions during replacement.
+- Restore the hello-world pipeline launch path after the Pixi task and environment changes.
+- Support image annotate in NVCF asset handling and presigned input/output ZIP workflows.
+- Avoid rebuilding and uploading aggregate split-caption metadata for presigned outputs unless
+  `write_all_caption_json` is enabled.
+- Allow Docker utility tests and pre-commit setup to run on macOS by avoiding Linux-only runtime
+  environments.
+- Run the NVCF split benchmark as a package module so repository-root imports work correctly.
+- Allow newer Click versions after the broken Click 8.3 pin was removed.
+- Remove extra OpenCV runtime dependencies.
+
+### Changed
+
+- Build full Docker images with source-built PyAV/OpenCV wheels linked against the project FFmpeg,
+  and patch the runtime Pixi lockfile to use those local wheels.
+- Move package metadata to dynamic `setuptools-scm` versioning and add CI version-resolution jobs
+  that fetch Git tags before builds.
+- Replace Micromamba/Poetry CI setup with Pixi-based developer, test, wheel, Slurm, benchmark, and
+  package-build flows.
+- Rename model environment helpers from `conda_utils` to `pixi_utils`.
+- Upgrade ruff to 0.15.15 and mypy to 2.1.0.
+- Add `sentence-transformers` to the transformers feature for split-comparison caption embeddings.
+- Isolate single-purpose web-triggered CI pipelines from the default job fan-out.
+- Stream Slurm end-to-end job logs during CI.
+
+### Removed
+
+- Remove the old `cosmos_curator.pipelines.video.output_comparison` implementation and replace it
+  with the new `split_comparison` package.
+
+### Documentation
+
+- Add split-comparison design documentation.
+- Add release-versioning design documentation for tag-derived versions and changelog-backed releases.
+- Add deprecation and default-change design notes.
+- Refresh end-user and developer setup docs for Pixi, `devset.sh`, package builds, task aliases, and
+  GPU monitoring tools.
+- Document Slurm image import and cluster Enroot credential setup.
+- Update split-pipeline references for boolean flags and optional `all_window_captions.json`.
+- Clarify merge request assignee guidance.
+
 ## [2.0.0]
 
 ### Released
