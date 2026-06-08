@@ -40,7 +40,7 @@ variables:
   CURATOR_SLIM_IMAGE: ${CI_REGISTRY_IMAGE}/curator-slim
   CURATOR_DISTRIBUTABLE_IMAGE: ${CI_REGISTRY_IMAGE}/curator-distributable
   CI_BUILDER_IMAGE_REPO: ${CI_REGISTRY_IMAGE}/ci-builder
-  CI_BUILDER_IMAGE: ${CI_BUILDER_IMAGE_REPO}:pixi
+  CI_BUILDER_IMAGE: ${CI_BUILDER_IMAGE_REPO}:latest
   BUILDX_BUILDER_NAME: ci-cosmos-builder
 
   # Pytest configuration

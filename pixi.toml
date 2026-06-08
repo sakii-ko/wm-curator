@@ -213,7 +213,7 @@ transformers = ">=4.57.1,<5.0.0" # Transformers v5 changes apply_chat_template t
 [feature.transformers.pypi-dependencies]
 sentence-transformers = "*" # caption-embedding loader used by split-comparison MetadataStage (BGE small-en-v1.5); installed via PyPI to avoid conda-forge's pytorch downgrade pulling torch back to 2.10.0 and clashing with our pinned torch==2.11.0
 
-# Formerly the standalone `unified` environment; folded into `default` (and `dev`)
+# Formerly the standalone `unified` environment; folded into runtime `default` only.
 [feature.unified.dependencies]
 cuda-libraries-dev = "*"
 libgl = "*" # paddleocr -> opencv-python needs libGL.so.1; previously satisfied transitively via FFmpeg's conda deps
@@ -306,7 +306,7 @@ transformers = ">=5.0.0"
 [environments]
 cuml = ["cuml", "tracing"]
 default = ["core", "transformers", "unified", "tracing", "profiling"]
-dev = ["core", "transformers", "unified", "tracing", "profiling", "dev"]
+dev = ["core", "transformers", "tracing", "profiling", "dev"]
 dev-hooks = { features = ["dev-hooks"], no-default-feature = true }
 legacy-transformers = ["core", "legacy-transformers", "tracing", "profiling"]
 model-download = ["model-download", "tracing"]

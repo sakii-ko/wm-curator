@@ -139,7 +139,7 @@ def test_developer_commands_run_in_dev_environment_only() -> None:
     environments = pixi_config.get("environments")
     assert isinstance(environments, dict)
     assert "transformers" not in environments
-    assert set(environments["dev"]) == {"core", "transformers", "unified", "tracing", "profiling", "dev"}
+    assert set(environments["dev"]) == {"core", "transformers", "tracing", "profiling", "dev"}
     assert set(environments["default"]) == {"core", "transformers", "unified", "tracing", "profiling"}
     for environment_name, features in environments.items():
         if environment_name not in {"dev", "dev-hooks"}:
