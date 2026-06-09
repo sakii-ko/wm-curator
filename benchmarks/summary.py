@@ -18,6 +18,9 @@ import math
 from datetime import UTC, datetime
 from typing import Any, TypeGuard
 
+_CAPTION_QUALITY_SCHEMA_VERSION = 1
+_CAPTION_STATUS_KEYS = ("success", "truncated", "blocked", "error", "skipped")
+
 
 def video_hours_per_day_per_gpu(
     video_seconds: float, runtime_minutes: float, num_nodes: int, gpus_per_node: int
@@ -40,6 +43,69 @@ def video_hours_per_day_per_gpu(
 def _is_finite_number(value: object) -> TypeGuard[int | float]:
     """Return whether a value can be used as a finite numeric input."""
     return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_non_negative_int(value: object) -> TypeGuard[int]:
+    """Return whether a value is a non-bool, non-negative integer."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _caption_quality_absent_metrics() -> dict[str, Any]:
+    """Return metrics for missing or unusable caption quality stats."""
+    return {"caption_quality_stats_present": 0}
+
+
+def make_caption_quality_metrics(stats: object | None) -> dict[str, Any]:
+    """Flatten caption_quality_stats.json counters into benchmark metrics."""
+    if not isinstance(stats, dict):
+        return _caption_quality_absent_metrics()
+
+    schema_version = stats.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != _CAPTION_QUALITY_SCHEMA_VERSION
+    ):
+        return _caption_quality_absent_metrics()
+
+    caption_windows_checked = stats.get("caption_windows_checked")
+    empty_caption_count = stats.get("empty_caption_count")
+    sentinel_caption_count = stats.get("sentinel_caption_count")
+    caption_status_counts = stats.get("caption_status_counts")
+    if (
+        not _is_non_negative_int(caption_windows_checked)
+        or not _is_non_negative_int(empty_caption_count)
+        or not _is_non_negative_int(sentinel_caption_count)
+        or not isinstance(caption_status_counts, dict)
+        or set(caption_status_counts) != set(_CAPTION_STATUS_KEYS)
+    ):
+        return _caption_quality_absent_metrics()
+
+    caption_status_metrics: dict[str, Any] = {}
+    caption_status_values: dict[str, int] = {}
+    caption_status_total = 0
+    for status_key in _CAPTION_STATUS_KEYS:
+        status_count = caption_status_counts[status_key]
+        if not _is_non_negative_int(status_count):
+            return _caption_quality_absent_metrics()
+        caption_status_metrics[f"caption_status_{status_key}"] = status_count
+        caption_status_values[status_key] = status_count
+        caption_status_total += status_count
+
+    if (
+        caption_status_total != caption_windows_checked
+        or empty_caption_count + sentinel_caption_count
+        > caption_status_values["success"] + caption_status_values["truncated"]
+    ):
+        return _caption_quality_absent_metrics()
+
+    return {
+        "caption_quality_stats_present": 1,
+        "caption_windows_checked": caption_windows_checked,
+        **caption_status_metrics,
+        "empty_caption_count": empty_caption_count,
+        "sentinel_caption_count": sentinel_caption_count,
+    }
 
 
 def _make_token_metrics(

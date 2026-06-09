@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from benchmarks.summary import make_summary_metrics, video_hours_per_day_per_gpu
+from benchmarks.summary import make_caption_quality_metrics, make_summary_metrics, video_hours_per_day_per_gpu
 
 
 def _make_required_summary() -> dict[str, Any]:
@@ -41,6 +41,23 @@ def _make_required_summary() -> dict[str, Any]:
         "total_num_clips_with_embeddings": 80,
         "total_num_clips_with_caption": 80,
         "total_num_clips_with_webp": 80,
+    }
+
+
+def _make_caption_quality_stats() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "pipeline": "split_video_pipeline",
+        "caption_windows_checked": 5,
+        "caption_status_counts": {
+            "success": 2,
+            "truncated": 1,
+            "blocked": 1,
+            "error": 1,
+            "skipped": 0,
+        },
+        "empty_caption_count": 1,
+        "sentinel_caption_count": 2,
     }
 
 
@@ -81,6 +98,105 @@ def test_video_hours_per_day_per_gpu(
     """Test video_hours_per_day_per_gpu calculation."""
     result = video_hours_per_day_per_gpu(video_seconds, runtime_minutes, num_nodes, gpus_per_node)
     assert result == expected
+
+
+def test_make_caption_quality_metrics_flattens_valid_stats() -> None:
+    """Flatten schema-v1 caption quality stats into benchmark metric fields."""
+    result = make_caption_quality_metrics(_make_caption_quality_stats())
+
+    assert result == {
+        "caption_quality_stats_present": 1,
+        "caption_windows_checked": 5,
+        "caption_status_success": 2,
+        "caption_status_truncated": 1,
+        "caption_status_blocked": 1,
+        "caption_status_error": 1,
+        "caption_status_skipped": 0,
+        "empty_caption_count": 1,
+        "sentinel_caption_count": 2,
+    }
+
+
+def test_make_caption_quality_metrics_marks_missing_stats_absent() -> None:
+    """Return the absent marker for missing caption quality stats."""
+    assert make_caption_quality_metrics(None) == {"caption_quality_stats_present": 0}
+
+
+def test_make_caption_quality_metrics_marks_non_dict_stats_absent() -> None:
+    """Return the absent marker for parsed JSON that is not an object."""
+    assert make_caption_quality_metrics([]) == {"caption_quality_stats_present": 0}
+
+
+@pytest.mark.parametrize("schema_version", [2, True, "1", None])
+def test_make_caption_quality_metrics_rejects_unrecognized_schema(schema_version: object) -> None:
+    """Reject caption quality stats that do not match the supported schema version."""
+    stats = {**_make_caption_quality_stats(), "schema_version": schema_version}
+
+    assert make_caption_quality_metrics(stats) == {"caption_quality_stats_present": 0}
+
+
+@pytest.mark.parametrize(
+    "caption_status_counts",
+    [
+        None,
+        [],
+        {"success": 5},
+        {
+            "success": 2,
+            "truncated": 1,
+            "blocked": 1,
+            "error": 1,
+            "skipped": 0,
+            "unknown": 0,
+        },
+    ],
+)
+def test_make_caption_quality_metrics_rejects_bad_status_counts(caption_status_counts: object) -> None:
+    """Reject missing or malformed caption status counts."""
+    stats = {**_make_caption_quality_stats(), "caption_status_counts": caption_status_counts}
+
+    assert make_caption_quality_metrics(stats) == {"caption_quality_stats_present": 0}
+
+
+def test_make_caption_quality_metrics_rejects_status_sum_mismatch() -> None:
+    """Reject stats whose status counts do not reconcile with checked windows."""
+    stats = {**_make_caption_quality_stats(), "caption_windows_checked": 6}
+
+    assert make_caption_quality_metrics(stats) == {"caption_quality_stats_present": 0}
+
+
+def test_make_caption_quality_metrics_rejects_empty_sentinel_over_ok_status_count() -> None:
+    """Reject empty and sentinel counters that exceed success plus truncated windows."""
+    stats = {**_make_caption_quality_stats(), "sentinel_caption_count": 3}
+
+    assert make_caption_quality_metrics(stats) == {"caption_quality_stats_present": 0}
+
+
+@pytest.mark.parametrize(
+    ("counter_key", "counter_value"),
+    [
+        ("caption_windows_checked", True),
+        ("caption_windows_checked", "5"),
+        ("caption_windows_checked", -1),
+        ("empty_caption_count", True),
+        ("empty_caption_count", 1.5),
+        ("sentinel_caption_count", -1),
+    ],
+)
+def test_make_caption_quality_metrics_rejects_bad_top_level_counters(counter_key: str, counter_value: object) -> None:
+    """Reject bool, non-int, and negative top-level caption quality counters."""
+    stats = {**_make_caption_quality_stats(), counter_key: counter_value}
+
+    assert make_caption_quality_metrics(stats) == {"caption_quality_stats_present": 0}
+
+
+@pytest.mark.parametrize("status_count", [True, "2", -1])
+def test_make_caption_quality_metrics_rejects_bad_status_counter(status_count: object) -> None:
+    """Reject bool, non-int, and negative caption status counters."""
+    stats = _make_caption_quality_stats()
+    stats["caption_status_counts"]["success"] = status_count
+
+    assert make_caption_quality_metrics(stats) == {"caption_quality_stats_present": 0}
 
 
 @pytest.mark.parametrize(

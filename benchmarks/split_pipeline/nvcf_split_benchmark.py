@@ -24,7 +24,7 @@ from rich import print_json
 
 from benchmarks.cloudevent import make_cloudevent, push_cloudevent
 from benchmarks.secrets import KratosSecrets, NvcfSecrets, S3Secrets
-from benchmarks.summary import make_summary_metrics
+from benchmarks.summary import make_caption_quality_metrics, make_summary_metrics
 from cosmos_curator.client.nvcf_cli.ncf.launcher.nvcf_driver import _get_s3_config_str
 from cosmos_curator.client.nvcf_cli.ncf.launcher.nvcf_function import NvcfFunction, NvcfFunctionAlreadyDeployedError
 
@@ -61,6 +61,26 @@ def _read_summary_json(summary_path: str, transport_params: dict[str, Any]) -> d
     """Load and return summary.json content."""
     with smart_open.open(summary_path, transport_params=transport_params) as f:
         return cast("dict[str, Any]", json.load(f))
+
+
+def _read_optional_json(path: str, transport_params: dict[str, Any]) -> object | None:
+    """Load optional JSON content without failing benchmark reporting."""
+    try:
+        with smart_open.open(path, transport_params=transport_params) as f:
+            data: object = json.load(f)
+            return data
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse optional JSON from {path}: {e!s}")
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Failed to read optional JSON from {path}: {e!s}")
+        return None
+
+
+def _sibling_path(path: str, sibling_filename: str) -> str:
+    """Return sibling path for storage paths that use slash separators."""
+    prefix, separator, _filename = path.rpartition("/")
+    return f"{prefix}{separator}{sibling_filename}" if separator else sibling_filename
 
 
 def _summary_counts_are_valid(summary_path: str, transport_params: dict[str, Any], limit: int) -> bool:
@@ -257,6 +277,17 @@ def report_metrics(  # noqa: PLR0913
     summary_metrics = make_summary_metrics(
         summary_data, num_nodes, gpus_per_node, caption=caption, env="nvcf", splitting_algorithm=splitting_algorithm
     )
+    caption_quality_stats = None
+    if caption:
+        caption_quality_path = _sibling_path(summary_path, "caption_quality_stats.json")
+        caption_quality_stats = _read_optional_json(caption_quality_path, transport_params)
+        caption_quality_metrics = make_caption_quality_metrics(caption_quality_stats)
+        if caption_quality_stats is not None and caption_quality_metrics["caption_quality_stats_present"] == 0:
+            logger.warning(f"Unusable caption quality stats in {caption_quality_path}")
+    else:
+        caption_quality_metrics = make_caption_quality_metrics(None)
+
+    summary_metrics.update(caption_quality_metrics)
     if metrics_metadata:
         summary_metrics.update(metrics_metadata)
 
