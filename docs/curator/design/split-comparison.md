@@ -1,4 +1,4 @@
-# Split Output Comparison — v2 design
+# Split Output Comparison — v3 design (measure / evaluate)
 
 This document is the **orientation + rationale** for the split-comparison
 package. The code is the ground truth for schemas, signatures, and config
@@ -6,209 +6,244 @@ fields; this doc captures the "why" decisions that grep'ing the code won't
 surface (Ray Data shape, Arrow placement, caption batching, what's
 deliberately absent).
 
-## Goal
+## Overview
 
-Compare two output trees from the split video pipeline and report differences
-as a structured report. Two trees are produced by running the same input data
-through two pipeline configurations (e.g. two model versions, two encoder
-settings); the comparator is the audit step that says whether the
-configurations diverged in any material way.
+The comparator audits two output trees from the split video pipeline — the same
+input data run through two pipeline configurations (e.g. two model versions, two
+encoder settings) — and reports, as a structured report, whether they diverged
+in any material way.
 
-The tool covers:
+**v3 splits the per-clip metadata comparison into two phases:**
 
-- A/B compare `summary.json`.
-- Discover the set of clips that appear in either output.
-- Per clip, run two independent passes:
-  - **Stage 1 — metadata comparison.** Compare clip-level metadata JSON:
-    structure parity, aesthetic-score parity, motion-filter-score parity, and
-    model-based caption similarity (caption embeddings + cosine similarity).
-  - **Stage 2 — video index comparison.** Load each side's clip MP4, build a
-    `VideoIndex`, and compare in memory.
-- Group emitted issues by video key in the final report.
+- **Measure** — read both output trees once and record the *comparison outcome*
+  for every comparable element of the clip metadata. This is the expensive pass
+  (BGE caption embedding + metadata JSON I/O).
+- **Evaluate** — load what the measure phase recorded and apply thresholds to
+  produce the report. Cheap, source-free, re-runnable.
 
-Stage 1 is CPU-bound caption embedding + cheap metadata comparisons; Stage 2
-mixes storage IO (MP4 reads) with header-parse + VideoIndex array
-construction, which together come out CPU-significant in practice. They
-have unrelated resource shapes — Stage 1 wants a few fat actors each
-holding a caption-model copy in memory, Stage 2 wants roughly one actor
-per core each holding precomputed smart_open params for the two output
-roots — so they run as two separate Ray Data pipelines independently.
+The point: retuning an evaluation parameter (caption `min_similarity`, a score
+tolerance) or writing a new analysis tool must not re-run the expensive
+measurement pass.
 
-## Module layout
+**The litmus test for which phase a thing belongs to:** evaluate must be a pure,
+cheap function of `(measurements, thresholds)` — no source I/O, no model load.
+Anything that changes the *measured value*, or is expensive to produce, is
+measure; anything that merely *thresholds* a recorded value is evaluate.
 
-```text
-cosmos_curator/pipelines/video/split_comparison/
-  __init__.py              # package marker
-  cli.py                   # argparse: --config PATH / --print-default-config
-  driver.py                # compare_split_outputs + run_metadata_stage / run_video_index_stage
-  clip_discovery.py        # build the pa.Table of clip rows (CLIP_ROW_SCHEMA)
-  summary_compare.py       # A/B summary.json comparison (no Ray)
-  metadata_stage.py        # Stage 1 actor + per-comparison helpers
-  video_index_stage.py     # Stage 2 actor + per-comparison helpers
-  result_model.py          # Issue TypedDict, ISSUE_SCHEMA, make_issue, Report -- output contract
-  config.py                # SplitComparisonConfig (one frozen pydantic v2 model + nested policies)
-  summary_schema.py        # pydantic v2 OutputSummary / Processed / Unprocessed + discriminated union
-  summary_loader.py        # load_summary: read summary.json via smart_open + OutputSummary.from_json
-  report_io.py             # write_report: dispatches on config.report_format (json / lance); report_path used verbatim
+That test sorts every comparison into two kinds:
+
+- **Decoupled** (per-clip metadata): measure records the measurement, evaluate
+  applies a threshold to produce an issue. The retunable case.
+- **Coupled** (summary, video index): no separately-retunable knob, so
+  measure-and-evaluate are fused — they run during measure and their issues are
+  persisted already-evaluated. Retuning a coupled tolerance means re-measuring,
+  the accepted cost of coupling. Future versions of this tool may decouple summary
+  and video index, like with per-clip metadata. It was decided not to decouple
+  those in an effort to limit the scope of the refactor.
+
+Measure emits a **bundle** — a directory of Lance datasets carrying everything evaluate
+needs, so evaluate never touches the source:
+
+1. **Measurements table** — the decoupled per-clip metadata measurements
+   (`MEASUREMENT_SCHEMA`).
+2. **Precomputed coupled issues** — summary + video-index issue tables
+   (`ISSUE_SCHEMA`), already evaluated.
+3. **Run identity** — `output_a/b`, derived source roots, the `videos` table,
+   and clip counts.
+
+(The config knobs split by the same litmus test; see "Config".)
+
+## Data model
+
+`measurement_model.py` defines one **tidy/long** table. Every comparable element
+of the clip metadata becomes one row whose `value` is the comparison outcome.
+
+```python
+MEASUREMENT_SCHEMA: pa.Schema = pa.schema(
+    [
+        ("video_key", pa.string()),
+        ("clip_id", pa.string()),
+        ("window_id", pa.int64()),     # null for clip-level rows; window start_frame otherwise
+        ("model", pa.string()),        # null for non-model measurements; caption/token model otherwise
+        ("measurement_type", pa.string()),
+        ("value", pa.float64()),       # null unless both sides present and neither corrupt
+        ("output_a_present", pa.bool_()),
+        ("output_b_present", pa.bool_()),
+        ("output_a_corrupt", pa.bool_()),
+        ("output_b_corrupt", pa.bool_()),
+    ],
+)
 ```
 
-Tests mirror the module path under `tests/cosmos_curator/pipelines/video/split_comparison/`.
+Composite key: `(video_key, clip_id, window_id, model, measurement_type)`.
 
-## Top-level flow
+**Value semantics by mode.** The mode is a property of the `measurement_type`
+(declared in the field spec):
 
-The two clip stages are **independent Ray Data pipelines that both consume the
-same clip table**, not a chained `.map(...).map(...)` graph. Each stage
-produces a typed issue table; the driver concatenates the three issue tables
-(summary + metadata + video index) into the final `Report`.
+- `*_diff` (tolerance) → `value` = absolute difference.
+- `*_similarity` → `value` = cosine similarity.
+- `*_equal` (equality) → `value` = `1.0` (equal) or `0.0` (not equal).
+
+The underlying A/B values are **not** stored — re-read the source metas for
+specifics. Distributions stay meaningful: `mean(value)` over an `*_equal` type is
+the match rate; `value` over a `*_diff` type is the diff distribution.
+
+**Per-side status — four booleans.** `output_X_present` = the field/JSON exists
+on side X; `output_X_corrupt` = it exists but is unusable (wrong type /
+unparseable). `corrupt` implies `present` (`present=False, corrupt=True` is an
+invalid combo the producer never writes). `value` is non-null **iff**
+`a_present and b_present and not a_corrupt and not b_corrupt`; both sides absent ⇒
+no row. The four bools give which-side for free and represent both-sides-corrupt
+naturally. A clip whose metadata JSON fails to load on a side has no dict to
+walk, so measure emits a single clip-level `clip_metadata` row directly instead
+of per-field rows. This is the one `measurement_type` with no `field_spec` entry
+(it has no field/accessor) — it's produced outside the catalog walk, not by it.
+
+**Field spec.** `field_spec.py` is a catalog — one entry per `measurement_type`
+mapping to `(accessor, mode, scope ∈ {clip, window, filtered_window},
+model-qualified?)`. Measure walks the catalog, not whatever keys the metadata
+dict happens to hold, so:
+
+- fields that legitimately differ are normalized or excluded — `clip_location`
+  embeds the output root and is compared only after stripping `output_a` /
+  `output_b`; `embedding*` is excluded.
+- a span becomes multiple scalar types — `duration_span` →
+  `duration_span_start_diff` + `duration_span_end_diff` (float seconds, so a
+  tiny tolerance rather than equality).
+- the catalog is a closed, stable vocabulary; the `model` column carries the
+  caption/token model (not baked into the type name), and `window_id` carries
+  per-window identity as `"{start_frame}_{end_frame}"` — so a window whose end
+  frame drifts between the two sides no longer aligns and instead surfaces as
+  window-set divergence. A `window_present` membership row per window key records
+  that divergence even when a window produced no caption.
+
+See `field_spec.py` for the authoritative list (score diffs, caption /
+enhanced-caption similarity, count diffs, and the equality set).
+
+## Flow
+
+Measure produces the bundle; evaluate consumes it. A combined `compare` runs
+both back-to-back for the one-shot case.
 
 ```text
-          summary_a.json        summary_b.json
-                │                    │
-                └─────────┬──────────┘
-                          ▼
-                  compare_summaries          (pure Python, no Ray)
-                          │
-                          ▼
-                summary_issues : pa.Table
-                          │
-                          │      (and, in parallel, the clip table)
-                          │
-                  discover_clips ──────────►  clips : pa.Table
-                                                  │
-                                ┌─────────────────┴─────────────────┐
-                                ▼                                   ▼
-                    ┌───────────────────────┐         ┌───────────────────────┐
-                    │ run_metadata_stage    │         │ run_video_index_stage │
-                    │   MetadataStage pool  │         │   VideoIndexStage pool│
-                    │   → pa.Table          │         │   → pa.Table          │
-                    └───────────┬───────────┘         └───────────┬───────────┘
-                                │                                 │
-                  metadata_issues : pa.Table          video_index_issues : pa.Table
-                                │                                 │
-                                └─────────────────┬───────────────┘
-                                                  ▼
-                                       pa.concat_tables
-                                                  │
-                                                  ▼
-                                       Report.issues : pa.Table
+  ── measure ───────────────────────────────────────────────────────────────
+  summary_a/b.json ─► compare_summaries ─► summary_issues (coupled)
+  clips = discover_clips
+        │
+        ├─► run_measure_stage      (MeasureStage pool) ─► measurements : pa.Table
+        └─► run_video_index_stage  (VideoIndexStage pool) ─► video_index_issues (coupled)
+        │
+        ▼
+  bundle = { measurements, summary_issues + video_index_issues, run identity }  ──► Lance
+
+  ── evaluate ──────────────────────────────────────────────────────────────
+  bundle ─► apply thresholds to measurements ─► metadata_issues
+         ─► union with precomputed coupled issues ─► Report.issues ──► Lance report
 ```
 
-Each stage reads the clip table from scratch (`ray.data.from_arrow(clips)`); the
-Ray Data datasets are not shared because of the resource-shape difference
-(CPU-heavy with a held caption model vs. CPU + IO mix on MP4 indexing). Stage 2 is
-skippable via `config.compare_video_index`; the metadata stage runs whenever
-there are any clips. `Report.stages_run` records which stages actually ran so a
-`passed=True` report can't be misread as "everything was checked" when video
-index was disabled.
+The measure stage and the coupled video-index stage run as **two independent Ray
+Data pipelines over the same clip table** (see "Execution rationale"). Evaluate is
+plain Python over the bundle: no Ray, no source reads, no model.
 
-## Stage 1 — metadata
+**Measure stage.** One Ray Data pipeline, one actor pool. Each `MeasureStage`
+actor loads the caption embedding model once at construction (skipped when
+captions are off) and reuses it across every clip routed to it. On each
+`__call__` it reads both outputs' metadata JSON once, then walks the field spec
+to emit `MEASUREMENT_SCHEMA` rows — presence/corruption into the four bools, the
+outcome into `value`. Structural cases (one-sided, corrupt, clip-load failure)
+are encoded in the bools, so no separate issue stream leaves the actor.
+Identical-text caption windows record `value = 1.0` without invoking the model
+(see "Captions").
 
-One Ray Data pipeline, one actor pool. Each `MetadataStage` actor loads the
-caption embedding model once at construction and reuses it across every clip
-routed to it. On each `__call__`, the actor reads the metadata JSON for both
-outputs once; structural parity (one-sidedness, corruption) is enforced at
-read time, then three comparators (aesthetic, motion, captions) run against
-the loaded payloads. See "Caption batching strategy" below for the
-encode-amortization strategy.
+**Coupled comparisons.** These run during measure and emit `ISSUE_SCHEMA` issues
+directly into the bundle:
 
-## Stage 2 — video index
+- **summary** — `compare_summaries` is pure Python over the two loaded summaries
+  (token totals under `summary` tolerances, the rest by equality).
+- **video index** — a Ray Data pipeline with a different resource shape (no
+  caption model; the indexer does enough CPU work per row that the default
+  reserves a full core per actor). Each actor loads both MP4s, builds
+  `VideoIndex` + `VideoMetadata`, and emits one issue per divergent field
+  (`clip_mp4_index_mismatch`, `clip_mp4_metadata_mismatch`,
+  `clip_mp4_index_dtype_mismatch`). Missing / unreadable MP4s map to dedicated
+  codes; the comparator never propagates exceptions.
 
-A second Ray Data pipeline with a different resource shape — no caption
-model in memory, but the indexer does enough CPU work (header parse,
-VideoIndex array build) per row that the default reserves a full core
-per actor. Each `VideoIndexStage` actor precomputes the
-smart_open params for both ``output_a`` and ``output_b`` once at construction
-and holds them as ``self._params_a`` / ``self._params_b``. On each row the
-actor loads both outputs' MP4 in parallel, builds the `VideoIndex` + `VideoMetadata`, and
-emits one issue per divergent field — `clip_mp4_index_mismatch`,
-`clip_mp4_metadata_mismatch`, `clip_mp4_index_dtype_mismatch`. Missing or
-unreadable MP4s map to dedicated issue codes; the comparator never propagates
-exceptions.
+## Execution rationale
 
-## Stage independence
+**Two independent pipelines, not chained.** The measure stage and video-index
+stage run as two separate Ray Data pipelines over the same clip list. Their
+resource shapes are unrelated (CPU-heavy with a held caption model vs CPU + IO on
+MP4 indexing); pipelining one through the other would force the resources onto
+one actor pool or an explicit handoff. They have independent outputs and no
+shared state, so re-running just one is "call the function."
 
-Stages 1 and 2 are run as **two separate Ray Data pipelines over the same clip
-list**, not chained. Both produce flat issue lists. The driver merges them.
-This is deliberate:
+**Where Ray Data earns its keep:**
 
-- The stages have unrelated resource shapes (CPU-heavy with a held model vs
-  CPU + IO mix on MP4 indexing). Pipelining one through the other would force
-  resources to coexist on the same actor pool or force an explicit handoff.
-- They produce independent outputs (issues, no shared state). There's no value
-  to pipelining beyond what Ray Data already does inside one map call.
-- Re-running just one stage (e.g. only video index) becomes "call the
-  function." No plan-variant surgery.
+- **Caption model** — `ActorPoolStrategy` loads the model once per actor and
+  amortizes it across routed clips; the textbook fit.
+- **Per-actor smart_open params** — precomputed at construction and held for the
+  actor's life. Actors are stateful; tasks aren't.
+- **Spilling** — at millions of clips Ray Data spills to disk; a thread pool
+  would fill RAM with results.
 
-## Where Ray Data earns its keep
+It earns nothing on dispatch, plan-variant routing, or sharing loaded data
+between features — all eliminated by design.
 
-- **Stage 1 caption model**: `ActorPoolStrategy` with the model loaded once per
-  actor is the textbook fit. Each actor pays the model-load cost once at
-  construction and amortizes it across the clips routed to it.
-- **Stage 2 per-actor smart_open params**: precomputed once at actor
-  construction and held for the life of the actor. Actors are stateful;
-  tasks aren't. Threads would have to handle this with thread-local storage.
-- **Spilling**: if a future run hits millions of clips, Ray Data spills to
-  disk; a thread pool fills RAM with results.
+**Where Arrow lives (and where it doesn't).** Arrow is the format at the
+**driver / cross-stage boundary**, not deep inside the per-row comparators:
 
-Where it doesn't earn anything: dispatch, plan-variant routing, sharing loaded
-data between features. Those are eliminated by design.
+- `discover_clips` returns `pa.Table`; `ray.data.from_arrow(clips)` keeps blocks
+  Arrow in the object store.
+- Inside an actor's `__call__`, Ray Data hands a `pa.Table` batch; the actor
+  walks rows as plain dicts and dispatches to module-level functions taking plain
+  args, which return `make_measurement(...)` rows or `make_issue(...)` issues —
+  neither sees `pa.RecordBatch`.
+- The actor materializes rows back into a `pa.Table` at the boundary
+  (`MEASUREMENT_SCHEMA` for measure, `ISSUE_SCHEMA` for video-index).
 
-## Where Arrow lives (and where it doesn't)
+The Arrow wins (schema enforcement, columnar groupby/filter, Lance persistence)
+live where they matter — at the driver and in the bundle. Inside the actor, dict
+I/O keeps each function plain Python: readable, unit-testable without Ray.
 
-Arrow is the format at the **driver / cross-stage boundary**, not deep inside
-the per-row comparators:
+## Outputs
 
-- `discover_clips` returns `pa.Table`.
-- `ray.data.from_arrow(clips)` keeps blocks in Arrow format in the object
-  store.
-- Inside a stage actor's `__call__`, Ray Data hands the worker a `pa.Table`
-  batch; the actor walks the rows as plain Python dicts and dispatches per-row
-  to module-level comparator functions. Compare helpers take plain Python args
-  and return `list[Issue]`; they never see `pa.RecordBatch`.
-- The actor materializes its emitted rows back into a `pa.Table` via
-  `pa.Table.from_pylist(..., schema=ISSUE_SCHEMA)` at the boundary.
-- The driver concatenates the three issue tables (summary, metadata, video
-  index) via `pa.concat_tables` and stores the result in `Report.issues`.
+**Issue model — generic-by-mode codes.** The decoupled field set is large, so
+evaluate uses generic-by-mode codes rather than one per field; the specificity
+lives in the issue's `field` (= `measurement_type`) and `details` (value,
+threshold), so `ISSUE_SCHEMA` does not change:
 
-The Arrow wins (schema enforcement, columnar groupby/filter, Parquet/Lance
-persistence) all live where they matter — at the driver, where someone is
-going to query or render the report. Inside the actor, dict I/O keeps each
-comparator plain Python: readable, unit-testable without Ray, easy to
-construct rows via the `make_issue` helper.
+- `measurement_out_of_tolerance` — a `*_diff` row over its `abs_tolerance`.
+- `measurement_not_equal` — a `*_equal` row with `value == 0.0`.
+- `caption_similarity_below_threshold` — a `*_similarity` row under
+  `min_similarity`.
+- `summary_*` and `clip_mp4_*` — the precomputed coupled issues.
 
-## Issue schema design
+Structural codes are derived from the four bools rather than a mode:
 
-`result_model.py` defines `ISSUE_SCHEMA` — a wide Arrow schema where the core
-columns (`code`, `feature`, `video`, `clip`, `field`, `output`) are queryable
-with Arrow compute without any JSON unpacking, plus a `details` column that
-holds a JSON-encoded string carrying the per-code variant tail. The rationale
-for the hybrid:
+| measurement_type tier        | bools                          | issue code                                          |
+|------------------------------|--------------------------------|-----------------------------------------------------|
+| field-level                  | one side present, other absent | `metadata_value_one_sided`                          |
+| field-level                  | a side corrupt                 | `metadata_value_invalid_type` (one per offending side) |
+| `clip_metadata` (clip-level) | one side absent                | `metadata_one_sided`                                |
+| `clip_metadata` (clip-level) | present + corrupt              | `metadata_unreadable`                               |
 
-- Most analytics questions ("how many issues per video?", "what fraction are
-  caption-similarity issues?") only need the core columns. Those stay columnar.
-- The variant tail (e.g. `clip_mp4_index_mismatch` carries field-by-field
-  mismatch records; `caption_similarity_below_threshold` carries
-  `{start_frame, end_frame, similarity, threshold, a, b}`) genuinely doesn't
-  fit a fixed schema. A wide
-  nullable schema with one column per possible detail key would require a
-  schema migration on every new code and leave most rows mostly NULL.
+Filtering "all width mismatches" is a filter on `field`, not `code`.
+`ISSUE_SCHEMA` is wide — core columns (`code`, `feature`, `video`, `clip`,
+`field`, `output`) are queryable without JSON unpacking, plus a JSON-encoded
+`details` tail for per-code variant data (detail rows flattened at the source: 8
+mismatched index fields → 8 rows). `Issue` is a `TypedDict`; the Arrow table is
+canonical; rows are built via `make_issue(...)`.
 
-Detail rows are **flattened at the source**: when a clip has 8 mismatched
-index fields, the stage emits 8 issue rows (one per field), not one row with
-nested mismatches. `group_by("field")` is a one-liner; each row is
-self-contained.
+**Persistence — the Lance bundle.** Measure writes the bundle as a set of Lance
+datasets (mirroring the v2 report's sidecar pattern); JSON is not supported for
+the bundle or the evaluate report. It is self-describing — the run-identity
+sidecar means evaluate (or any downstream analysis) needs no round-trip to
+`summary.json`. Lance handles cloud backends natively (`s3://`, `gs://`, `az://`)
+via `object_store`; local paths get their parent directory materialized first.
 
-`Issue` is a `TypedDict` (not an `attrs` class) — IDE autocomplete only; rows
-are constructed via `make_issue(...)` and the Arrow table is the canonical
-representation. There is no parallel Python class to keep in sync.
-
-## Videos table and source roots
-
-Alongside `issues`, the `Report` carries a second Arrow table named `videos`
-plus two top-level string fields, `source_a` and `source_b`. The split is
-deliberate: source roots are per-side, video keys are per-row, and storing
-the full `source_video` path on every row would repeat the same prefix
-hundreds of times.
+**Videos table and source roots.** Run identity carries a `videos` table plus
+per-side `source_a` / `source_b` roots — per-video data kept out of the per-row
+tables so a root string isn't repeated across thousands of rows.
 
 ```python
 VIDEOS_SCHEMA: pa.Schema = pa.schema(
@@ -218,133 +253,69 @@ VIDEOS_SCHEMA: pa.Schema = pa.schema(
         ("in_b", pa.bool_()),
     ],
 )
-
-@attrs.define(frozen=True)
-class Report:
-    ...
-    source_a: str = ""
-    source_b: str = ""
 ```
 
-Consumers reconstruct a full source path as
-`f"{report.source_a}{row['video_key']}"` (or `source_b`). Per-side presence
-is on the row via `in_a` / `in_b` booleans, so consumers can render
-one-sided videos without inspecting the issues table.
-
-### Trust + assert: how `source_a` / `source_b` get derived
-
-The comparator never asks the user for the source root; it derives it from
-each summary's data. Algorithm per side:
+Consumers reconstruct a full source path by **plain concatenation** —
+`f"{source_a}{row['video_key']}"` (or `source_b`), with no separator inserted or
+stripped. This is exact by construction: `source_a` is each side's
+`source_video` with the `video_key` suffix removed, so whatever separator sits
+between root and key already lives inside one of the two parts — neither a
+trailing separator on `source_a` nor a leading one on `video_key` is required or
+assumed (e.g. `source_video = "s3://b/clips/vid.mp4"`, `video_key = "vid.mp4"` ⇒
+`source_a = "s3://b/clips/"`). The comparator never asks the user for the source
+root; it derives each side by **trust + assert**:
 
 1. Take the first `(video_key, source_video)` entry from `summary.videos`.
-2. Strip `video_key` off the end of `source_video` to recover a candidate
-   root.
-3. Walk every other entry and assert that `root + video_key` reconstructs
-   that row's `source_video`.
+2. Strip `video_key` off the end of `source_video` to recover a candidate root.
+3. Walk every other entry and assert `root + video_key` reconstructs that row's
+   `source_video`.
 
-When the assertion holds, the root is shipped on the Report. When it fails
-(a row's `source_video` doesn't match `root + video_key`), the comparator
-emits a structured `summary_source_layout_inconsistent` issue, leaves that
-side's source root as `""`, and continues with the comparison — the videos
-table itself still ships (it doesn't depend on the roots). Consumers
-treating `source_X == ""` as "source path unknown" handle this gracefully
-without a separate failure mode.
+On success the root ships; on failure the comparator emits a structured
+`summary_source_layout_inconsistent` issue, leaves that side's root `""`, and
+continues (the videos table still ships). This is a string-shape check, not an IO
+existence check — the comparator never opens the source MP4.
 
-This is a string-shape check, not an IO existence check: the comparator
-never opens the source MP4. File availability is left to whoever ends up
-reading the path, and surfaces naturally when `smart_open` fails to open
-it.
+## Captions
 
-### Why a second table instead of a column on `issues`
+**Batching strategy.** The caption model runs on CPU. Two batching levers are in
+scope; a third is rejected:
 
-Source roots and per-video identity are per-video, not per-issue. Folding
-them into the issues table would duplicate the same root string across
-every issue row for a given video — 20k issues / 100 videos = 200x
-redundancy on a multi-MB-range path field. The two-table shape keeps
-`issues` flat and queryable while consumers join on `video_key` when they
-need to reconstruct a source path.
+1. **Cross-clip batching inside one batch.** `MeasureStage` is invoked via
+   `map_batches`; the actor gathers caption-window pairs from every clip in the
+   batch and embeds them in one `model.encode(...)` call, capturing
+   tokenizer-overhead + framework-dispatch savings across N clips. Batch size is
+   `measure_batch_size`; the driver derives block count as
+   `ceil(num_rows / batch_size)`, floored at the worker count.
+2. **Cross-actor parallelism.** `ActorPoolStrategy(size=N)` runs N independent
+   model copies on N CPU workers; embedding parallelizes near-linearly. The
+   worker count defaults to `os.cpu_count() // 2` so co-tenant pipelines aren't
+   starved.
+3. **Per-clip intra-window batching only — not used.** Embedding one clip's few
+   windows per call gives up the cross-clip win for no readability benefit; (1)
+   subsumes it.
 
-### Persistence
+Identical-text windows skip the model entirely (`value = 1.0`), so only divergent
+pairs cost an embedding. If caption comparison becomes the bottleneck, the
+higher-leverage moves are model-side (smaller / quantized model) and embedding
+caches (memoize by `(clip_id, output, prompt_hash)` so re-runs only embed what
+changed) rather than rebatching.
 
-Embedding `source_a` / `source_b` + the `videos` table in the report
-keeps it self-describing — consumers don't need to round-trip to
-`summary.json` to resolve source-video paths, and the report works as a
-standalone audit artifact for anyone passing it around.
-
-`report_io.write_report` writes the videos table alongside `issues` (Lance
-gets a third dataset at `<path>.videos.lance`; JSON gets a top-level
-`videos` array and `source_a` / `source_b` keys). Older reports without
-these fields load with an empty videos table and empty source roots;
-consumers that need source paths surface "source path unknown" rather than
-crashing.
-
-## Caption batching strategy
-
-The Stage 1 caption model runs on CPU. Two batching levers are in scope; a
-third is rejected:
-
-1. **Cross-clip batching inside one batch.** `MetadataStage` is invoked via
-   Ray Data `map_batches`; the actor gathers caption-window pairs from every
-   clip in the batch and embeds them in one `model.encode(...)` call. Captures
-   tokenizer-overhead + framework-dispatch savings across N clips at once.
-   Batch size is the `config.metadata_batch_size` knob, applied directly: the
-   driver derives block count as `ceil(num_rows / batch_size)`, floored at
-   `metadata_workers` so every actor gets at least one block.
-2. **Cross-actor parallelism (size the actor pool).** `ActorPoolStrategy(size=N)`
-   runs N independent model copies on N CPU workers. Caption embedding
-   parallelizes near-linearly across processes; combined with (1) this gets you
-   most of the available speedup. `config.metadata_workers` defaults to
-   `os.cpu_count() // 2` so other pipelines on the same box aren't starved.
-3. **Per-clip intra-window batching only — not used.** Embedding the few
-   caption windows of one clip per call gives up the cross-clip batch win for
-   no readability benefit; (1) subsumes it.
-
-Stage 2 carries the symmetric `config.video_index_batch_size` knob with a
-smaller default — MP4 reads don't batch usefully, so the win is purely
-scheduler-tail: more, smaller batches give Ray Data more rebalancing points.
-Stage 2 has *no* worker-count knob: actor count is derived at run time as
-`floor(cpu_count / video_index_cpus_per_worker)`. Stage 1 exposes
-`metadata_workers` because each actor holds a ~200 MB caption model and so
-worker count has a memory ceiling unrelated to CPU; Stage 2 actors only hold
-smart_open params, so one knob (the CPU reservation) fully determines pool
-size.
-
-If caption comparison becomes the bottleneck, the higher-leverage moves are
-**model-side** (smaller / quantized / distilled model) and **embedding caches**
-(memoize by `(clip_id, output, prompt_hash)` so re-runs only embed what
-changed) rather than rebatching the pipeline.
-
-## Caption model
-
-Stage 1's caption comparator uses
+**Model.** The caption comparator uses
 [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) via
-`sentence-transformers`. The relevant properties:
+`sentence-transformers`:
 
-- ~30M params, 384-dim embeddings. Small enough to load fast and run on CPU
-  at meaningful throughput.
-- Pre-normalized embeddings: cosine similarity reduces to a dot product, no
-  per-call normalization step needed.
-- English-only — matches the project's caption pipeline output.
-- bge-v1.5 does **not** require an instruction prefix for symmetric STS
-  (which is what we're doing: comparing two caption strings). Embed both
-  sides as-is.
+- ~30M params, 384-dim embeddings — loads fast, meaningful CPU throughput.
+- Pre-normalized embeddings: cosine similarity reduces to a dot product.
+- English-only — matches the caption pipeline output.
+- Needs no instruction prefix for symmetric STS (comparing two caption strings);
+  embed both sides as-is.
 
-Per-actor memory: ~200 MB (model + tokenizer + framework overhead). With
-`metadata_workers = os.cpu_count() // 2` on a 16-core box that's ~1.6 GB total
-— fine for a CI/audit host. Adjust the default if you need to share the box
-with something hungrier.
+Per-actor memory ~200 MB; with `os.cpu_count() // 2` workers on a 16-core box
+that's ~1.6 GB total — fine for a CI/audit host.
 
-The model identity is a `CaptionPolicy` knob, not a hard commitment. Swapping
-in another sentence-transformers model is a one-line config change. The
-`min_similarity = 0.85` default is a placeholder — tune once you have baseline
-numbers from a real run.
-
-### Model registration
-
-The model needs an entry in `cosmos_curator/configs/all_models.json` so the
-project's standard model-download path resolves it (and the NGC mirror can
-publish a pinned copy). Weights are pre-downloaded to the project's local
-cache via:
+*Registration.* The model needs an entry in
+`cosmos_curator/configs/all_models.json` so the standard model-download path
+resolves it. Weights are pre-downloaded to the project's local cache:
 
 ```bash
 cosmos-curator local launch --image-name cosmos-curator -- \
@@ -352,7 +323,49 @@ cosmos-curator local launch --image-name cosmos-curator -- \
   --models bge_small_en_v1_5
 ```
 
-`MetadataStage` resolves the cached path via
+The actor resolves the cached path via
 `model_utils.get_local_dir_for_weights_name(model_id)` and loads with
-`local_files_only=True` so the actor never reaches out to Hugging Face at
-runtime — deterministic, network-independent comparison runs.
+`local_files_only=True` — deterministic, network-independent runs.
+
+## Config
+
+`config.py` defines two frozen pydantic v2 models, loaded independently:
+
+- **`MeasureConfig`** — `output_a/b`, `profile_name`, filters (`clip_limit`,
+  `video_key`), ray tuning (measure + video-index workers/cpus/batch),
+  `caption.model_id` + `caption.encode_batch_size`, toggles (`compare_captions`,
+  `compare_video_index`), the coupled tolerances (`summary` + `video_index`), and
+  `measurements_path` (output bundle).
+- **`EvalConfig`** — `measurements_path` (input), `report_path`, and a
+  per-measurement-type threshold table: `abs_tolerance` for `*_diff` types,
+  `min_similarity` for `*_similarity` types. `*_equal` needs no parameter.
+
+`CaptionPolicy` straddles the split: `model_id` / `encode_batch_size` → measure,
+`min_similarity` → eval. The threshold table ships conservative defaults; the
+intended workflow is *measure → inspect the distribution summary → set
+thresholds*. `framerate_*` and `duration_span_*` default to a tiny float
+tolerance.
+
+## Module layout
+
+```text
+cosmos_curator/pipelines/video/split_comparison/
+  __init__.py              # package marker
+  cli.py                   # argparse; measure / evaluate / compare subcommands
+  driver.py                # compare_split_outputs, measure_split_outputs, stage runners
+  clip_discovery.py        # build the pa.Table of clip rows (CLIP_ROW_SCHEMA)
+  summary_compare.py       # A/B summary.json comparison (no Ray; coupled)
+  measure_stage.py         # measure actor + per-clip measurement extraction
+  metadata_stage.py        # (transitional) v2 issue producer; still the active issue path, to be retired once the evaluate phase lands
+  video_index_stage.py     # video index actor + per-comparison helpers (coupled)
+  field_spec.py            # measurement catalog: type -> (accessor, mode, scope, ...)
+  measurement_model.py     # MEASUREMENT_SCHEMA, MeasurementMode, make_measurement, empty_measurements
+  measurement_io.py        # write/load the Lance measurements bundle
+  result_model.py          # Issue TypedDict, ISSUE_SCHEMA, make_issue, Report -- issue/report contract
+  config.py                # MeasureConfig + EvalConfig (frozen pydantic v2) + nested policies
+  summary_schema.py        # pydantic v2 OutputSummary + discriminated union
+  summary_loader.py        # load_summary: read summary.json via smart_open
+```
+
+Tests mirror the module path under
+`tests/cosmos_curator/pipelines/video/split_comparison/`.
