@@ -37,6 +37,7 @@ dependencies = [
     "multidict>=6.6.3,<7",
     "ngcsdk",
     "psutil",
+    "pydantic>=2.12,<3",
     "pyopenssl",
     "pyyaml>=6.0.2,<7",
     "requests>=2.32.3,<3",

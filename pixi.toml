@@ -32,6 +32,7 @@ nvtx = "*"
 openssl = ">=3.6.2,<4.0a0" # default env: bin/openssl (e.g. CVE-2026-28386 fixed in 3.6.2+)
 pandas = "*"
 pyarrow = "*"
+pydantic = ">=2.12,<3"
 pyproj = "*"
 pyjwt = ">=2.12.0" # CVE remediation: require 2.12+ (fixes vs vulnerable 2.11.x in default/core envs)
 pytest = "*"
@@ -64,6 +65,7 @@ webdataset = "*" # conda-forge package pulls in pytorch
 [feature.core.tasks]
 hello-world = "python -m cosmos_curator.pipelines.examples.hello_world_pipeline"
 model-download = "python -m cosmos_curator.core.managers.model_cli download"
+run-pipeline = "python -m cosmos_curator.client.pipeline_cli.pipeline_runtime"
 video-pipeline = "python -m cosmos_curator.pipelines.video.run_pipeline"
 gputest = "pytest -m env tests/cosmos_curator/pipelines tests/cosmos_curator/models"
 
@@ -73,6 +75,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.tools.dependencies]
 pre-commit = "==4.2.0"
+pydantic = ">=2.12,<3"
 python-build = "*"
 setuptools = "<81" # prettytable 2.0 (via ngcsdk) requires pkg_resources, removed in setuptools 81
 setuptools-scm = ">=8"

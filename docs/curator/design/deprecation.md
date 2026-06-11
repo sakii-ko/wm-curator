@@ -7,7 +7,6 @@ reconsidered when they make large OSS runs harder to configure, operate, or cons
 
 The recommended direction is:
 
-- make schema-validated pipeline config files and packaged presets the primary input interface;
 - make scalable tabular metadata and embedding output the default for cluster runs;
 - prune obsolete built-in model variants;
 - keep compatibility artifacts available, but make them explicit;
@@ -38,44 +37,7 @@ the feature is unused.
 
 ## Recommended Changes
 
-### 1. Make schema-validated configs the primary pipeline input
-
-**Recommendation:** Treat JSON/YAML config files as the primary way to configure pipelines. Keep a minimal CLI for
-config execution, validation, inspection, preset selection, and small overrides. Freeze and deprecate the broad
-pipeline-flag surface after schema parity.
-
-**Current behavior:**
-
-- The video `run_pipeline` CLI can already accept a JSON/YAML config file as the sole positional argument.
-- The loader accepts either a nested shape with `pipeline` and `args`, or a flat top-level mapping.
-- Some integrations already use JSON payloads instead of the broad CLI flag surface.
-- The main split pipeline still exposes a very large argparse surface, and new functionality tends to add more flags.
-- Config mode is a pass-through mapping into existing arguments; it is not yet the stable, schema-validated contract.
-
-**Motivation:** The CLI has become an unscalable input surface. It is hard to discover, hard to review in MRs, hard to
-reproduce, and increasingly difficult for agents or orchestration layers to construct correctly. A schema-validated
-pipeline config is the input-side counterpart to Lance on the output side: structured, inspectable, versionable, and
-amenable to compatibility checks.
-
-**Compatibility plan:**
-
-1. Define versioned schemas for split, dedup, shard, and future Ray Data pipeline configs.
-2. Make config validation produce typed errors for unknown fields, invalid combinations, and deprecated fields.
-3. Support layered config resolution: packaged defaults, packaged presets, user config, and CLI overrides.
-4. Add commands to render and validate the resolved config, including preset expansion, before execution.
-5. Keep a small CLI surface around config files:
-   - `validate <config>`;
-   - `render <config> [--set path=value]`;
-   - `run <config>`;
-   - `schema <pipeline>`;
-   - `presets list/show`.
-6. Stop adding long-tail pipeline knobs as top-level argparse flags.
-7. Deprecate the broad per-pipeline flag surface once config mode reaches parity.
-
-This aligns with the Orca design's JSON-in / JSON-out contract. Orca workload definitions can point at pipeline config
-files or config fragments instead of rendering hundreds of individual flags.
-
-### 2. Make Lance the scalable metadata default
+### 1. Make Lance the scalable metadata default
 
 **Recommendation:** Move large-run metadata output to Lance by default after updating built-in readers. Keep per-clip
 JSON as a debug and compatibility mode.
@@ -111,7 +73,7 @@ format that is easier to query, scan, and compact.
 **Open question:** Do any downstream training or dataset ingestion jobs require `metas/v0/*.json` directly? If yes, keep
 `json` as a supported format until those consumers can read Lance or a generated export.
 
-### 3. Prune obsolete model variants
+### 2. Prune obsolete model variants
 
 **Recommendation:** Remove built-in model variants that are obsolete, overlapping, or not part of the recommended
 operating modes. Keep only the default inexpensive fallback and the current recommended model family for each backend or
@@ -140,10 +102,10 @@ Keeping obsolete variants increases maintenance cost without giving users a clea
 5. Prefer explicit model-ID or plugin configuration for experimental checkpoints instead of adding named built-in
    variants.
 
-**Open question:** Which model variants have current benchmark ownership or known production usage that justifies keeping
-them as built-in choices?
+**Open question:** Which model variants have current benchmark ownership or known production usage that justifies
+keeping them as built-in choices?
 
-### 4. Investigate whether caption windowing can be removed
+### 3. Investigate whether caption windowing can be removed
 
 **Recommendation:** Treat windowing as a simplification candidate. Audit first-party readers, writers, and
 training/export consumers, then remove window-level output contracts where they are not required. Keep internal
@@ -175,7 +137,7 @@ The remaining question is whether model batching or training/export paths still 
 **Open question:** Which Cosmos training/export paths still consume window-level videos, captions, or T5 embeddings?
 Those consumers decide whether windowing can be removed from outputs or only hidden from the default output contract.
 
-### 5. Make "all captions" JSON opt-in
+### 4. Make "all captions" JSON opt-in
 
 **Recommendation:** Keep `--write-all-caption-json` as an explicit opt-in artifact.
 
@@ -188,7 +150,7 @@ export command or explicit compatibility artifact, not default output.
 
 **Compatibility plan:** Remove the old negative flag and document how to generate the aggregate from Lance when needed.
 
-### 6. Treat per-clip embedding pickles as compatibility output
+### 5. Treat per-clip embedding pickles as compatibility output
 
 **Recommendation:** Prefer grouped Parquet/Lance embedding output for large runs. Keep per-clip embedding pickles only
 for explicit compatibility or debugging.
@@ -203,7 +165,7 @@ query than tabular embeddings. They should not be the scalable default.
 **Compatibility plan:** Couple this with the metadata output format work: `json` mode can keep old per-clip embedding
 artifacts, while `lance` and `jsonl` modes should use grouped embeddings.
 
-### 7. Merge the `unified` Pixi environment into `default`
+### 6. Merge the `unified` Pixi environment into `default`
 
 **Recommendation:** Fold the common GPU-capable `unified` environment into `default`. Keep specialized environments
 separate only where they protect known dependency conflicts or heavyweight stacks.
@@ -228,10 +190,9 @@ removes many `conda_env_name == "unified"` special cases.
 ## Suggested Rollout
 
 1. Publish this document and collect owner feedback for the open questions.
-2. Add versioned pipeline config schemas, resolved-config validation, and packaged preset support.
-3. Prune obsolete built-in model variants and remove their docs/tests.
-4. Merge `unified` into `default` and update stage environment declarations.
-5. Add `--metadata-output-format`, map old metadata flags to it, and warn when users rely on old metadata flags.
-6. Update first-party readers to support Lance metadata.
-7. Flip scalable config presets to Lance and grouped embeddings.
-8. Audit window consumers and remove or hide window-level output contracts where they are not required.
+2. Prune obsolete built-in model variants and remove their docs/tests.
+3. Merge `unified` into `default` and update stage environment declarations.
+4. Add `--metadata-output-format`, map old metadata flags to it, and warn when users rely on old metadata flags.
+5. Update first-party readers to support Lance metadata.
+6. Flip scalable presets to Lance, grouped embeddings, and no aggregate caption JSON.
+7. Audit window consumers and remove or hide window-level output contracts where they are not required.

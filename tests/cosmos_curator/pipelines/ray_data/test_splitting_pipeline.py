@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the Ray Data splitting pipeline CLI helpers."""
+"""Tests for the Ray Data splitting pipeline execution helpers."""
 
-import argparse
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,20 +24,29 @@ import ray
 from ray.data import ActorPoolStrategy, TaskPoolStrategy
 
 from cosmos_curator.pipelines.ray_data import splitting_pipeline as _pipeline
+from cosmos_curator.pipelines.ray_data.video_split_config import (
+    ResolvedVideoSplitConfig,
+    resolve_video_split_config_data,
+)
 
 
-def _parse_args(*args: str) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    _pipeline._setup_parser(parser)
-    return parser.parse_args(
-        [
-            "--input-video-path",
-            "/input",
-            "--output-clip-path",
-            "/output",
-            *args,
-        ]
-    )
+def _deep_merge(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(target.get(key), dict) and isinstance(value, Mapping):
+            _deep_merge(target[key], value)  # type: ignore[arg-type]
+        else:
+            target[key] = value
+
+
+def _config(**overrides: Any) -> ResolvedVideoSplitConfig:  # noqa: ANN401
+    raw: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "video_split",
+        "input": {"video_path": "/input"},
+        "output": {"clip_path": "/output"},
+    }
+    _deep_merge(raw, overrides)
+    return resolve_video_split_config_data(raw).config
 
 
 class RecordingDataset:
@@ -57,37 +67,12 @@ class RecordingDataset:
         return self
 
 
-def test_progress_cli_defaults_to_disabled_with_boolean_overrides() -> None:
-    """The CLI exposes explicit --progress/--no-progress controls."""
-    assert _parse_args().progress is False
-    assert _parse_args("--progress").progress is True
-    assert _parse_args("--no-progress").progress is False
+def test_caption_vllm_config_uses_resolved_batch_size() -> None:
+    """Caption batch size comes from the resolved config."""
+    config = _pipeline._caption_vllm_config(_config(caption={"batch_size": 9}))
 
-
-def test_caption_batch_size_cli_defaults_to_model_config() -> None:
-    """Caption batch size is optional so model defaults remain authoritative."""
-    assert _parse_args().caption_batch_size is None
-    assert _pipeline._caption_vllm_config(_parse_args()) is None
-
-
-def test_caption_batch_size_cli_overrides_vllm_config() -> None:
-    """Caption batch size maps to the Ray LLM clip-row batch size."""
-    config = _pipeline._caption_vllm_config(_parse_args("--caption-batch-size", "9"))
-
-    assert config is not None
     assert config.model_variant == "qwen"
     assert config.batch_size == 9
-
-
-def test_caption_batch_size_cli_rejects_non_positive_values(capsys: pytest.CaptureFixture[str]) -> None:
-    """Caption batch size must be positive when specified."""
-    for invalid_value in ("0", "-1"):
-        with pytest.raises(SystemExit):
-            _parse_args("--caption-batch-size", invalid_value)
-
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert f"argument --caption-batch-size: '{invalid_value}' must be positive" in captured.err
 
 
 def test_caption_workers_use_downloaded_gpu_count() -> None:
@@ -96,31 +81,6 @@ def test_caption_workers_use_downloaded_gpu_count() -> None:
     assert (
         _pipeline._caption_workers_from_downloaded_gpus(8, _pipeline.VllmConfig(model_variant="qwen", num_gpus=2)) == 4
     )
-
-
-def test_transnetv2_frame_decode_cpus_cli_accepts_positive_integer() -> None:
-    """Decode CPU count maps directly to FFmpeg threads."""
-    assert _parse_args("--transnetv2-frame-decode-cpus-per-worker", "2").transnetv2_frame_decode_cpus_per_worker == 2
-
-
-@pytest.mark.parametrize(
-    ("value", "expected_reason"),
-    [
-        ("1.5", "'1.5' is not an integer"),
-        ("0", "'0' must be positive"),
-    ],
-)
-def test_transnetv2_frame_decode_cpus_cli_rejects_non_integral_values(
-    capsys: pytest.CaptureFixture[str],
-    value: str,
-    expected_reason: str,
-) -> None:
-    """Decode CPU count must be a positive integer; argparse rejects other values cleanly."""
-    with pytest.raises(SystemExit):
-        _parse_args("--transnetv2-frame-decode-cpus-per-worker", value)
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert f"argument --transnetv2-frame-decode-cpus-per-worker: {expected_reason}" in captured.err
 
 
 def test_configure_ray_data_progress_sets_all_progress_flags() -> None:
@@ -160,73 +120,26 @@ def test_download_slots_are_capped_by_input_video_count() -> None:
     assert _pipeline._download_slots_for_video_count(num_videos=100, num_nodes=2) == 32
 
 
-def test_splitting_algorithm_defaults_to_transnetv2() -> None:
-    """The Ray Data pipeline defaults to TransNetV2 like the Xenna split pipeline."""
-    assert _parse_args().splitting_algorithm == "transnetv2"
-    assert _parse_args("--splitting-algorithm", "fixed-stride").splitting_algorithm == "fixed-stride"
-
-
-def test_transnetv2_cli_defaults_match_xenna_splitter() -> None:
-    """Ray Data TransNetV2 CLI defaults should match the existing split pipeline."""
-    args = _parse_args()
-
-    assert args.transnetv2_threshold == 0.4
-    assert args.transnetv2_min_length_s == 2.0
-    assert args.transnetv2_min_length_frames == 48
-    assert args.transnetv2_max_length_s == 60.0
-    assert args.transnetv2_max_length_mode == "stride"
-    assert args.transnetv2_crop_s == 0.5
-    assert args.transnetv2_frame_decode_cpus_per_worker == 3
-    assert args.transnetv2_gpus_per_worker == 0.25
-
-
-@pytest.mark.parametrize(
-    ("flag", "value", "expected_reason"),
-    [
-        ("--transnetv2-threshold", "-0.1", "'-0.1' must be between 0 and 1"),
-        ("--transnetv2-threshold", "1.1", "'1.1' must be between 0 and 1"),
-        ("--transnetv2-threshold", "nan", "'nan' must be finite"),
-        ("--transnetv2-min-length-frames", "0", "'0' must be positive"),
-        ("--transnetv2-min-length-frames", "-1", "'-1' must be positive"),
-        ("--transnetv2-gpus-per-worker", "0", "'0' must be positive"),
-        ("--transnetv2-gpus-per-worker", "-0.25", "'-0.25' must be positive"),
-        ("--transnetv2-gpus-per-worker", "inf", "'inf' must be finite"),
-    ],
-)
-def test_transnetv2_cli_rejects_invalid_values(
-    capsys: pytest.CaptureFixture[str],
-    flag: str,
-    value: str,
-    expected_reason: str,
-) -> None:
-    """TransNetV2 CLI values should fail before Ray startup when impossible."""
-    with pytest.raises(SystemExit):
-        _parse_args(flag, value)
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert f"argument {flag}: {expected_reason}" in captured.err
-
-
 def test_required_model_ids_are_gated_by_selected_features(monkeypatch: pytest.MonkeyPatch) -> None:
     """Download only the models needed by the selected split and captioning features."""
     monkeypatch.setattr(_pipeline, "transnetv2_model_ids", lambda: ["transnetv2"])
     monkeypatch.setattr(_pipeline, "qwen_model_id", lambda: "qwen")
 
-    assert _pipeline._required_model_ids(_parse_args(), generate_captions=True) == ["transnetv2", "qwen"]
+    assert _pipeline._required_model_ids(_config(), generate_captions=True) == ["transnetv2", "qwen"]
     assert _pipeline._required_model_ids(
-        _parse_args("--splitting-algorithm", "fixed-stride"),
+        _config(split={"method": "fixed_stride"}),
         generate_captions=True,
     ) == ["qwen"]
     assert (
         _pipeline._required_model_ids(
-            _parse_args("--splitting-algorithm", "fixed-stride", "--no-generate-captions"),
+            _config(split={"method": "fixed_stride"}, caption={"enabled": False}),
             generate_captions=False,
         )
         == []
     )
 
 
-def test_run_downloads_models_before_ray_startup_and_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_config_downloads_models_before_ray_startup_and_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """Model download side effects must run before Ray startup."""
     events: list[str] = []
 
@@ -234,7 +147,7 @@ def test_run_downloads_models_before_ray_startup_and_discovery(monkeypatch: pyte
         events.append("download")
         return 1
 
-    def fake_required_model_ids(_args: argparse.Namespace, *, generate_captions: bool) -> list[str]:
+    def fake_required_model_ids(_config: ResolvedVideoSplitConfig, *, generate_captions: bool) -> list[str]:
         del generate_captions
         return ["model"]
 
@@ -257,28 +170,16 @@ def test_run_downloads_models_before_ray_startup_and_discovery(monkeypatch: pyte
     monkeypatch.setattr(_pipeline, "_configure_ray_data_progress", fake_configure_ray_data_progress)
     monkeypatch.setattr(_pipeline, "_discover_videos", fake_discover_videos)
 
-    assert _pipeline.run(_parse_args()) == 0
+    assert _pipeline.run_config(_config()) == 0
     assert events == ["ffmpeg", "download", "qwen_source", "ray_init", "progress", "discover"]
 
 
-def test_run_rejects_transnetv2_max_length_below_min_length_before_side_effects(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Impossible TransNetV2 length bounds should fail before Ray or model setup side effects."""
-    monkeypatch.setattr(_pipeline, "assert_ffmpeg_supports_h264", lambda: pytest.fail("unexpected ffmpeg check"))
-    monkeypatch.setattr(_pipeline, "download_models", lambda *_args, **_kwargs: pytest.fail("unexpected download"))
-    monkeypatch.setattr(_pipeline.ray, "init", lambda **_kwargs: pytest.fail("unexpected ray init"))
-
-    with pytest.raises(ValueError, match="Max length is smaller than min length"):
-        _pipeline.run(_parse_args("--transnetv2-min-length-s", "10", "--transnetv2-max-length-s", "5"))
-
-
-def test_run_uses_downloaded_gpu_count_for_caption_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_config_uses_downloaded_gpu_count_for_caption_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     """The caption pool ceiling comes from the model-download GPU count."""
     ds = RecordingDataset()
     captured_caption_kwargs: dict[str, object] = {}
 
-    def fake_required_model_ids(_args: argparse.Namespace, *, generate_captions: bool) -> list[str]:
+    def fake_required_model_ids(_config: ResolvedVideoSplitConfig, *, generate_captions: bool) -> list[str]:
         del generate_captions
         return ["qwen"]
 
@@ -307,16 +208,16 @@ def test_run_uses_downloaded_gpu_count_for_caption_workers(monkeypatch: pytest.M
     monkeypatch.setattr(_pipeline, "caption_window_rows", fake_caption_window_rows)
     monkeypatch.setattr(_pipeline, "write_captioned_metadata_and_summary", lambda *_args, **_kwargs: 1)
 
-    assert _pipeline.run(_parse_args()) == 1
+    assert _pipeline.run_config(_config()) == 1
     assert captured_caption_kwargs["caption_workers"] == 8
 
 
 def test_apply_split_stage_wires_transnetv2_actor_resources() -> None:
     """TransNetV2 should run as a stateful Ray Data actor with declared CPU/GPU resources."""
-    args = _parse_args("--limit-clips", "7")
+    config = _config(split={"limit_clips": 7})
     ds = RecordingDataset()
 
-    result = _pipeline._apply_split_stage(ds, args, download_slots=3)  # type: ignore[arg-type]
+    result = _pipeline._apply_split_stage(ds, config, download_slots=3)  # type: ignore[arg-type]
 
     assert result is ds
     fn, kwargs = ds.map_calls[0]
@@ -344,10 +245,10 @@ def test_apply_split_stage_wires_transnetv2_actor_resources() -> None:
 
 def test_apply_split_stage_keeps_fixed_stride_as_task_pool() -> None:
     """Fixed-stride splitting remains a stateless task transform."""
-    args = _parse_args("--splitting-algorithm", "fixed-stride")
+    config = _config(split={"method": "fixed_stride"})
     ds = RecordingDataset()
 
-    result = _pipeline._apply_split_stage(ds, args, download_slots=2)  # type: ignore[arg-type]
+    result = _pipeline._apply_split_stage(ds, config, download_slots=2)  # type: ignore[arg-type]
 
     assert result is ds
     _, kwargs = ds.map_calls[0]
@@ -360,7 +261,7 @@ def test_apply_split_stage_keeps_fixed_stride_as_task_pool() -> None:
 def test_validate_transnetv2_cluster_resources_fails_without_gpu() -> None:
     """Default TransNetV2 splitting should fail fast when model download found no GPUs."""
     with pytest.raises(ValueError, match="TransNetV2 splitting requires visible GPUs"):
-        _pipeline._validate_transnetv2_cluster_resources(_parse_args(), total_visible_gpus=0)
+        _pipeline._validate_transnetv2_cluster_resources(_config(), total_visible_gpus=0)
 
 
 def test_validate_transnetv2_cluster_resources_accepts_node_fit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -374,25 +275,25 @@ def test_validate_transnetv2_cluster_resources_accepts_node_fit(monkeypatch: pyt
         ],
     )
 
-    _pipeline._validate_transnetv2_cluster_resources(_parse_args(), total_visible_gpus=8)
+    _pipeline._validate_transnetv2_cluster_resources(_config(), total_visible_gpus=8)
 
 
 @pytest.mark.parametrize(
-    ("args", "nodes"),
+    ("config_overrides", "nodes"),
     [
         (
-            ["--transnetv2-gpus-per-worker", "2"],
+            {"split": {"transnetv2": {"gpus_per_worker": 2.0}}},
             [
                 {"Alive": True, "Resources": {"CPU": 16, "GPU": 1}},
                 {"Alive": True, "Resources": {"CPU": 16, "GPU": 1}},
             ],
         ),
         (
-            ["--transnetv2-frame-decode-cpus-per-worker", "16"],
+            {"split": {"transnetv2": {"frame_decode_cpus_per_worker": 16}}},
             [{"Alive": True, "Resources": {"CPU": 8, "GPU": 1}}],
         ),
         (
-            [],
+            {},
             [
                 {"Alive": False, "Resources": {"CPU": 3, "GPU": 0.25}},
                 {"Alive": True, "Resources": {"CPU": 2, "GPU": 0.25}},
@@ -402,19 +303,45 @@ def test_validate_transnetv2_cluster_resources_accepts_node_fit(monkeypatch: pyt
 )
 def test_validate_transnetv2_cluster_resources_rejects_unschedulable_nodes(
     monkeypatch: pytest.MonkeyPatch,
-    args: list[str],
+    config_overrides: dict[str, Any],
     nodes: list[dict[str, object]],
 ) -> None:
     """Aggregate GPUs are not enough when no single node can fit a splitter worker."""
     monkeypatch.setattr(_pipeline.ray, "nodes", lambda: nodes)
 
     with pytest.raises(ValueError, match="at least one live Ray node"):
-        _pipeline._validate_transnetv2_cluster_resources(_parse_args(*args), total_visible_gpus=8)
+        _pipeline._validate_transnetv2_cluster_resources(_config(**config_overrides), total_visible_gpus=8)
 
 
 def test_validate_transnetv2_cluster_resources_skips_fixed_stride() -> None:
     """Fixed-stride splitting should remain usable on CPU-only Ray clusters."""
     _pipeline._validate_transnetv2_cluster_resources(
-        _parse_args("--splitting-algorithm", "fixed-stride"),
+        _config(split={"method": "fixed_stride"}),
         total_visible_gpus=0,
     )
+
+
+def test_module_main_resolves_config_and_set_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The module CLI accepts only a config file plus small --set overrides."""
+    captured: dict[str, ResolvedVideoSplitConfig] = {}
+
+    def fake_run_config(config: ResolvedVideoSplitConfig) -> int:
+        captured["config"] = config
+        return 3
+
+    config_path = tmp_path / "split.yaml"
+    config_path.write_text(
+        """schema_version: 1
+kind: video_split
+input:
+  video_path: /videos
+output:
+  clip_path: /clips
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_pipeline, "run_config", fake_run_config)
+
+    assert _pipeline.main([str(config_path), "--set", "caption.enabled=false"]) == 0
+    assert captured["config"].input.video_path == "/videos"
+    assert captured["config"].caption.enabled is False

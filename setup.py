@@ -51,11 +51,15 @@ dist_dir = "dist"
 pkg_path = Path(build_dir) / name
 src_env_file = Path(name) / "core" / "utils" / "environment.py"
 src_storage_dir = Path(name) / "core" / "utils" / "storage"
+src_pipelines_dir = Path(name) / "pipelines"
+src_ray_data_dir = src_pipelines_dir / "ray_data"
 src_init_file = Path(name) / "__init__.py"
 dst_core_dir = pkg_path / "core"
 dst_utils_dir = dst_core_dir / "utils"
 dst_storage_dir = dst_utils_dir / "storage"
 dst_client_dir = pkg_path / "client"
+dst_pipelines_dir = pkg_path / "pipelines"
+dst_ray_data_dir = dst_pipelines_dir / "ray_data"
 
 # Ensure build directory exists
 Path(build_dir).mkdir(exist_ok=True)
@@ -129,6 +133,8 @@ def build_package() -> None:
         shutil.copy2(src_env_file, dst_utils_dir)
 
     copy_required_files(src_storage_dir, dst_storage_dir, ("__init__.py", "zip_utils.py"))
+    copy_required_files(src_pipelines_dir, dst_pipelines_dir, ("__init__.py",))
+    copy_required_files(src_ray_data_dir, dst_ray_data_dir, ("__init__.py", "video_split_config.py"))
 
     examples_src = Path("examples")
     examples_dst = pkg_path / "examples"

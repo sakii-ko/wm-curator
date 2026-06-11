@@ -490,7 +490,7 @@ def caption_window_rows(
     resolved_window_config = window_config or make_default_window_config()
 
     if caption_workers <= 0:
-        msg = "Captioning requires at least one visible Ray GPU; rerun with --no-generate-captions to split only."
+        msg = "Captioning requires at least one visible Ray GPU; set caption.enabled=false to split only."
         raise RuntimeError(msg)
 
     clip_ds = ds.map(
