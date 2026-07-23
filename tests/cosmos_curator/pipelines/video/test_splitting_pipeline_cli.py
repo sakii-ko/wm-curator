@@ -201,6 +201,57 @@ def test_no_transcode_rejects_clip_byte_features() -> None:
         _assemble_stages(args)
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "expected_flag"),
+    [
+        (["--upload-cds-parquet"], "--upload-cds-parquet"),
+        (["--aesthetic-threshold", "3.5"], "--aesthetic-threshold"),
+        (["--vlm-filter", "enable", "--vlm-filter-endpoint", "openai"], "--vlm-filter-endpoint openai"),
+        (["--video-classifier", "--video-classifier-endpoint", "gemini"], "--video-classifier-endpoint gemini"),
+    ],
+)
+def test_no_transcode_rejects_outputs_that_need_clip_mp4(
+    extra_args: list[str],
+    expected_flag: str,
+) -> None:
+    """No-transcode mode must not silently emit or request nonexistent clip MP4s."""
+    args = _caption_args(["--transcode-encoder", "none", *extra_args])
+
+    with pytest.raises(ValueError, match=expected_flag):
+        _assemble_stages(args)
+
+
+@pytest.mark.parametrize("algorithm", ["internvideo2", "cosmos-embed1-224p"])
+def test_no_transcode_rejects_embedding_backends_that_redecode_clip_bytes(algorithm: str) -> None:
+    """Local embedding frame builders still require encoded clip data for short-clip retries."""
+    args = _caption_args(["--transcode-encoder", "none"])
+    args.generate_embeddings = True
+    args.embedding_algorithm = algorithm
+
+    with pytest.raises(ValueError, match=rf"--embedding-algorithm {algorithm}"):
+        _assemble_stages(args)
+
+
+def test_no_transcode_rejects_remote_source_decode() -> None:
+    """Remote source paths cannot be reopened after no-transcode chunking drops ingest bytes."""
+    args = _caption_args(["--transcode-encoder", "none"])
+    args.input_video_path = "s3://example-bucket/videos"
+
+    with pytest.raises(ValueError, match=r"cannot source-decode remote input.*--generate-captions"):
+        _assemble_stages(args)
+
+
+def test_no_transcode_allows_remote_split_source_span_output() -> None:
+    """Remote input remains valid when the job only writes split spans."""
+    args = _caption_args(["--transcode-encoder", "none", "--no-generate-captions"])
+    args.input_video_path = "s3://example-bucket/videos"
+
+    stages = [_stage_object(stage) for stage in _assemble_stages(args)]
+
+    assert any(isinstance(stage, ClipChunkingStage) for stage in stages)
+    assert not any(isinstance(stage, ClipTranscodingStage) for stage in stages)
+
+
 def test_write_all_caption_json_default_disabled() -> None:
     """Aggregate caption JSON should be opt-in."""
     args = _parser().parse_args([])

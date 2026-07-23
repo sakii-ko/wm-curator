@@ -48,6 +48,7 @@ from cosmos_curator.core.utils.storage.storage_utils import (
     create_path,
     get_full_path,
     is_path_nested,
+    is_remote_path,
     verify_path,
 )
 from cosmos_curator.pipelines.common.model_constraints import PreprocessMode, resolve_preprocess_mode
@@ -394,21 +395,50 @@ def _validate_no_transcode_options(args: argparse.Namespace) -> None:
         for enabled, flag in (
             (args.super_resolution, "--super-resolution"),
             (args.motion_filter != "disable", "--motion-filter"),
+            (args.aesthetic_threshold is not None, "--aesthetic-threshold"),
             (args.artificial_text_filter, "--artificial-text-filter"),
             (args.generate_previews, "--generate-previews"),
             (args.generate_cosmos_predict_dataset, "--generate-cosmos-predict-dataset"),
+            (args.upload_cds_parquet, "--upload-cds-parquet"),
             (args.sam3, "--sam3"),
             (args.event_captioning, "--event-captioning"),
+            (
+                args.generate_embeddings and args.embedding_algorithm != "openai",
+                f"--embedding-algorithm {args.embedding_algorithm}",
+            ),
         )
         if enabled
     ]
     if args.generate_captions and args.captioning_algorithm.lower() in {"gemini", "openai"}:
         incompatible.append(f"--captioning-algorithm {args.captioning_algorithm}")
+    if args.vlm_filter != "disable" and args.vlm_filter_endpoint != "local":
+        incompatible.append(f"--vlm-filter-endpoint {args.vlm_filter_endpoint}")
+    if args.video_classifier and args.video_classifier_endpoint != "local":
+        incompatible.append(f"--video-classifier-endpoint {args.video_classifier_endpoint}")
 
     if incompatible:
         joined = ", ".join(incompatible)
         msg = f"--transcode-encoder none cannot be combined with clip-byte stages: {joined}"
         raise ValueError(msg)
+
+    if is_remote_path(args.input_video_path):
+        source_decode_stages = [
+            flag
+            for enabled, flag in (
+                (args.generate_captions, "--generate-captions"),
+                (args.generate_embeddings, "--generate-embeddings"),
+                (args.vlm_filter != "disable", "--vlm-filter"),
+                (args.video_classifier, "--video-classifier"),
+            )
+            if enabled
+        ]
+        if source_decode_stages:
+            joined = ", ".join(source_decode_stages)
+            msg = (
+                "--transcode-encoder none cannot source-decode remote input in the same job: "
+                f"{joined}. Use a shared local input path or run split/source-span output only."
+            )
+            raise ValueError(msg)
 
 
 def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
@@ -1407,7 +1437,10 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         type=str,
         default="libopenh264",
         choices=["none", "libopenh264", "h264_nvenc"],
-        help="Codec for transcoding clips, or 'none' to retain source path/span references.",
+        help=(
+            "Codec for transcoding clips, or 'none' to retain source path/span references. "
+            "The 'none' mode rejects clip-byte outputs and in-job source decoding from remote inputs."
+        ),
     )
     parser.add_argument(
         "--transcode-encoder-threads",
