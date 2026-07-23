@@ -48,7 +48,7 @@ DEFAULT_VIDEO_EXTENSIONS = frozenset(
     }
 )
 
-_MANIFEST_FIELDS = frozenset(
+_JSONL_FIELDS = frozenset(
     {
         "id",
         "metadata",
@@ -113,7 +113,7 @@ def _remote_relative_path(source: str) -> str:
     return name
 
 
-def _resolve_manifest_source(
+def _resolve_jsonl_source(
     raw_source: str,
     *,
     source_root: SourceRoot,
@@ -156,18 +156,18 @@ def annotation_task_from_mapping(
     mapping; no catalog or second record model is required.
     """
     if any(not isinstance(key, str) for key in record):
-        msg = "manifest field names must be strings"
+        msg = "JSONL field names must be strings"
         raise TypeError(msg)
-    unknown = set(record) - _MANIFEST_FIELDS
+    unknown = set(record) - _JSONL_FIELDS
     if unknown:
-        msg = f"unknown manifest fields: {sorted(unknown)}"
+        msg = f"unknown JSONL fields: {sorted(unknown)}"
         raise ValueError(msg)
 
     raw_source = record.get("path")
     if not isinstance(raw_source, str) or not raw_source.strip():
-        msg = "manifest field 'path' must be a non-empty string"
+        msg = "JSONL field 'path' must be a non-empty string"
         raise ValueError(msg)
-    source, inferred_relative_path = _resolve_manifest_source(
+    source, inferred_relative_path = _resolve_jsonl_source(
         raw_source,
         source_root=source_root,
         require_source_exists=require_source_exists,
@@ -179,12 +179,12 @@ def annotation_task_from_mapping(
     elif isinstance(raw_relative_path, str):
         relative_path = normalize_relative_path(raw_relative_path)
     else:
-        msg = "manifest field 'relative_path' must be a string"
+        msg = "JSONL field 'relative_path' must be a string"
         raise TypeError(msg)
 
     raw_session_id = record.get("id", relative_path)
     if not isinstance(raw_session_id, str) or not raw_session_id.strip():
-        msg = "manifest field 'id' must be a non-empty string"
+        msg = "JSONL field 'id' must be a non-empty string"
         raise ValueError(msg)
 
     merged_metadata = _copy_metadata({} if dataset_metadata is None else dataset_metadata)
@@ -244,25 +244,29 @@ class FilesystemDatasetAdapter:
 
 @attrs.frozen
 class JsonlDatasetAdapter:
-    """Read one local JSON object per line using the shared row-mapping schema."""
+    """Read an optional, plain JSONL input list.
 
-    manifest_path: pathlib.Path = attrs.field(converter=pathlib.Path)
+    This is only a convenience for datasets that cannot be discovered from a
+    directory. It is not a dataset manifest, catalog, or integrity ledger.
+    """
+
+    jsonl_path: pathlib.Path = attrs.field(converter=pathlib.Path)
     source_root: str | pathlib.Path | StoragePrefix | None = None
     require_source_exists: bool = True
     dataset_metadata: dict[str, Any] = attrs.field(factory=dict, converter=_copy_metadata)
 
     def discover(self) -> list[AnnotationTask]:
-        """Return manifest tasks in line order, rejecting duplicate IDs."""
-        manifest_path = self.manifest_path.expanduser().resolve(strict=True)
-        if not manifest_path.is_file():
-            msg = f"JSONL manifest path is not a file: {manifest_path}"
+        """Return tasks in input-list order, rejecting duplicate IDs."""
+        jsonl_path = self.jsonl_path.expanduser().resolve(strict=True)
+        if not jsonl_path.is_file():
+            msg = f"JSONL input path is not a file: {jsonl_path}"
             raise ValueError(msg)
-        source_root = _normalize_source_root(manifest_path.parent if self.source_root is None else self.source_root)
+        source_root = _normalize_source_root(jsonl_path.parent if self.source_root is None else self.source_root)
 
         tasks: list[AnnotationTask] = []
         session_ids: set[str] = set()
-        with manifest_path.open(encoding="utf-8") as manifest:
-            for line_number, line in enumerate(manifest, start=1):
+        with jsonl_path.open(encoding="utf-8") as input_file:
+            for line_number, line in enumerate(input_file, start=1):
                 if not line.strip():
                     continue
                 try:
@@ -274,10 +278,10 @@ class JsonlDatasetAdapter:
                         dataset_metadata=self.dataset_metadata,
                     )
                 except (OSError, TypeError, ValueError) as error:
-                    _raise_jsonl_line_error(manifest_path, line_number, error)
+                    _raise_jsonl_line_error(jsonl_path, line_number, error)
                 if task.session_id in session_ids:
-                    error_msg = f"duplicate manifest id: {task.session_id!r}"
-                    _raise_jsonl_line_error(manifest_path, line_number, ValueError(error_msg))
+                    error_msg = f"duplicate JSONL id: {task.session_id!r}"
+                    _raise_jsonl_line_error(jsonl_path, line_number, ValueError(error_msg))
                 session_ids.add(task.session_id)
                 tasks.append(task)
         return tasks
@@ -302,9 +306,9 @@ def _annotation_task_from_json_value(
 
 
 def _raise_jsonl_line_error(
-    manifest_path: pathlib.Path,
+    jsonl_path: pathlib.Path,
     line_number: int,
     error: Exception,
 ) -> Never:
-    msg = f"{manifest_path}:{line_number}: {error}"
+    msg = f"{jsonl_path}:{line_number}: {error}"
     raise ValueError(msg) from error

@@ -78,7 +78,7 @@ def test_jsonl_adapter_supports_source_hints_and_metadata(tmp_path: Path) -> Non
     second = video_dir / "second.mov"
     first.touch()
     second.touch()
-    manifest = tmp_path / "inputs.jsonl"
+    input_list = tmp_path / "inputs.jsonl"
     rows = [
         {
             "path": "first.mp4",
@@ -94,10 +94,10 @@ def test_jsonl_adapter_supports_source_hints_and_metadata(tmp_path: Path) -> Non
             "metadata": {"scene": "outdoor"},
         },
     ]
-    manifest.write_text("\n" + "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    input_list.write_text("\n" + "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
     tasks = JsonlDatasetAdapter(
-        manifest,
+        input_list,
         source_root=video_dir,
         dataset_metadata={"dataset": "demo", "scene": "default"},
     ).discover()
@@ -125,13 +125,13 @@ def test_jsonl_adapter_supports_source_hints_and_metadata(tmp_path: Path) -> Non
 
 def test_jsonl_adapter_accepts_explicit_remote_sources(tmp_path: Path) -> None:
     """An explicit supported cloud URI should retain the existing StoragePrefix model."""
-    manifest = tmp_path / "remote.jsonl"
-    manifest.write_text(
+    input_list = tmp_path / "remote.jsonl"
+    input_list.write_text(
         json.dumps({"path": "s3://example-bucket/videos/a.mp4", "id": "remote-a"}),
         encoding="utf-8",
     )
 
-    task = JsonlDatasetAdapter(manifest).discover()[0]
+    task = JsonlDatasetAdapter(input_list).discover()[0]
 
     assert isinstance(task.video.input_video, S3Prefix)
     assert task.video.input_path == "s3://example-bucket/videos/a.mp4"
@@ -142,7 +142,7 @@ def test_jsonl_adapter_accepts_explicit_remote_sources(tmp_path: Path) -> None:
     ("row", "match"),
     [
         ({"id": "missing-path"}, "field 'path'"),
-        ({"path": "video.mp4", "unexpected": True}, "unknown manifest fields"),
+        ({"path": "video.mp4", "unexpected": True}, "unknown JSONL fields"),
         ({"path": "video.mp4", "span": [3, 2]}, "0 <= start < end"),
         ({"path": "video.mp4", "stream_index": -1}, "non-negative integer"),
         ({"path": "video.mp4", "rotation_degrees_clockwise": 45}, "multiple of 90"),
@@ -154,21 +154,21 @@ def test_jsonl_adapter_reports_invalid_rows_with_line_number(
     row: dict[str, object],
     match: str,
 ) -> None:
-    """Manifest validation failures should identify the offending line."""
+    """JSONL validation failures should identify the offending line."""
     (tmp_path / "video.mp4").touch()
-    manifest = tmp_path / "invalid.jsonl"
-    manifest.write_text(json.dumps(row), encoding="utf-8")
+    input_list = tmp_path / "invalid.jsonl"
+    input_list.write_text(json.dumps(row), encoding="utf-8")
 
     with pytest.raises(ValueError, match=rf"invalid\.jsonl:1:.*{match}"):
-        JsonlDatasetAdapter(manifest).discover()
+        JsonlDatasetAdapter(input_list).discover()
 
 
 def test_jsonl_adapter_rejects_duplicate_ids(tmp_path: Path) -> None:
-    """Task IDs must remain unique within one manifest."""
+    """Task IDs must remain unique within one JSONL input list."""
     (tmp_path / "a.mp4").touch()
     (tmp_path / "b.mp4").touch()
-    manifest = tmp_path / "duplicate.jsonl"
-    manifest.write_text(
+    input_list = tmp_path / "duplicate.jsonl"
+    input_list.write_text(
         "\n".join(
             (
                 json.dumps({"path": "a.mp4", "id": "same"}),
@@ -178,14 +178,14 @@ def test_jsonl_adapter_rejects_duplicate_ids(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=r"duplicate\.jsonl:2:.*duplicate manifest id"):
-        JsonlDatasetAdapter(manifest).discover()
+    with pytest.raises(ValueError, match=r"duplicate\.jsonl:2:.*duplicate JSONL id"):
+        JsonlDatasetAdapter(input_list).discover()
 
 
 def test_jsonl_adapter_rejects_non_object_lines(tmp_path: Path) -> None:
     """A JSON value is not enough; each row must expose named fields."""
-    manifest = tmp_path / "invalid.jsonl"
-    manifest.write_text(json.dumps(["video.mp4"]), encoding="utf-8")
+    input_list = tmp_path / "invalid.jsonl"
+    input_list.write_text(json.dumps(["video.mp4"]), encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"invalid\.jsonl:1:.*must contain an object"):
-        JsonlDatasetAdapter(manifest).discover()
+        JsonlDatasetAdapter(input_list).discover()
