@@ -19,13 +19,15 @@ import io
 from contextlib import AbstractContextManager, nullcontext
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Self
 
 import av
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from cosmos_curator.pipelines.video.utils import decoder_utils
 from cosmos_curator.pipelines.video.utils.decoder_utils import (
     _make_video_stream,
     decode_video_cpu,
@@ -365,6 +367,30 @@ def test_get_avg_frame_rate(synthetic_video: io.BytesIO) -> None:
     EXPECTED_FPS = 30.0
     fps = get_avg_frame_rate(synthetic_video)
     assert fps == EXPECTED_FPS
+
+
+def test_get_avg_frame_rate_uses_timestamp_intervals_when_header_rate_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timestamp fallback should return frames per second, not seconds per frame."""
+
+    class _Container:
+        streams = SimpleNamespace(video=[SimpleNamespace(average_rate=None)])
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(decoder_utils.av, "open", lambda *_args, **_kwargs: _Container())
+    monkeypatch.setattr(
+        decoder_utils,
+        "get_video_timestamps",
+        lambda *_args, **_kwargs: np.array([1.0, 1.04, 1.08], dtype=np.float32),
+    )
+
+    assert get_avg_frame_rate("video-without-header-rate.ts") == pytest.approx(25.0)
 
 
 @pytest.mark.parametrize(

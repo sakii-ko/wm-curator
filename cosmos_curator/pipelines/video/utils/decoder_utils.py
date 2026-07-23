@@ -497,7 +497,7 @@ def get_avg_frame_rate(
                 error_msg = f"Invalid timestamps: {ts[-1]} - {ts[0]} <= 0"
                 raise ValueError(error_msg)
 
-            avg_frame_rate = (ts[-1] - ts[0]) / num_frames
+            avg_frame_rate = (num_frames - 1) / float(ts[-1] - ts[0])
 
     return avg_frame_rate
 
