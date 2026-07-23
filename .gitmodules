@@ -1,3 +1,6 @@
 [submodule "cosmos-xenna"]
 	path = cosmos-xenna
 	url = https://github.com/nvidia-cosmos/cosmos-xenna.git
+[submodule "third_party/vipe"]
+	path = third_party/vipe
+	url = https://github.com/sakii-ko/wm-curator-vipe.git
