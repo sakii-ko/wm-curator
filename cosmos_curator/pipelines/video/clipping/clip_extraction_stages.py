@@ -164,6 +164,34 @@ def chunk_tasks(tasks: list[SplitPipeTask], num_clips_per_chunk: int, *, verbose
     return output_tasks
 
 
+class ClipChunkingStage(CuratorStage):
+    """Rechunk source-backed clips without creating encoded clip files."""
+
+    def __init__(self, num_clips_per_chunk: int = 32, *, verbose: bool = False) -> None:
+        """Configure the approximate number of eight-second clips per output task."""
+        if num_clips_per_chunk <= 0:
+            msg = f"num_clips_per_chunk must be positive, got {num_clips_per_chunk}"
+            raise ValueError(msg)
+        self._num_clips_per_chunk = num_clips_per_chunk
+        self._verbose = verbose
+
+    @property
+    def resources(self) -> CuratorStageResource:
+        """Return the small CPU allocation needed for task fan-out."""
+        return CuratorStageResource(cpus=0.25)
+
+    def process_data(self, tasks: list[SplitPipeTask]) -> list[SplitPipeTask]:
+        """Drop ingest buffers and fan out clips that keep source path/span references."""
+        for task in tasks:
+            for video in task.videos:
+                video.encoded_data.drop()
+                video.frame_array.drop()
+                video.timestamps = None
+                for clip in video.clips:
+                    clip.encoded_data.drop()
+        return chunk_tasks(tasks, self._num_clips_per_chunk, verbose=self._verbose)
+
+
 class ClipTranscodingStage(CuratorStage):
     """Stage that transcodes video clips into a standardized format.
 

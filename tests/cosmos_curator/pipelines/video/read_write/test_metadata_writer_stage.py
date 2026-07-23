@@ -72,6 +72,42 @@ def _create_stage(output_dir: Path, input_dir: Path, **overrides: object) -> Cli
     return stage
 
 
+def test_source_reference_metadata_omits_nonexistent_clip_location(tmp_path: Path) -> None:
+    """Source-backed metadata should point to the source span, not an absent MP4."""
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    source_path = input_dir / "source.mkv"
+    source_path.write_bytes(b"source")
+    stage = _create_stage(
+        output_dir,
+        input_dir,
+        source_clip_references=True,
+        upload_clips=False,
+        generate_embeddings=False,
+        upload_cds_parquet=False,
+    )
+    clip = Clip(
+        uuid=uuid.uuid4(),
+        source_video=source_path.as_posix(),
+        span=(1.25, 4.5),
+    )
+
+    metadata = stage._make_clip_metadata(
+        clip,
+        VideoMetadata(width=1920, height=1080, framerate=30.0),
+    )
+    stats = stage._write_clip_mp4(clip, "")
+
+    assert metadata["clip_format"] == "source_span"
+    assert metadata["source_video"] == source_path.as_posix()
+    assert metadata["duration_span"] == [1.25, 4.5]
+    assert metadata["valid"] is True
+    assert "clip_location" not in metadata
+    assert stats.num_passed == 1
+    assert stats.num_transcoded == 0
+
+
 class _FailingDeleteClient(storage_client.StorageClient):
     """Storage client stub that raises on delete to exercise cleanup errors."""
 

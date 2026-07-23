@@ -49,6 +49,7 @@ class OutputConfig:
     embedding_algorithm: str = "internvideo2"
     embedding_model_version: str = "unspecified"
     generate_previews: bool = False
+    source_clip_references: bool = False
     caption_models: list[str] = attrs.Factory(list)
     enhanced_caption_models: list[str] = attrs.Factory(list)
     # Safer default for non-captioning callers; split pipeline opts in explicitly when captions run.
@@ -94,6 +95,7 @@ def build_output_stages(config: OutputConfig) -> list[CuratorStage | CuratorStag
                 embedding_algorithm=config.embedding_algorithm,
                 embedding_model_version=config.embedding_model_version,
                 generate_previews=config.generate_previews,
+                source_clip_references=config.source_clip_references,
                 caption_models=config.caption_models,
                 enhanced_caption_models=config.enhanced_caption_models,
                 caption_quality_stats_enabled=config.caption_quality_stats_enabled,

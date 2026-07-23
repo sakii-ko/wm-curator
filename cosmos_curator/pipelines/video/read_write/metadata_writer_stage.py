@@ -91,6 +91,7 @@ class ClipWriterStage(CuratorStage):
         embedding_algorithm: str,
         embedding_model_version: str,
         generate_previews: bool,
+        source_clip_references: bool = False,
         caption_models: list[str] | None = None,
         enhanced_caption_models: list[str] | None = None,
         caption_quality_stats_enabled: bool = False,
@@ -120,6 +121,7 @@ class ClipWriterStage(CuratorStage):
         self._embedding_algorithm = embedding_algorithm
         self._embedding_model_version = embedding_model_version
         self._generate_previews = generate_previews
+        self._source_clip_references = source_clip_references
         self._caption_models = caption_models
         self._enhanced_caption_models = enhanced_caption_models
         self._caption_quality_stats_enabled = caption_quality_stats_enabled
@@ -678,6 +680,11 @@ class ClipWriterStage(CuratorStage):
         filtered: bool = False,
     ) -> ClipStats:
         clip_stats = ClipStats()
+        if self._source_clip_references:
+            if not filtered:
+                clip_stats.num_passed += 1
+            return clip_stats
+
         data = clip.encoded_data.resolve()
         if data is not None:
             dest = self._get_clip_uri(
@@ -816,14 +823,17 @@ class ClipWriterStage(CuratorStage):
             "width_source": video_metadata.width,
             "height_source": video_metadata.height,
             "framerate_source": video_metadata.framerate,
-            "clip_location": str(
+        }
+        if self._source_clip_references:
+            data["clip_format"] = "source_span"
+        else:
+            data["clip_location"] = str(
                 self._get_clip_uri(
                     clip.uuid,
                     self.get_output_path_clips(self._output_path, filtered=filtered),
                     "mp4",
                 )
-            ),
-        }
+            )
 
         clip_metadata = None
         try:
@@ -901,7 +911,10 @@ class ClipWriterStage(CuratorStage):
                 has_caption = True
                 num_caption_windows += 1
             data["windows"].append(curr_window)
-        data["valid"] = bool(clip.encoded_data and len(clip.windows) > 0)
+        if self._source_clip_references:
+            data["valid"] = not clip.errors and clip.duration > 0
+        else:
+            data["valid"] = bool(clip.encoded_data and len(clip.windows) > 0)
         data["has_caption"] = has_caption
         # Per-clip marker only; _write_video_metadata() intentionally does not emit it.
         data["caption_quality_flags_enabled"] = self._caption_quality_flags_enabled

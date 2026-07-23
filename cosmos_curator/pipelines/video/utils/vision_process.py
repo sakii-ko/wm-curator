@@ -113,6 +113,8 @@ def read_video_cpu(
     fps: float,
     num_frames_to_use: int,
     window_range: list[WindowFrameInfo],
+    *,
+    stream_index: int = 0,
 ) -> tuple[torch.Tensor, list[int]]:
     """Read video using PyAv.
 
@@ -121,13 +123,16 @@ def read_video_cpu(
         fps: frames per second
         num_frames_to_use: number of frames to use
         window_range: inclusive frame windows to extract
+        stream_index: Index of the source video stream.
 
     Returns:
         torch.Tensor: the video tensor with shape (T, C, H, W).
         list[int]: the number of frames for each window
 
     """
-    video_fps = get_avg_frame_rate(video_path)
+    video_fps = (
+        get_avg_frame_rate(video_path) if stream_index == 0 else get_avg_frame_rate(video_path, stream_idx=stream_index)
+    )
     idx_list = []
     frame_counts = []
     for window_frame_info in window_range:
@@ -142,7 +147,11 @@ def read_video_cpu(
         idx_list.extend(idx)
         frame_counts.append(nframes)
 
-    video = decode_video_cpu_frame_ids(video_path, idx_list)
+    video = (
+        decode_video_cpu_frame_ids(video_path, idx_list)
+        if stream_index == 0
+        else decode_video_cpu_frame_ids(video_path, idx_list, stream_idx=stream_index)
+    )
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     return video, frame_counts
 
@@ -156,6 +165,7 @@ def fetch_video(  # noqa: PLR0913
     num_frames_to_use: int = 0,
     flip_input: bool = False,
     max_pixels_per_frame: int | None = None,
+    stream_index: int = 0,
 ) -> tuple[torch.Tensor, list[int]]:
     """Load and preprocess video frames from a file.
 
@@ -168,6 +178,7 @@ def fetch_video(  # noqa: PLR0913
         num_frames_to_use: Number of frames to extract (0 for all).
         flip_input: Whether to flip frames horizontally.
         max_pixels_per_frame: Optional fixed per-frame resize upper bound.
+        stream_index: Index of the source video stream.
 
     Returns:
         Tuple of (processed frames tensor, frame counts for each window).
@@ -176,12 +187,21 @@ def fetch_video(  # noqa: PLR0913
     preprocess_mode = PreprocessMode(preprocess_mode)
     if window_range is None:
         window_range = []
-    video, frame_counts = read_video_cpu(
-        video_path,
-        sampling_fps,
-        num_frames_to_use,
-        window_range,
-    )
+    if stream_index == 0:
+        video, frame_counts = read_video_cpu(
+            video_path,
+            sampling_fps,
+            num_frames_to_use,
+            window_range,
+        )
+    else:
+        video, frame_counts = read_video_cpu(
+            video_path,
+            sampling_fps,
+            num_frames_to_use,
+            window_range,
+            stream_index=stream_index,
+        )
     nframes, _, height, width = video.shape
 
     max_pixels = max_pixels_per_frame

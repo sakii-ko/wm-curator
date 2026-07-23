@@ -76,6 +76,7 @@ from cosmos_curator.pipelines.video.captioning.vllm_async_config import (
     add_vllm_async_cli_args,
     build_vllm_async_config,
 )
+from cosmos_curator.pipelines.video.clipping.clip_extraction_stages import ClipChunkingStage
 from cosmos_curator.pipelines.video.clipping.clipping_builders import (
     FixedStrideSplitConfig,
     FrameExtractionConfig,
@@ -383,6 +384,33 @@ def _validate_deprecated_vllm_preprocess_args(args: argparse.Namespace) -> None:
         raise ValueError(msg)
 
 
+def _validate_no_transcode_options(args: argparse.Namespace) -> None:
+    """Reject stages that require materialized clip video bytes."""
+    if args.transcode_encoder != "none":
+        return
+
+    incompatible = [
+        flag
+        for enabled, flag in (
+            (args.super_resolution, "--super-resolution"),
+            (args.motion_filter != "disable", "--motion-filter"),
+            (args.artificial_text_filter, "--artificial-text-filter"),
+            (args.generate_previews, "--generate-previews"),
+            (args.generate_cosmos_predict_dataset, "--generate-cosmos-predict-dataset"),
+            (args.sam3, "--sam3"),
+            (args.event_captioning, "--event-captioning"),
+        )
+        if enabled
+    ]
+    if args.generate_captions and args.captioning_algorithm.lower() in {"gemini", "openai"}:
+        incompatible.append(f"--captioning-algorithm {args.captioning_algorithm}")
+
+    if incompatible:
+        joined = ", ".join(incompatible)
+        msg = f"--transcode-encoder none cannot be combined with clip-byte stages: {joined}"
+        raise ValueError(msg)
+
+
 def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
     args: argparse.Namespace,
 ) -> list[CuratorStage | CuratorStageSpec]:
@@ -399,6 +427,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
 
     """
     _validate_deprecated_vllm_preprocess_args(args)
+    _validate_no_transcode_options(args)
 
     stages: list[CuratorStage | CuratorStageSpec] = []
     # Keep caption-quality controls explicit; writer collection and summary emission use the same CLI request.
@@ -462,23 +491,31 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
         error_msg = f"{args.splitting_algorithm} algorithm type not implemented."
         raise NotImplementedError(error_msg)
 
-    # --- Transcode (always) ---
-    stages.extend(
-        build_transcode_stages(
-            TranscodeConfig(
-                num_cpus_per_worker=args.transcode_cpus_per_worker,
-                encoder=args.transcode_encoder,
-                encoder_threads=args.transcode_encoder_threads,
-                encode_batch_size=args.transcode_ffmpeg_batch_size,
-                use_hwaccel=args.transcode_use_hwaccel,
-                use_input_bit_rate=args.transcode_use_input_video_bit_rate,
+    # --- Materialize clips or retain source path/span references ---
+    if args.transcode_encoder == "none":
+        stages.append(
+            ClipChunkingStage(
                 num_clips_per_chunk=args.clip_re_chunk_size,
-                max_output_frames=args.transcode_max_output_frames,
                 verbose=args.verbose,
-                perf_profile=args.perf_profile,
             )
         )
-    )
+    else:
+        stages.extend(
+            build_transcode_stages(
+                TranscodeConfig(
+                    num_cpus_per_worker=args.transcode_cpus_per_worker,
+                    encoder=args.transcode_encoder,
+                    encoder_threads=args.transcode_encoder_threads,
+                    encode_batch_size=args.transcode_ffmpeg_batch_size,
+                    use_hwaccel=args.transcode_use_hwaccel,
+                    use_input_bit_rate=args.transcode_use_input_video_bit_rate,
+                    num_clips_per_chunk=args.clip_re_chunk_size,
+                    max_output_frames=args.transcode_max_output_frames,
+                    verbose=args.verbose,
+                    perf_profile=args.perf_profile,
+                )
+            )
+        )
 
     # --- Super-resolution (optional) ---
     if args.super_resolution:
@@ -964,7 +1001,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
                 output_path=args.output_clip_path,
                 input_path=args.input_video_path,
                 output_s3_profile_name=args.output_s3_profile_name,
-                upload_clips=args.upload_clips,
+                upload_clips=args.upload_clips and args.transcode_encoder != "none",
                 upload_clip_info_in_chunks=args.upload_clip_info_in_chunks,
                 upload_clip_info_in_lance=args.upload_clip_info_in_lance,
                 upload_cds_parquet=args.upload_cds_parquet,
@@ -973,6 +1010,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
                 embedding_algorithm=args.embedding_algorithm,
                 embedding_model_version=embedding_model_version,
                 generate_previews=args.generate_previews,
+                source_clip_references=args.transcode_encoder == "none",
                 caption_models=[args.captioning_algorithm],
                 enhanced_caption_models=[args.enhance_captions_lm_variant],
                 # V1 root aggregation reads flat per-video metadata; omit multi-camera session layout for now.
@@ -1015,7 +1053,8 @@ def _split(args: argparse.Namespace) -> None:
 
     """
     validate_stage_replay_args(args)
-    assert_ffmpeg_supports_h264()
+    if args.transcode_encoder != "none":
+        assert_ffmpeg_supports_h264()
 
     zero_start = time.time()
     input_tasks, input_videos_relative, _, num_input_videos_selected = build_input_data(args)
@@ -1367,8 +1406,8 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         "--transcode-encoder",
         type=str,
         default="libopenh264",
-        choices=["libopenh264", "h264_nvenc"],
-        help="Codec for transcoding clips; None to skip transocding.",
+        choices=["none", "libopenh264", "h264_nvenc"],
+        help="Codec for transcoding clips, or 'none' to retain source path/span references.",
     )
     parser.add_argument(
         "--transcode-encoder-threads",

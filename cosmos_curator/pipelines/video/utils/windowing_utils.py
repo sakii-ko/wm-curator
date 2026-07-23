@@ -14,6 +14,7 @@
 # limitations under the License.
 """Utilities which are used in multiple places in the pipeline and/or are unit-tested."""
 
+import pathlib
 import subprocess
 
 import numpy as np
@@ -21,6 +22,7 @@ import numpy.typing as npt
 import torch
 from loguru import logger
 
+from cosmos_curator.core.sensors.sensors.camera_sensor import CameraSensor
 from cosmos_curator.core.utils.config.operation_context import make_pipeline_named_temporary_file
 from cosmos_curator.core.utils.model import pixi_utils
 from cosmos_curator.pipelines.common.model_constraints import PreprocessMode
@@ -30,7 +32,11 @@ from cosmos_curator.pipelines.video.utils.data_model import (
     Window,
     WindowConfig,
 )
-from cosmos_curator.pipelines.video.utils.decoder_utils import DEFAULT_TRANSCODE_BITRATE_M, get_frame_count
+from cosmos_curator.pipelines.video.utils.decoder_utils import (
+    DEFAULT_TRANSCODE_BITRATE_M,
+    get_avg_frame_rate,
+    get_frame_count,
+)
 from cosmos_curator.pipelines.video.utils.windowing_types import WindowFrameInfo
 
 if pixi_utils.is_running_in_env("default"):
@@ -358,6 +364,83 @@ def split_video_into_windows(  # noqa: PLR0913
         return mp4_bytes_list, video_frames, windows
 
 
+def _source_frame_bounds(
+    source_path: pathlib.Path,
+    span: tuple[float, float],
+    stream_index: int,
+) -> tuple[int, int]:
+    """Return the half-open native frame range for a source-relative time span."""
+    if span[0] < 0 or span[1] <= span[0]:
+        msg = f"Expected a positive source span, got {span}"
+        raise ValueError(msg)
+
+    try:
+        sensor = CameraSensor(source_path, stream_idx=stream_index)
+        start_ns = sensor.start_ns + round(span[0] * 1_000_000_000)
+        stop_ns = sensor.start_ns + round(span[1] * 1_000_000_000)
+        frame_start = int(np.searchsorted(sensor.timestamps_ns, start_ns, side="left"))
+        frame_stop = int(np.searchsorted(sensor.timestamps_ns, stop_ns, side="left"))
+        return frame_start, min(frame_stop, len(sensor.timestamps_ns))
+    except Exception as error:  # noqa: BLE001
+        # Header indexes are not available for every container (notably MPEG-TS).
+        # A CFR approximation still lets PyAV decode those sources without first
+        # materializing a transcoded clip.
+        logger.debug(f"Falling back to average-rate source span indexing for {source_path}: {error}")
+        fps = get_avg_frame_rate(source_path, stream_idx=stream_index)
+        total_frames = get_frame_count(source_path, stream_idx=stream_index)
+        frame_start = max(0, int(np.floor(span[0] * fps)))
+        frame_stop = min(total_frames, int(np.ceil(span[1] * fps)))
+        return frame_start, frame_stop
+
+
+def split_source_video_into_windows(  # noqa: PLR0913
+    source_path: pathlib.Path,
+    span: tuple[float, float],
+    window_size: int,
+    remainder_threshold: int,
+    sampling_fps: float,
+    *,
+    preprocess_mode: PreprocessMode,
+    return_video_frames: bool,
+    stream_index: int = 0,
+    rotation_degrees_clockwise: int | None = None,
+    num_frames_to_use: int = 0,
+    max_pixels_per_frame: int | None = None,
+) -> tuple[list[bytes | None], list[torch.Tensor | None], list[WindowFrameInfo]]:
+    """Decode caption windows directly from a local source video and clip span."""
+    frame_start, frame_stop = _source_frame_bounds(source_path, span, stream_index)
+    windows = compute_windows(frame_stop - frame_start, window_size, remainder_threshold)
+    if not windows:
+        return [], [], []
+
+    video_frames: list[torch.Tensor | None] = []
+    if return_video_frames:
+        source_windows = [
+            WindowFrameInfo(start=frame_start + window.start, end=frame_start + window.end) for window in windows
+        ]
+        video, frame_counts = fetch_video(
+            str(source_path),
+            sampling_fps=sampling_fps,
+            window_range=source_windows,
+            preprocess_mode=preprocess_mode,
+            num_frames_to_use=num_frames_to_use,
+            max_pixels_per_frame=max_pixels_per_frame,
+            stream_index=stream_index,
+        )
+        if rotation_degrees_clockwise not in {None, 0, 90, 180, 270}:
+            msg = f"rotation_degrees_clockwise must be one of 0, 90, 180, or 270, got {rotation_degrees_clockwise}"
+            raise ValueError(msg)
+        if rotation_degrees_clockwise:
+            video = torch.rot90(video, k=-(rotation_degrees_clockwise // 90), dims=(-2, -1))
+        index = 0
+        for count in frame_counts:
+            video_frames.append(video[index : index + count])
+            index += count
+
+    video_frames.extend([None] * (len(windows) - len(video_frames)))
+    return [None] * len(windows), video_frames, windows
+
+
 def _make_windows_for_clip(  # noqa: PLR0913
     clip: Clip,
     config: WindowConfig,
@@ -367,6 +450,9 @@ def _make_windows_for_clip(  # noqa: PLR0913
     preprocess_mode: PreprocessMode = PreprocessMode.CURATOR,
     keep_mp4: bool = False,
     return_frames: bool = True,
+    source_path: pathlib.Path | None = None,
+    stream_index: int = 0,
+    rotation_degrees_clockwise: int | None = None,
 ) -> tuple[list[Window], list[torch.Tensor]]:
     """Make windows for a clip.
 
@@ -378,6 +464,9 @@ def _make_windows_for_clip(  # noqa: PLR0913
         preprocess_mode: Owner of resize/rescale/normalize for returned video frames.
         keep_mp4: Whether to keep the MP4.
         return_frames: Whether to decode and return frame tensors.
+        source_path: Local source video used when the clip has no encoded bytes.
+        stream_index: Source video stream index.
+        rotation_degrees_clockwise: Optional right-angle source-frame rotation.
 
     Returns:
         A tuple of lists of windows and frames.
@@ -387,23 +476,39 @@ def _make_windows_for_clip(  # noqa: PLR0913
     frames: list[torch.Tensor] = []
 
     data = clip.encoded_data.resolve()
-    if data is None:
-        logger.error(f"clip {clip.uuid} does not have a encoded_data")
-        clip.errors["clip_windowing"] = "clip.encoded_data is None"
+    if data is not None:
+        window_mp4_bytes, window_frames, window_infos = split_video_into_windows(
+            data,
+            window_size=config.window_size,
+            remainder_threshold=config.remainder_threshold,
+            sampling_fps=config.sampling_fps,
+            preprocess_mode=preprocess_mode,
+            return_bytes=keep_mp4,
+            target_bit_rate=target_bit_rate,
+            return_video_frames=return_frames,
+            num_threads=num_decode_threads,
+            max_pixels_per_frame=config.video_max_pixels_per_frame,
+        )
+    elif source_path is not None:
+        if keep_mp4:
+            msg = "Source-backed windows cannot keep MP4 bytes; enable clip transcoding first"
+            raise ValueError(msg)
+        window_mp4_bytes, window_frames, window_infos = split_source_video_into_windows(
+            source_path,
+            clip.span,
+            config.window_size,
+            config.remainder_threshold,
+            config.sampling_fps,
+            preprocess_mode=preprocess_mode,
+            return_video_frames=return_frames,
+            stream_index=stream_index,
+            rotation_degrees_clockwise=rotation_degrees_clockwise,
+            max_pixels_per_frame=config.video_max_pixels_per_frame,
+        )
+    else:
+        logger.error(f"clip {clip.uuid} has neither encoded_data nor a local source path")
+        clip.errors["clip_windowing"] = "clip source is unavailable"
         return windows, frames
-
-    window_mp4_bytes, window_frames, window_infos = split_video_into_windows(
-        data,
-        window_size=config.window_size,
-        remainder_threshold=config.remainder_threshold,
-        sampling_fps=config.sampling_fps,
-        preprocess_mode=preprocess_mode,
-        return_bytes=keep_mp4,
-        target_bit_rate=target_bit_rate,
-        return_video_frames=return_frames,
-        num_threads=num_decode_threads,
-        max_pixels_per_frame=config.video_max_pixels_per_frame,
-    )
 
     for window_bytes, window_frames_tensor, window_frame_info in zip(
         window_mp4_bytes, window_frames, window_infos, strict=True
@@ -436,6 +541,8 @@ def make_windows_for_video(  # noqa: PLR0913
     preprocess_mode: PreprocessMode = PreprocessMode.CURATOR,
     keep_mp4: bool = False,
     return_frames: bool = True,
+    stream_index: int = 0,
+    rotation_degrees_clockwise: int | None = None,
 ) -> tuple[list[Window], list[torch.Tensor]]:
     """Add windows to each clip in a video.
 
@@ -446,6 +553,8 @@ def make_windows_for_video(  # noqa: PLR0913
         preprocess_mode: Owner of resize/rescale/normalize for returned video frames.
         keep_mp4: Whether to keep the MP4.
         return_frames: Whether to decode and return frame tensors.
+        stream_index: Source video stream index for source-backed clips.
+        rotation_degrees_clockwise: Optional right-angle source-frame rotation.
 
     Returns:
         A tuple of lists of windows and frames.
@@ -458,12 +567,10 @@ def make_windows_for_video(  # noqa: PLR0913
     windows: list[Window] = []
     frames: list[torch.Tensor] = []
 
-    for clip in video.clips:
-        if not clip.encoded_data:
-            logger.warning(f"Clip {clip.uuid} has no encoded_data.")
-            clip.errors["encoded_data"] = "empty"
-            continue
+    source_path = pathlib.Path(video.input_path)
+    source_available = source_path.is_file()
 
+    for clip in video.clips:
         _windows, _frames = _make_windows_for_clip(
             clip,
             config,
@@ -472,6 +579,9 @@ def make_windows_for_video(  # noqa: PLR0913
             preprocess_mode=preprocess_mode,
             keep_mp4=keep_mp4,
             return_frames=return_frames,
+            source_path=source_path if source_available else None,
+            stream_index=stream_index,
+            rotation_degrees_clockwise=rotation_degrees_clockwise,
         )
 
         windows.extend(_windows)

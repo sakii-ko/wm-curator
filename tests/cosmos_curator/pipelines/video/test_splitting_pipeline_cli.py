@@ -22,7 +22,8 @@ import pytest
 
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageSpec
 from cosmos_curator.pipelines.common.model_constraints import PreprocessMode
-from cosmos_curator.pipelines.video.captioning.captioning_builders import CaptioningConfig
+from cosmos_curator.pipelines.video.captioning.captioning_builders import CaptioningConfig, VllmAsyncCaptionConfig
+from cosmos_curator.pipelines.video.clipping.clip_extraction_stages import ClipChunkingStage, ClipTranscodingStage
 from cosmos_curator.pipelines.video.read_write.metadata_writer_stage import ClipWriterStage
 from cosmos_curator.pipelines.video.splitting_pipeline import _assemble_stages, _setup_parser
 from cosmos_curator.pipelines.video.utils.data_model import VllmConfig
@@ -81,6 +82,58 @@ def test_caption_quality_flags_default_enabled() -> None:
     assert args.caption_quality_flags_enabled is True
 
 
+def test_qwen_chat_template_controls_default_to_unset() -> None:
+    """Unset CLI controls preserve each Qwen variant's chat-template defaults."""
+    args = _parser().parse_args([])
+
+    assert args.captioning_system_prompt_text is None
+    assert args.qwen_enable_thinking is None
+
+
+def test_qwen_chat_template_controls_reach_sync_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """System and thinking controls are carried to the sync Qwen plugin config."""
+    captured = _capture_captioning_config(monkeypatch)
+    args = _caption_args(
+        [
+            "--captioning-algorithm",
+            "qwen3_6_35b_a3b_fp8",
+            "--captioning-system-prompt-text",
+            "Write a factual caption.",
+            "--qwen-enable-thinking",
+        ]
+    )
+
+    _assemble_stages(args)
+
+    backend = captured["config"].backend
+    assert isinstance(backend, VllmConfig)
+    assert backend.system_prompt == "Write a factual caption."
+    assert backend.enable_thinking is True
+
+
+def test_qwen_chat_template_controls_reach_async_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The async caption wrapper carries the same prompt controls into CPU prep."""
+    captured = _capture_captioning_config(monkeypatch)
+    args = _caption_args(
+        [
+            "--captioning-algorithm",
+            "vllm_async",
+            "--vllm-async-model-name",
+            "qwen3_6_35b_a3b_fp8",
+            "--captioning-system-prompt-text",
+            "Write a factual caption.",
+            "--no-qwen-enable-thinking",
+        ]
+    )
+
+    _assemble_stages(args)
+
+    backend = captured["config"].backend
+    assert isinstance(backend, VllmAsyncCaptionConfig)
+    assert backend.system_prompt == "Write a factual caption."
+    assert backend.enable_thinking is False
+
+
 def test_no_caption_quality_flags_disables_flags() -> None:
     """The disable flag should set caption_quality_flags_enabled to False."""
     args = _parser().parse_args(["--no-caption-quality-flags"])
@@ -123,6 +176,29 @@ def test_no_caption_quality_stats_reaches_clip_writer(monkeypatch: pytest.Monkey
 
     assert len(writers) == 1
     assert writers[0]._caption_quality_stats_enabled is False
+
+
+def test_no_transcode_uses_source_reference_chunking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No-transcode mode should fan out source spans and configure a reference writer."""
+    monkeypatch.setattr("cosmos_curator.pipelines.video.splitting_pipeline.build_captioning_stages", lambda _: [])
+    args = _caption_args(["--transcode-encoder", "none"])
+
+    stages = [_stage_object(stage) for stage in _assemble_stages(args)]
+
+    assert any(isinstance(stage, ClipChunkingStage) for stage in stages)
+    assert not any(isinstance(stage, ClipTranscodingStage) for stage in stages)
+    writers = [stage for stage in stages if isinstance(stage, ClipWriterStage)]
+    assert len(writers) == 1
+    assert writers[0]._source_clip_references is True
+    assert writers[0]._upload_clips is False
+
+
+def test_no_transcode_rejects_clip_byte_features() -> None:
+    """Features that consume encoded clip bytes should fail during stage assembly."""
+    args = _caption_args(["--transcode-encoder", "none", "--generate-previews"])
+
+    with pytest.raises(ValueError, match=r"--generate-previews"):
+        _assemble_stages(args)
 
 
 def test_write_all_caption_json_default_disabled() -> None:

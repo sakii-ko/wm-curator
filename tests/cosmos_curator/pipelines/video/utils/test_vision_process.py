@@ -86,7 +86,10 @@ def _patch_fetch_video_resize(monkeypatch: pytest.MonkeyPatch, nframes: int) -> 
         _fps: float,
         _num_frames_to_use: int,
         _window_range: list[WindowFrameInfo],
+        *,
+        stream_index: int = 0,
     ) -> tuple[torch.Tensor, list[int]]:
+        captured["stream_index"] = stream_index
         return torch.zeros((nframes, 3, 120, 200), dtype=torch.uint8), [nframes]
 
     def fake_smart_resize(
@@ -137,6 +140,15 @@ def test_fetch_video_override_uses_exact_max_pixels(monkeypatch: pytest.MonkeyPa
 
     assert captured["smart_resize"]["max_pixels"] == 100500
     assert captured["smart_resize"]["min_pixels"] == vision_process.VIDEO_MIN_PIXELS
+
+
+def test_fetch_video_forwards_nonzero_stream_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Source-backed decoding should select the dataset adapter's video stream."""
+    captured = _patch_fetch_video_resize(monkeypatch, nframes=4)
+
+    vision_process.fetch_video("video.mkv", stream_index=2)
+
+    assert captured["stream_index"] == 2
 
 
 def test_fetch_video_curator_preprocess_returns_float16(monkeypatch: pytest.MonkeyPatch) -> None:

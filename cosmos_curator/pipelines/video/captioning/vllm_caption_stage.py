@@ -385,7 +385,14 @@ class VllmPrepStage(CuratorStage):
         """Set up the model for processing."""
         self._processor = auto_processor(self._vllm_config)
 
-    def _prep_windows(self, video: Video, prompt: str) -> None:
+    def _prep_windows(
+        self,
+        video: Video,
+        prompt: str,
+        *,
+        stream_index: int = 0,
+        rotation_degrees_clockwise: int | None = None,
+    ) -> None:
         """Prep the windows for the vLLM model.
 
         The videos are modified in-place by creating the windows
@@ -396,6 +403,8 @@ class VllmPrepStage(CuratorStage):
         Args:
             video: The video to prep the windows for.
             prompt: The prompt to use for the vLLM model.
+            stream_index: Source video stream index for source-backed clips.
+            rotation_degrees_clockwise: Optional source-frame rotation.
 
         """
         if self._processor is None:
@@ -410,6 +419,8 @@ class VllmPrepStage(CuratorStage):
             num_video_decode_threads,
             preprocess_mode=self._vllm_config.preprocess_mode,
             keep_mp4=self._keep_mp4,
+            stream_index=stream_index,
+            rotation_degrees_clockwise=rotation_degrees_clockwise,
         )
 
         metadata = make_metadata(frames, self._window_config)
@@ -472,7 +483,12 @@ class VllmPrepStage(CuratorStage):
             video = get_video_from_task(task)
 
             with self._timer.time_process():
-                self._prep_windows(video, prompt)
+                self._prep_windows(
+                    video,
+                    prompt,
+                    stream_index=getattr(task, "stream_index", None) or 0,
+                    rotation_degrees_clockwise=getattr(task, "rotation_degrees_clockwise", None),
+                )
 
             stage_perf = getattr(task, "stage_perf", None)
             if self._log_stats and stage_perf is not None:
