@@ -104,6 +104,27 @@ def _source_path_string(source: SourcePath) -> str:
     return source.as_posix()
 
 
+def normalize_clip_uuid(value: object) -> uuid.UUID:
+    """Validate and canonicalize a clip UUID."""
+    if isinstance(value, uuid.UUID):
+        return value
+    if not isinstance(value, str):
+        msg = f"clip_uuid must be a UUID or UUID string, got {type(value).__name__}"
+        raise TypeError(msg)
+    try:
+        return uuid.UUID(value)
+    except ValueError as error:
+        msg = f"clip_uuid must be a valid UUID, got {value!r}"
+        raise ValueError(msg) from error
+
+
+def _make_source_span_uuid(source_path: str, stream_index: int | None, span: TimeSpan) -> uuid.UUID:
+    stream = 0 if stream_index is None else stream_index
+    start, end = span
+    identity = f"{source_path}#video-stream={stream}#span={start.hex()}:{end.hex()}"
+    return uuid.uuid5(uuid.NAMESPACE_URL, identity)
+
+
 @attrs.define
 class AnnotationTask(SplitPipeTask):
     """A ``SplitPipeTask`` carrying only source-side annotation hints.
@@ -136,6 +157,7 @@ def make_annotation_task(  # noqa: PLR0913
     stream_index: int | None = None,
     rotation_degrees_clockwise: int | None = None,
     span: TimeSpan | None = None,
+    clip_uuid: str | uuid.UUID | None = None,
     dataset_metadata: Mapping[str, Any] | None = None,
 ) -> AnnotationTask:
     """Build an annotation task using the existing ``Video`` and ``Clip`` types."""
@@ -154,13 +176,21 @@ def make_annotation_task(  # noqa: PLR0913
 
     clips: list[Clip] = []
     if normalized_span is not None:
+        normalized_clip_uuid = (
+            _make_source_span_uuid(source_path, normalized_stream_index, normalized_span)
+            if clip_uuid is None
+            else normalize_clip_uuid(clip_uuid)
+        )
         clips.append(
             Clip(
-                uuid=uuid.uuid4(),
+                uuid=normalized_clip_uuid,
                 source_video=source_path,
                 span=normalized_span,
             )
         )
+    elif clip_uuid is not None:
+        msg = "clip_uuid requires an explicit span"
+        raise ValueError(msg)
 
     video = Video(
         input_video=source,

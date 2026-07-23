@@ -81,14 +81,16 @@ class TemporalAnnotationWriter:
         """Yield a temporary ``.npz`` path and publish it on normal exit.
 
         ``frame_start`` is inclusive and ``frame_stop`` is exclusive. The caller
-        writes the path, normally with ``numpy.savez``. Empty files and duplicate
-        ranges are rejected.
+        writes the path, normally with ``numpy.savez``. Empty files and concurrent
+        writes to the same range are rejected. A previously published range may be
+        atomically overwritten so a retried pipeline task can start from the first
+        chunk again.
         """
         canonical_uuid = _canonical_clip_uuid(clip_uuid)
         frame_range = _validate_frame_range(frame_start, frame_stop)
         state = self._states.setdefault(canonical_uuid, _ClipWriteState())
-        if frame_range in state.pending_ranges or frame_range in state.published_ranges:
-            message = f"annotation clip {canonical_uuid} already contains frame range [{frame_start}, {frame_stop})"
+        if frame_range in state.pending_ranges:
+            message = f"annotation clip {canonical_uuid} is already writing frame range [{frame_start}, {frame_stop})"
             raise ValueError(message)
 
         sub_path = _chunk_sub_path(canonical_uuid, frame_start, frame_stop)

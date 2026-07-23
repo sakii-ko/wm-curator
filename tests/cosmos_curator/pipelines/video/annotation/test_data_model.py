@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests for annotation input task construction."""
 
+import uuid
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,49 @@ def test_make_annotation_task_reuses_split_data_model(tmp_path: Path) -> None:
     assert first.dataset_metadata is not metadata
 
 
+def test_make_annotation_task_uses_stable_source_span_uuid(tmp_path: Path) -> None:
+    """The same source stream and normalized span should keep one artifact identity."""
+    source = (tmp_path / "video.mp4").resolve()
+    first = make_annotation_task(
+        source,
+        session_id="first-label",
+        relative_path="first/video.mp4",
+        stream_index=None,
+        span=(0.5, 2.0),
+    )
+    second = make_annotation_task(
+        source,
+        session_id="second-label",
+        relative_path="renamed/video.mp4",
+        stream_index=0,
+        span=(0.5, 2.0),
+    )
+    other_stream = make_annotation_task(
+        source,
+        session_id="first-label",
+        relative_path="first/video.mp4",
+        stream_index=1,
+        span=(0.5, 2.0),
+    )
+
+    assert first.video.clips[0].uuid == second.video.clips[0].uuid
+    assert first.video.clips[0].uuid != other_stream.video.clips[0].uuid
+
+
+def test_make_annotation_task_preserves_explicit_clip_uuid(tmp_path: Path) -> None:
+    """A source-span reader should be able to retain an existing Cosmos span UUID."""
+    clip_uuid = uuid.uuid4()
+    task = make_annotation_task(
+        tmp_path / "video.mp4",
+        session_id="sample",
+        relative_path="video.mp4",
+        span=(0.0, 1.0),
+        clip_uuid=str(clip_uuid),
+    )
+
+    assert task.video.clips[0].uuid == clip_uuid
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -55,6 +99,8 @@ def test_make_annotation_task_reuses_split_data_model(tmp_path: Path) -> None:
         ({"span": (1.0, 1.0)}, "0 <= start < end"),
         ({"span": (float("nan"), 1.0)}, "finite"),
         ({"relative_path": "../video.mp4"}, "must not be absolute"),
+        ({"span": (0.0, 1.0), "clip_uuid": "not-a-uuid"}, "valid UUID"),
+        ({"clip_uuid": str(uuid.uuid4())}, "requires an explicit span"),
     ],
 )
 def test_make_annotation_task_validates_source_hints(

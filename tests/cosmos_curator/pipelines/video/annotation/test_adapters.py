@@ -15,18 +15,22 @@
 """Tests for thin annotation dataset adapters."""
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
 
 from cosmos_curator.core.utils.storage.s3_client import S3Prefix
+from cosmos_curator.pipelines.video.annotation import adapters
 from cosmos_curator.pipelines.video.annotation.adapters import (
     AnnotationDatasetAdapter,
     FilesystemDatasetAdapter,
     JsonlDatasetAdapter,
+    SourceSpanDatasetAdapter,
 )
 from cosmos_curator.pipelines.video.annotation.data_model import AnnotationTask
 from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask, Video
+from tests.cosmos_curator.core.utils.storage.conftest import FakeStorageClient
 
 
 def test_filesystem_adapter_recurses_filters_and_sorts(tmp_path: Path) -> None:
@@ -136,6 +140,133 @@ def test_jsonl_adapter_accepts_explicit_remote_sources(tmp_path: Path) -> None:
     assert isinstance(task.video.input_video, S3Prefix)
     assert task.video.input_path == "s3://example-bucket/videos/a.mp4"
     assert task.video.relative_path == "a.mp4"
+
+
+@pytest.mark.parametrize("uuid_field", ["clip_uuid", "span_uuid"])
+def test_jsonl_adapter_preserves_explicit_span_uuid(tmp_path: Path, uuid_field: str) -> None:
+    """Both accepted field names should retain an upstream clip identity."""
+    source = tmp_path / "video.mp4"
+    source.touch()
+    clip_uuid = uuid.uuid4()
+    input_list = tmp_path / "explicit-uuid.jsonl"
+    input_list.write_text(
+        json.dumps({"path": source.name, "span": [1.0, 2.0], uuid_field: str(clip_uuid)}),
+        encoding="utf-8",
+    )
+
+    task = JsonlDatasetAdapter(input_list).discover()[0]
+
+    assert task.video.clips[0].uuid == clip_uuid
+
+
+def test_jsonl_adapter_rejects_conflicting_clip_uuid_aliases(tmp_path: Path) -> None:
+    """clip_uuid and span_uuid cannot name two different source spans."""
+    source = tmp_path / "video.mp4"
+    source.touch()
+    input_list = tmp_path / "conflicting-uuid.jsonl"
+    input_list.write_text(
+        json.dumps(
+            {
+                "path": source.name,
+                "span": [1.0, 2.0],
+                "clip_uuid": str(uuid.uuid4()),
+                "span_uuid": str(uuid.uuid4()),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"conflicting-uuid\.jsonl:1:.*must match"):
+        JsonlDatasetAdapter(input_list).discover()
+
+
+def test_source_span_adapter_reads_cosmos_summary_and_preserves_uuid(tmp_path: Path) -> None:
+    """No-transcode split metadata should feed annotation tasks without a manual JSONL export."""
+    source = tmp_path / "raw" / "nested" / "video.mkv"
+    source.parent.mkdir(parents=True)
+    source.touch()
+    output_root = tmp_path / "split-output"
+    metadata_root = output_root / "metas" / "v0"
+    metadata_root.mkdir(parents=True)
+    valid_uuid = uuid.uuid4()
+    invalid_uuid = uuid.uuid4()
+    (output_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "num_videos": 1,
+                "nested/video.mkv": {
+                    "source_video": source.as_posix(),
+                    "clips": [str(valid_uuid), str(invalid_uuid)],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for clip_uuid, span, valid in (
+        (valid_uuid, [1.25, 4.5], True),
+        (invalid_uuid, [5.0, 6.0], False),
+    ):
+        (metadata_root / f"{clip_uuid}.json").write_text(
+            json.dumps(
+                {
+                    "span_uuid": str(clip_uuid),
+                    "source_video": source.as_posix(),
+                    "duration_span": span,
+                    "clip_format": "source_span",
+                    "valid": valid,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    tasks = SourceSpanDatasetAdapter(
+        output_root,
+        stream_index=2,
+        rotation_degrees_clockwise=-90,
+        dataset_metadata={"dataset": "demo"},
+    ).discover()
+
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task.video.input_video == source.resolve()
+    assert task.video.relative_path == "nested/video.mkv"
+    assert task.video.clips[0].uuid == valid_uuid
+    assert task.video.clips[0].span == (1.25, 4.5)
+    assert task.stream_index == 2
+    assert task.rotation_degrees_clockwise == 270
+    assert task.dataset_metadata == {"dataset": "demo"}
+
+
+def test_source_span_adapter_reads_remote_output_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapter should use Cosmos storage clients without materializing remote media."""
+    output_root = "s3://test-bucket/split-output"
+    source = "s3://media-bucket/raw/video.mkv"
+    clip_uuid = uuid.uuid4()
+    client = FakeStorageClient(
+        {
+            f"{output_root}/summary.json": json.dumps(
+                {"video.mkv": {"source_video": source, "clips": [str(clip_uuid)]}}
+            ).encode(),
+            f"{output_root}/metas/v0/{clip_uuid}.json": json.dumps(
+                {
+                    "span_uuid": str(clip_uuid),
+                    "source_video": source,
+                    "duration_span": [0.0, 3.0],
+                    "clip_format": "source_span",
+                    "valid": True,
+                }
+            ).encode(),
+        }
+    )
+    monkeypatch.setattr(adapters, "get_storage_client", lambda *_args, **_kwargs: client)
+
+    task = SourceSpanDatasetAdapter(output_root).discover()[0]
+
+    assert isinstance(task.video.input_video, S3Prefix)
+    assert task.video.input_path == source
+    assert task.video.clips[0].uuid == clip_uuid
 
 
 @pytest.mark.parametrize(

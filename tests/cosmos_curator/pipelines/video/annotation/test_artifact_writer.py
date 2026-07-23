@@ -138,6 +138,48 @@ def test_local_chunks_are_atomically_replaced_and_metadata_is_last(
     assert document["metadata"] == _metadata()
 
 
+def test_retry_overwrites_published_chunk_and_can_complete(tmp_path: Path) -> None:
+    """A whole-task retry may safely restart from a range published by its first attempt."""
+    output_path = tmp_path / "annotations"
+    clip_uuid = str(uuid4())
+    writer = TemporalAnnotationWriter(output_path)
+
+    with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
+        np.savez(staging_path, attempt=np.array([1], dtype=np.int8))
+
+    # Simulate Xenna retrying process_data() on the same actor after a later
+    # operation in the first attempt failed.
+    with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
+        np.savez(staging_path, attempt=np.array([2], dtype=np.int8))
+    with writer.open_chunk(clip_uuid, 2, 3) as staging_path:
+        np.savez(staging_path, attempt=np.array([2], dtype=np.int8))
+
+    writer.complete_clip(
+        clip_uuid,
+        frame_count=3,
+        chunk_frames=2,
+        metadata=_metadata(frame_count=3),
+    )
+
+    first_chunk = output_path / "chunks" / "v1" / clip_uuid / "frames-000000000-000000002.npz"
+    with np.load(first_chunk) as chunk:
+        assert chunk["attempt"].tolist() == [2]
+
+
+def test_open_chunk_still_rejects_pending_range_reentry(tmp_path: Path) -> None:
+    """Two active contexts cannot publish the same clip range concurrently."""
+    writer = TemporalAnnotationWriter(tmp_path / "annotations")
+    clip_uuid = str(uuid4())
+
+    with writer.open_chunk(clip_uuid, 0, 1) as staging_path:
+        _write_chunk(staging_path, 0, 1)
+        with (
+            pytest.raises(ValueError, match="already writing"),
+            writer.open_chunk(clip_uuid, 0, 1),
+        ):
+            pass
+
+
 def test_chunk_exception_publishes_neither_chunk_nor_metadata(tmp_path: Path) -> None:
     """An exception in the producer leaves no visible chunk or metadata."""
     output_path = tmp_path / "annotations" / "normals" / "normalcrafter-v1"
