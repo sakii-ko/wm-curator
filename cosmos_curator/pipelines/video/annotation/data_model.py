@@ -18,6 +18,7 @@ import math
 import pathlib
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import attrs
@@ -98,10 +99,67 @@ def _copy_dataset_metadata(value: object) -> dict[str, Any]:
     return dict(value)
 
 
-def _source_path_string(source: SourcePath) -> str:
+def source_path_string(source: SourcePath) -> str:
+    """Return the local POSIX path or remote object URI for a source."""
     if isinstance(source, StoragePrefix):
         return source.path
     return source.as_posix()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceClipRequest:
+    """Source, span, and decode hints carried by one split-pipeline task."""
+
+    source: SourcePath
+    clip: Clip | None
+    span: TimeSpan | None
+    stream_index: int
+    rotation_degrees_clockwise: int
+
+
+def resolve_source_clip_request(task: SplitPipeTask) -> SourceClipRequest:
+    """Resolve the source-side fields shared by temporal annotation stages."""
+    if len(task.videos) != 1:
+        msg = f"source-backed annotation requires one video per task, got {len(task.videos)}"
+        raise ValueError(msg)
+
+    source = task.video.input_video
+    if not isinstance(source, (pathlib.Path, StoragePrefix)):
+        msg = f"source must be a pathlib.Path or StoragePrefix, got {type(source).__name__}"
+        raise TypeError(msg)
+    if len(task.video.clips) > 1:
+        msg = f"source-backed annotation supports at most one Clip.span per task, got {len(task.video.clips)} clips"
+        raise ValueError(msg)
+
+    clip = task.video.clips[0] if task.video.clips else None
+    span = normalize_span(clip.span) if clip is not None else None
+    stream_index = normalize_stream_index(getattr(task, "stream_index", None))
+    rotation = normalize_rotation_degrees(getattr(task, "rotation_degrees_clockwise", None))
+    return SourceClipRequest(
+        source=source,
+        clip=clip,
+        span=span,
+        stream_index=0 if stream_index is None else stream_index,
+        rotation_degrees_clockwise=0 if rotation is None else rotation,
+    )
+
+
+def make_full_source_clip(source: SourcePath, span: TimeSpan, stream_index: int) -> Clip:
+    """Create the stable clip identity used when a task denotes the whole source."""
+    normalized_span = normalize_span(span)
+    if normalized_span is None:
+        msg = "full-source clip requires a span"
+        raise ValueError(msg)
+    normalized_stream_index = normalize_stream_index(stream_index)
+    if normalized_stream_index is None:
+        msg = "full-source clip requires a stream index"
+        raise ValueError(msg)
+    source_path = source_path_string(source)
+    clip_uuid = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{source_path}#video-stream={normalized_stream_index}#full-source",
+    )
+    return Clip(uuid=clip_uuid, source_video=source_path, span=normalized_span)
 
 
 def normalize_clip_uuid(value: object) -> uuid.UUID:
@@ -172,7 +230,7 @@ def make_annotation_task(  # noqa: PLR0913
     normalized_span = normalize_span(span)
     normalized_stream_index = normalize_stream_index(stream_index)
     normalized_rotation = normalize_rotation_degrees(rotation_degrees_clockwise)
-    source_path = _source_path_string(source)
+    source_path = source_path_string(source)
 
     clips: list[Clip] = []
     if normalized_span is not None:

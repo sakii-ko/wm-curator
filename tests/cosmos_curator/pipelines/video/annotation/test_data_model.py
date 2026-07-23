@@ -19,7 +19,11 @@ from pathlib import Path
 
 import pytest
 
-from cosmos_curator.pipelines.video.annotation.data_model import make_annotation_task
+from cosmos_curator.pipelines.video.annotation.data_model import (
+    make_annotation_task,
+    make_full_source_clip,
+    resolve_source_clip_request,
+)
 from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask, Video
 
 
@@ -88,6 +92,29 @@ def test_make_annotation_task_preserves_explicit_clip_uuid(tmp_path: Path) -> No
     )
 
     assert task.video.clips[0].uuid == clip_uuid
+
+
+def test_source_clip_request_and_full_source_identity_are_stable(tmp_path: Path) -> None:
+    """Stages should share one task-envelope interpretation and resumable full-source UUID."""
+    source = (tmp_path / "video.mp4").resolve()
+    task = make_annotation_task(
+        source,
+        session_id="sample",
+        relative_path="video.mp4",
+        stream_index=2,
+        rotation_degrees_clockwise=360,
+    )
+
+    request = resolve_source_clip_request(task)
+    first = make_full_source_clip(request.source, (0.0, 2.0), request.stream_index)
+    second = make_full_source_clip(request.source, (0.0, 3.0), request.stream_index)
+
+    assert request.clip is None
+    assert request.span is None
+    assert request.stream_index == 2
+    assert request.rotation_degrees_clockwise == 0
+    assert first.uuid == second.uuid
+    assert first.span == (0.0, 2.0)
 
 
 @pytest.mark.parametrize(
