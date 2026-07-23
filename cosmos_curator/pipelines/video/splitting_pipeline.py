@@ -152,6 +152,7 @@ QWEN3_CAPTION_ALGOS = {
     "qwen3_5_27b",
     "qwen3_6_27b",
     "qwen3_6_27b_fp8",
+    "qwen3_6_35b_a3b_fp8",
     "qwen3_vl_30b",
     "qwen3_vl_30b_fp8",
     "qwen3_vl_235b",
@@ -706,6 +707,8 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             model_variant=args.captioning_algorithm,
             prompt_variant=args.captioning_prompt_variant,
             prompt_text=args.captioning_prompt_text,
+            system_prompt=args.captioning_system_prompt_text,
+            enable_thinking=args.qwen_enable_thinking,
             preprocess_mode=args.vllm_preprocess_mode,
             num_cpus_for_prepare=args.vllm_prepare_num_cpus_per_worker,
             max_retries=args.vllm_max_retries,
@@ -798,6 +801,8 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
                 model_name=args.vllm_async_model_name,
                 prompt_variant=args.captioning_prompt_variant,
                 prompt_text=args.captioning_prompt_text,
+                system_prompt=args.captioning_system_prompt_text,
+                enable_thinking=args.qwen_enable_thinking,
                 max_concurrent_requests=args.vllm_async_max_concurrent_requests,
                 serve_config=build_vllm_async_config(args, sampling_config=sampling_config),
                 stage_batch_size=args.vllm_async_stage_batch_size,
@@ -1941,6 +1946,21 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
         type=str,
         default=None,
         help="Prompt text for captioning algorithm.",
+    )
+    parser.add_argument(
+        "--captioning-system-prompt-text",
+        type=str,
+        default=None,
+        help="Optional system prompt for Qwen chat templates.",
+    )
+    parser.add_argument(
+        "--qwen-enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Override Qwen chat-template thinking mode. If omitted, the model variant's default is used; "
+            "Qwen3.6-35B-A3B-FP8 defaults to disabled."
+        ),
     )
     parser.add_argument(
         "--captioning-sampling-fps",

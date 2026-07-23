@@ -1158,6 +1158,8 @@ class VllmConfig:
         model_variant: Name of the model variant to use.
         prompt_variant: Type of prompt to use.
         prompt_text: Custom prompt text if provided.
+        system_prompt: Optional system message for chat-template based models.
+        enable_thinking: Optional thinking-mode override for Qwen chat templates.
         batch_size: Number of samples to process in parallel.
         fp8: Whether to enable FP8 precision.
         preprocess_mode: Owner of resize/rescale/normalize for visual inputs.
@@ -1188,6 +1190,8 @@ class VllmConfig:
     use_image_input: bool = False
     prompt_variant: str = "default"
     prompt_text: str | None = None
+    system_prompt: str | None = None
+    enable_thinking: bool | None = None
     fp8: bool = False
     preprocess_mode: PreprocessMode = attrs.field(default=PreprocessMode.CURATOR, converter=PreprocessMode)
     disable_mmcache: bool = False

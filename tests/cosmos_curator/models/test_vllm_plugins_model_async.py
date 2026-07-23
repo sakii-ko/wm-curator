@@ -157,6 +157,41 @@ def test_qwen3vl_model_async_omits_gpu_memory_utilization_when_unset() -> None:
     assert "gpu_memory_utilization" not in mock_args.call_args.kwargs
 
 
+def test_qwen_35b_model_async_uses_variant_profile() -> None:
+    """The async engine consumes the same validated profile as sync."""
+    config = _async_cfg(model_variant="qwen3_6_35b_a3b_fp8")
+    with (
+        patch.object(vllm_qwen.VllmQwen3635BA3BFP8, "model_path", return_value="/m"),
+        patch("cosmos_curator.models.vllm_qwen.AsyncEngineArgs") as mock_args,
+    ):
+        vllm_qwen.VllmQwen3635BA3BFP8.model_async(config)
+
+    kwargs = mock_args.call_args.kwargs
+    assert kwargs["max_model_len"] == 16384
+    assert kwargs["max_num_batched_tokens"] == 32768
+    assert kwargs["max_num_seqs"] == 32
+    assert kwargs["gpu_memory_utilization"] == 0.6
+    assert kwargs["gdn_prefill_backend"] == "triton"
+
+
+def test_qwen_35b_model_async_user_capacity_overrides_profile() -> None:
+    """Generic async capacity flags override per-variant defaults."""
+    config = _async_cfg(
+        model_variant="qwen3_6_35b_a3b_fp8",
+        max_num_seqs=7,
+        gpu_memory_utilization=0.7,
+    )
+    with (
+        patch.object(vllm_qwen.VllmQwen3635BA3BFP8, "model_path", return_value="/m"),
+        patch("cosmos_curator.models.vllm_qwen.AsyncEngineArgs") as mock_args,
+    ):
+        vllm_qwen.VllmQwen3635BA3BFP8.model_async(config)
+
+    kwargs = mock_args.call_args.kwargs
+    assert kwargs["max_num_seqs"] == 7
+    assert kwargs["gpu_memory_utilization"] == 0.7
+
+
 def test_nemotron_model_async_uses_module_constants() -> None:
     """Nemotron's ``model_async`` reads the same module-scope constants as ``model``."""
     with patch.object(vllm_nemotron.VllmNemotronNano12Bv2VL, "model_path", return_value="/n"):

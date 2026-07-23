@@ -114,6 +114,28 @@ class TestBuildersNumWorkersPerNode:
         assert stage._window_config.remainder_threshold == 128
         assert stage._keep_mp4 is False
 
+    def test_prep_stage_receives_qwen_chat_template_controls(self) -> None:
+        """Async CPU prep receives the system prompt and thinking override."""
+        config = _make_config()
+        backend = config.backend
+        assert isinstance(backend, VllmAsyncCaptionConfig)
+        config = attrs.evolve(
+            config,
+            backend=attrs.evolve(
+                backend,
+                system_prompt="Write a factual caption.",
+                enable_thinking=False,
+            ),
+        )
+
+        stages = build_captioning_stages(config)
+        prep_spec = stages[0]
+        assert isinstance(prep_spec, CuratorStageSpec)
+        stage = prep_spec.stage
+        assert isinstance(stage, VllmPrepStage)
+        assert stage._vllm_config.system_prompt == "Write a factual caption."
+        assert stage._vllm_config.enable_thinking is False
+
     def test_build_stages_vllm_async_prep_is_first(self) -> None:
         """``vllm_async`` ``build_stages`` produces Prep + Caption (2 stages) with ``VllmPrepStage``."""
         cfg = _make_config()

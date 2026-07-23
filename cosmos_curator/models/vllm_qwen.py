@@ -16,6 +16,7 @@
 
 import re
 import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import torch
@@ -74,6 +75,32 @@ TRUST_REMOTE_CODE = False
 LIMIT_MM_PER_PROMPT_VIDEO = {"images": 0, "video": 1}
 LIMIT_MM_PER_PROMPT_IMAGE = {"images": 1, "video": 0}
 
+
+@dataclass(frozen=True)
+class Qwen3EngineProfile:
+    """Engine settings shared by the sync and async Qwen3 paths."""
+
+    max_model_len: int = MAX_MODEL_LEN
+    max_num_batched_tokens: int | None = None
+    max_num_seqs: int | None = None
+    gpu_memory_utilization: float | None = None
+    gdn_prefill_backend: str | None = None
+
+
+_DEFAULT_QWEN3_ENGINE_PROFILE = Qwen3EngineProfile()
+_QWEN3_ENGINE_PROFILES = {
+    "qwen3_6_35b_a3b_fp8": Qwen3EngineProfile(
+        max_model_len=16384,
+        max_num_batched_tokens=32768,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.6,
+        gdn_prefill_backend="triton",
+    ),
+}
+_QWEN_ENABLE_THINKING_DEFAULTS = {
+    "qwen3_6_35b_a3b_fp8": False,
+}
+
 _DEFAULT_REFINE_PROMPT = """
 Improve and refine following video description. Focus on highlighting the key visual and sensory elements.
 Ensure the description is clear, precise, and paints a compelling picture of the scene.
@@ -119,12 +146,32 @@ def make_message(
     )
 
 
+def make_messages(
+    text_input: str,
+    *,
+    system_prompt: str | None = None,
+    use_image: bool = False,
+) -> list[QwenMessage]:
+    """Create an optional system message followed by the user message."""
+    messages: list[QwenMessage] = []
+    if system_prompt is not None:
+        messages.append(
+            QwenMessage(
+                role="system",
+                content=[QwenContentTypeText(type="text", text=system_prompt)],
+            )
+        )
+    messages.append(make_message(text_input, use_image=use_image))
+    return messages
+
+
 def make_prompt(
-    message: QwenMessage,
+    message: QwenMessage | list[QwenMessage],
     data: torch.Tensor | list[tuple[torch.Tensor, dict[str, Any]]],
     processor: AutoProcessor,
     *,
     use_image: bool = False,
+    enable_thinking: bool | None = None,
 ) -> dict[str, Any]:
     """Make a prompt for the Qwen model.
 
@@ -133,16 +180,22 @@ def make_prompt(
         data: The data to use for the prompt (video: list of (tensor, metadata); image: tensor 1,C,H,W).
         processor: The processor to use for the prompt.
         use_image: If True, pass data under multi_modal_data["image"] for image pipeline.
+        enable_thinking: Optional Qwen chat-template thinking mode override.
 
     Returns:
         A prompt for the Qwen model.
 
     """
+    messages = message if isinstance(message, list) else [message]
+    chat_template_kwargs: dict[str, Any] = {}
+    if enable_thinking is not None:
+        chat_template_kwargs["enable_thinking"] = enable_thinking
     prompt_ids = processor.apply_chat_template(  # type: ignore[attr-defined]
-        [message],
+        messages,
         add_generation_prompt=True,
         tokenize=True,
         return_tensors="pt",
+        **chat_template_kwargs,
     )[0].tolist()
 
     if use_image:
@@ -155,6 +208,34 @@ def make_prompt(
         "prompt_token_ids": prompt_ids,
         "multi_modal_data": multi_modal_data,
     }
+
+
+def _qwen3_engine_profile(model_variant: str) -> Qwen3EngineProfile:
+    """Return the engine profile for a Qwen3 model variant."""
+    return _QWEN3_ENGINE_PROFILES.get(model_variant, _DEFAULT_QWEN3_ENGINE_PROFILE)
+
+
+def _qwen3_engine_kwargs(model_variant: str) -> dict[str, Any]:
+    """Translate one Qwen3 profile into vLLM constructor keyword arguments."""
+    profile = _qwen3_engine_profile(model_variant)
+    kwargs: dict[str, Any] = {"max_model_len": profile.max_model_len}
+    for name in (
+        "max_num_batched_tokens",
+        "max_num_seqs",
+        "gpu_memory_utilization",
+        "gdn_prefill_backend",
+    ):
+        value = getattr(profile, name)
+        if value is not None:
+            kwargs[name] = value
+    return kwargs
+
+
+def _qwen_enable_thinking(config: VllmConfig) -> bool | None:
+    """Resolve an explicit thinking override before the per-variant default."""
+    if config.enable_thinking is not None:
+        return config.enable_thinking
+    return _QWEN_ENABLE_THINKING_DEFAULTS.get(config.model_variant)
 
 
 class VllmQwen(VllmPlugin):
@@ -274,9 +355,19 @@ class VllmQwen(VllmPlugin):
             A dictionary containing the LLM inputs.
 
         """
-        message = make_message(prompt, use_image=config.use_image_input)
+        messages = make_messages(
+            prompt,
+            system_prompt=config.system_prompt,
+            use_image=config.use_image_input,
+        )
         data = frames if config.use_image_input else [(frames, metadata)]
-        return make_prompt(message, data, processor, use_image=config.use_image_input)
+        return make_prompt(
+            messages,
+            data,
+            processor,
+            use_image=config.use_image_input,
+            enable_thinking=_qwen_enable_thinking(config),
+        )
 
     @staticmethod
     def make_refined_llm_request(
@@ -358,16 +449,17 @@ class VllmQwen3VL(VllmQwen):
 
         """
         limit_mm = LIMIT_MM_PER_PROMPT_IMAGE if config.use_image_input else LIMIT_MM_PER_PROMPT_VIDEO
+        engine_kwargs = _qwen3_engine_kwargs(config.model_variant)
         return LLM(
             model=str(cls.model_path(config)),
             limit_mm_per_prompt=limit_mm,
-            max_model_len=MAX_MODEL_LEN,
             pipeline_parallel_size=1,
             mm_processor_cache_gb=0.0 if config.disable_mmcache else 4.0,
             tensor_parallel_size=config.num_gpus,
             trust_remote_code=TRUST_REMOTE_CODE,
             compilation_config={"cudagraph_mode": "piecewise"},
             performance_mode=config.performance_mode,
+            **engine_kwargs,
         )
 
     @classmethod
@@ -376,18 +468,20 @@ class VllmQwen3VL(VllmQwen):
 
         Mirrors :meth:`model` - reads from module-scope constants.
         """
-        extra_kwargs: dict[str, Any] = {}
+        extra_kwargs = _qwen3_engine_kwargs(config.model_variant)
         if config.gpu_memory_utilization is not None:
             extra_kwargs["gpu_memory_utilization"] = config.gpu_memory_utilization
+        if config.max_num_seqs > 0:
+            extra_kwargs["max_num_seqs"] = config.max_num_seqs
+        else:
+            extra_kwargs.setdefault("max_num_seqs", None)
         return AsyncEngineArgs(
             model=str(cls.model_path(config.to_vllm_config())),
             served_model_name=[config.model_variant],
             tensor_parallel_size=config.num_gpus,
             data_parallel_size=config.data_parallel_size,
-            max_model_len=MAX_MODEL_LEN,
             trust_remote_code=TRUST_REMOTE_CODE,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT_VIDEO,  # type: ignore[arg-type]
-            max_num_seqs=config.max_num_seqs if config.max_num_seqs > 0 else None,
             enforce_eager=config.enforce_eager,
             kv_cache_dtype=config.kv_cache_dtype,  # type: ignore[arg-type]
             mm_encoder_tp_mode=config.mm_encoder_tp_mode or None,  # type: ignore[arg-type]
@@ -435,9 +529,19 @@ class VllmQwen3VL(VllmQwen):
             A dictionary containing the LLM inputs.
 
         """
-        message = make_message(prompt, use_image=config.use_image_input)
+        messages = make_messages(
+            prompt,
+            system_prompt=config.system_prompt,
+            use_image=config.use_image_input,
+        )
         data = frames if config.use_image_input else [(frames, metadata)]
-        inputs = make_prompt(message, data, processor, use_image=config.use_image_input)
+        inputs = make_prompt(
+            messages,
+            data,
+            processor,
+            use_image=config.use_image_input,
+            enable_thinking=_qwen_enable_thinking(config),
+        )
         if config.video_max_pixels_per_frame is not None and not config.use_image_input:
             inputs["mm_processor_kwargs"] = qwen3_video_size_kwargs(
                 int(frames.shape[0]),
@@ -534,3 +638,12 @@ class VllmQwen3627BFP8(VllmQwen3VL):
     def model_variant() -> str:
         """Return the model variant name."""
         return "qwen3_6_27b_fp8"
+
+
+class VllmQwen3635BA3BFP8(VllmQwen3VL):
+    """Qwen3.6-35B-A3B-FP8 vLLM model variant plugin."""
+
+    @staticmethod
+    def model_variant() -> str:
+        """Return the model variant name."""
+        return "qwen3_6_35b_a3b_fp8"

@@ -34,6 +34,7 @@ MODEL_VARIANTS_REQUIRING_MODEL_PREPROCESS: frozenset[str] = frozenset(
         "qwen3_5_27b",
         "qwen3_6_27b",
         "qwen3_6_27b_fp8",
+        "qwen3_6_35b_a3b_fp8",
         "qwen3_vl_30b",
         "qwen3_vl_30b_fp8",
         "qwen3_vl_235b",

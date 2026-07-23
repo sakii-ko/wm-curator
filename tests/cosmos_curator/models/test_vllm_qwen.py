@@ -14,7 +14,7 @@
 # limitations under the License.
 """Test vllm_qwen.py."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -23,18 +23,27 @@ from cosmos_curator.core.utils.model import pixi_utils
 from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, VllmConfig
 
 if pixi_utils.is_running_in_env("default"):
+    from cosmos_curator.models.vllm_interface import _VLLM_PLUGINS
     from cosmos_curator.models.vllm_qwen import (
         VllmQwen,
         VllmQwen3VL,
         VllmQwen7B,
+        VllmQwen3635BA3BFP8,
         _strip_qwen3_reasoning,
         make_message,
+        make_messages,
         make_prompt,
         qwen3_video_size_kwargs,
     )
     from cosmos_curator.pipelines.video.utils.vision_process import VIDEO_MIN_PIXELS
 
     _MODEL_VARIANT = VllmQwen7B.model_variant()
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_variant_is_registered() -> None:
+    """The model registry resolves the 35B variant to its thin plugin."""
+    assert _VLLM_PLUGINS["qwen3_6_35b_a3b_fp8"] is VllmQwen3635BA3BFP8
 
 
 @pytest.mark.env("default")
@@ -134,6 +143,16 @@ def test_make_message_image() -> None:
 
 
 @pytest.mark.env("default")
+def test_make_messages_includes_system_message_before_user() -> None:
+    """A configured system prompt precedes the multimodal user message."""
+    messages = make_messages("Describe the video", system_prompt="Be precise.")
+
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert messages[0]["content"] == [{"type": "text", "text": "Be precise."}]
+    assert messages[1]["content"][0] == {"type": "video"}
+
+
+@pytest.mark.env("default")
 def test_make_prompt() -> None:
     """Test make_prompt function (video path)."""
     # Mock the tokenizer to return a tensor that can be indexed and converted to list
@@ -152,6 +171,74 @@ def test_make_prompt() -> None:
     video_frames, video_metadata = result["multi_modal_data"]["video"][0]
     assert video_frames.shape == (2, 3, 32, 32)
     assert video_metadata == metadata
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_defaults_to_no_thinking_and_accepts_system_prompt() -> None:
+    """The 35B variant applies its no-thinking default at chat-template time."""
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
+    frames = torch.rand(2, 3, 32, 32)
+    config = VllmConfig(
+        model_variant="qwen3_6_35b_a3b_fp8",
+        system_prompt="Write a factual caption.",
+    )
+
+    VllmQwen3635BA3BFP8.make_llm_input("Describe the video", frames, {"fps": 4.0}, mock_processor, config)
+
+    call = mock_processor.apply_chat_template.call_args
+    messages = call.args[0]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert messages[0]["content"][0]["text"] == "Write a factual caption."
+    assert call.kwargs["enable_thinking"] is False
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_explicit_thinking_override_wins() -> None:
+    """An explicit config value takes precedence over the 35B variant default."""
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
+    config = VllmConfig(model_variant="qwen3_6_35b_a3b_fp8", enable_thinking=True)
+
+    VllmQwen3635BA3BFP8.make_llm_input(
+        "Describe the image",
+        torch.rand(1, 3, 32, 32),
+        {},
+        mock_processor,
+        config,
+    )
+
+    assert mock_processor.apply_chat_template.call_args.kwargs["enable_thinking"] is True
+
+
+@pytest.mark.env("default")
+def test_qwen3_existing_variant_preserves_chat_template_default() -> None:
+    """Existing variants omit the thinking kwarg unless the user sets it."""
+    mock_processor = MagicMock()
+    mock_processor.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
+    config = VllmConfig(model_variant="qwen3_vl_30b")
+
+    VllmQwen3VL.make_llm_input("Describe", torch.rand(1, 3, 32, 32), {}, mock_processor, config)
+
+    assert "enable_thinking" not in mock_processor.apply_chat_template.call_args.kwargs
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_sync_engine_uses_variant_profile() -> None:
+    """The sync engine consumes the validated 35B profile."""
+    config = VllmConfig(model_variant="qwen3_6_35b_a3b_fp8")
+    with (
+        patch.object(VllmQwen3635BA3BFP8, "model_path", return_value="/models/qwen-35b"),
+        patch("cosmos_curator.models.vllm_qwen.LLM") as mock_llm,
+    ):
+        VllmQwen3635BA3BFP8.model(config)
+
+    kwargs = mock_llm.call_args.kwargs
+    assert kwargs["max_model_len"] == 16384
+    assert kwargs["max_num_batched_tokens"] == 32768
+    assert kwargs["max_num_seqs"] == 32
+    assert kwargs["gpu_memory_utilization"] == 0.6
+    assert kwargs["gdn_prefill_backend"] == "triton"
 
 
 @pytest.mark.env("default")

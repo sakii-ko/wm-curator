@@ -34,6 +34,7 @@ VLLM_CAPTION_ALGOS: frozenset[str] = frozenset(
         "qwen3_5_27b",
         "qwen3_6_27b",
         "qwen3_6_27b_fp8",
+        "qwen3_6_35b_a3b_fp8",
         "qwen3_vl_30b",
         "qwen3_vl_30b_fp8",
         "qwen3_vl_235b",
@@ -102,6 +103,8 @@ class VllmAsyncCaptionConfig:
     model_name: str = "qwen"
     prompt_variant: str = "default"
     prompt_text: str | None = None
+    system_prompt: str | None = None
+    enable_thinking: bool | None = None
     max_concurrent_requests: int = attrs.field(default=0, validator=attrs.validators.ge(0))
     serve_config: VllmAsyncConfig | None = None
     stage_batch_size: int = 0  # 0 = auto-derive
@@ -207,6 +210,8 @@ def _build_vllm_async_prep_stage(config: CaptioningConfig, vsc: VllmAsyncCaption
         serve_config.to_vllm_config(),
         prompt_variant=vsc.prompt_variant,
         prompt_text=vsc.prompt_text,
+        system_prompt=vsc.system_prompt,
+        enable_thinking=vsc.enable_thinking,
         copy_weights_to=None,
     )
     stage = VllmPrepStage(

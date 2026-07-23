@@ -14,7 +14,9 @@
 # limitations under the License.
 """Tests for vllm_model_ids.get_vllm_model_id."""
 
+import json
 from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,6 +35,7 @@ from cosmos_curator.models.vllm_model_ids import get_vllm_model_id
         ("qwen3_5_27b", "Qwen/Qwen3.5-27B-FP8", nullcontext()),
         ("qwen3_6_27b", "Qwen/Qwen3.6-27B", nullcontext()),
         ("qwen3_6_27b_fp8", "Qwen/Qwen3.6-27B-FP8", nullcontext()),
+        ("qwen3_6_35b_a3b_fp8", "Qwen/Qwen3.6-35B-A3B-FP8", nullcontext()),
         ("unknown", None, pytest.raises(ValueError, match=r"vLLM model variant unknown not supported")),
     ],
 )
@@ -40,3 +43,17 @@ def test_get_vllm_model_id(variant: str, expected_model_id: str, raises: Abstrac
     """Test get_vllm_model_id."""
     with raises:
         assert get_vllm_model_id(variant) == expected_model_id
+
+
+def test_qwen_35b_model_metadata_tracks_main_without_revision_lock() -> None:
+    """The opt-in 35B checkpoint is downloadable without adding a pinned model lock."""
+    config_path = Path(__file__).resolve().parents[3] / "cosmos_curator" / "configs" / "all_models.json"
+    metadata = json.loads(config_path.read_text())["qwen3_6_35b_a3b_fp8"]
+
+    assert metadata == {
+        "model_id": "Qwen/Qwen3.6-35B-A3B-FP8",
+        "version": "main",
+        "filelist": None,
+        "precision": "FP8",
+        "nvcf_model_id": "qwen3_6_35b_a3b_fp8",
+    }
