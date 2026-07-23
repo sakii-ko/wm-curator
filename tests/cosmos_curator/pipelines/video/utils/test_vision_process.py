@@ -78,6 +78,39 @@ def test_read_video_cpu_num_frames_to_use_preserves_inclusive_start(monkeypatch:
     assert captured["frame_ids"] == [10, 11, 12, 13]
 
 
+def test_read_video_cpu_decodes_overlapping_unsorted_windows_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One sorted unique decode should be scattered back into caller window order."""
+    monkeypatch.setattr(vision_process, "get_avg_frame_rate", lambda _video_path: 10.0)
+
+    def use_all_frames(fps: float, total_frames: int, video_fps: float) -> int:
+        del fps, video_fps
+        return total_frames
+
+    monkeypatch.setattr(vision_process, "smart_nframes", use_all_frames)
+    captured: dict[str, list[int]] = {}
+
+    def fake_decode(_video_path: str, frame_ids: list[int]) -> np.ndarray:
+        captured["frame_ids"] = frame_ids
+        return np.asarray(frame_ids, dtype=np.uint8)[:, None, None, None].repeat(3, axis=3)
+
+    monkeypatch.setattr(vision_process, "decode_video_cpu_frame_ids", fake_decode)
+
+    video, frame_counts = vision_process.read_video_cpu(
+        "video.mp4",
+        fps=10.0,
+        num_frames_to_use=0,
+        window_range=[
+            WindowFrameInfo(start=10, end=12),
+            WindowFrameInfo(start=1, end=2),
+            WindowFrameInfo(start=11, end=12),
+        ],
+    )
+
+    assert captured["frame_ids"] == [1, 2, 10, 11, 12]
+    assert frame_counts == [3, 2, 2]
+    assert video[:, 0, 0, 0].tolist() == [10, 11, 12, 1, 2, 11, 12]
+
+
 def _patch_fetch_video_resize(monkeypatch: pytest.MonkeyPatch, nframes: int) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 

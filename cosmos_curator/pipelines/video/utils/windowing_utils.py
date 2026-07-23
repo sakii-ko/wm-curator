@@ -40,7 +40,11 @@ from cosmos_curator.pipelines.video.utils.decoder_utils import (
 from cosmos_curator.pipelines.video.utils.windowing_types import WindowFrameInfo
 
 if pixi_utils.is_running_in_env("default"):
-    from cosmos_curator.pipelines.video.utils.vision_process import fetch_video
+    from cosmos_curator.pipelines.video.utils.vision_process import (
+        fetch_video,
+        preprocess_video_frames,
+        read_video_cpu,
+    )
 
 
 WINDOW_MIN_FRAMES = 4
@@ -427,9 +431,7 @@ def split_source_video_into_windows(  # noqa: PLR0913
             max_pixels_per_frame=max_pixels_per_frame,
             stream_index=stream_index,
         )
-        if rotation_degrees_clockwise not in {None, 0, 90, 180, 270}:
-            msg = f"rotation_degrees_clockwise must be one of 0, 90, 180, or 270, got {rotation_degrees_clockwise}"
-            raise ValueError(msg)
+        _validate_source_rotation(rotation_degrees_clockwise)
         if rotation_degrees_clockwise:
             video = torch.rot90(video, k=-(rotation_degrees_clockwise // 90), dims=(-2, -1))
         index = 0
@@ -439,6 +441,12 @@ def split_source_video_into_windows(  # noqa: PLR0913
 
     video_frames.extend([None] * (len(windows) - len(video_frames)))
     return [None] * len(windows), video_frames, windows
+
+
+def _validate_source_rotation(rotation_degrees_clockwise: int | None) -> None:
+    if rotation_degrees_clockwise not in {None, 0, 90, 180, 270}:
+        msg = f"rotation_degrees_clockwise must be one of 0, 90, 180, or 270, got {rotation_degrees_clockwise}"
+        raise ValueError(msg)
 
 
 def _make_windows_for_clip(  # noqa: PLR0913
@@ -510,6 +518,26 @@ def _make_windows_for_clip(  # noqa: PLR0913
         clip.errors["clip_windowing"] = "clip source is unavailable"
         return windows, frames
 
+    return _attach_windows(
+        clip,
+        window_mp4_bytes,
+        window_frames,
+        window_infos,
+        return_frames=return_frames,
+    )
+
+
+def _attach_windows(
+    clip: Clip,
+    window_mp4_bytes: list[bytes | None],
+    window_frames: list[torch.Tensor | None],
+    window_infos: list[WindowFrameInfo],
+    *,
+    return_frames: bool,
+) -> tuple[list[Window], list[torch.Tensor]]:
+    """Attach aligned window metadata and optional frame tensors to one clip."""
+    windows: list[Window] = []
+    frames: list[torch.Tensor] = []
     for window_bytes, window_frames_tensor, window_frame_info in zip(
         window_mp4_bytes, window_frames, window_infos, strict=True
     ):
@@ -531,6 +559,91 @@ def _make_windows_for_clip(  # noqa: PLR0913
             clip.errors["clip_windowing"] = str(e)
 
     return windows, frames
+
+
+def _make_source_windows_for_video(  # noqa: PLR0913
+    video: Video,
+    source_path: pathlib.Path,
+    config: WindowConfig,
+    *,
+    preprocess_mode: PreprocessMode,
+    return_frames: bool,
+    stream_index: int,
+    rotation_degrees_clockwise: int | None,
+) -> dict[int, tuple[list[Window], list[torch.Tensor]]]:
+    """Decode all source-backed clip windows in one pass, then scatter by clip."""
+    _validate_source_rotation(rotation_degrees_clockwise)
+
+    plans: list[tuple[int, Clip, list[WindowFrameInfo]]] = []
+    source_windows: list[WindowFrameInfo] = []
+    for clip_index, clip in enumerate(video.clips):
+        if clip.encoded_data.resolve() is not None:
+            continue
+        frame_start, frame_stop = _source_frame_bounds(source_path, clip.span, stream_index)
+        relative_windows = compute_windows(frame_stop - frame_start, config.window_size, config.remainder_threshold)
+        plans.append((clip_index, clip, relative_windows))
+        source_windows.extend(
+            WindowFrameInfo(start=frame_start + window.start, end=frame_start + window.end)
+            for window in relative_windows
+        )
+
+    results: dict[int, tuple[list[Window], list[torch.Tensor]]] = {}
+    if not return_frames or not source_windows:
+        for clip_index, clip, relative_windows in plans:
+            results[clip_index] = _attach_windows(
+                clip,
+                [None] * len(relative_windows),
+                [None] * len(relative_windows),
+                relative_windows,
+                return_frames=return_frames,
+            )
+        return results
+
+    decoded, frame_counts = read_video_cpu(
+        str(source_path),
+        config.sampling_fps,
+        0,
+        source_windows,
+        stream_index=stream_index,
+    )
+    if (len(frame_counts), len(decoded)) != (len(source_windows), sum(frame_counts)):
+        msg = "source decoder returned frame counts that do not match the requested windows"
+        raise ValueError(msg)
+    frame_cursor = 0
+    window_cursor = 0
+    for clip_index, clip, relative_windows in plans:
+        if not relative_windows:
+            results[clip_index] = ([], [])
+            continue
+        clip_counts = frame_counts[window_cursor : window_cursor + len(relative_windows)]
+        clip_frame_count = sum(clip_counts)
+        clip_frames = preprocess_video_frames(
+            decoded[frame_cursor : frame_cursor + clip_frame_count],
+            preprocess_mode=preprocess_mode,
+            max_pixels_per_frame=config.video_max_pixels_per_frame,
+        )
+        if rotation_degrees_clockwise:
+            clip_frames = torch.rot90(
+                clip_frames,
+                k=-(rotation_degrees_clockwise // 90),
+                dims=(-2, -1),
+            )
+
+        split_frames: list[torch.Tensor | None] = []
+        clip_cursor = 0
+        for count in clip_counts:
+            split_frames.append(clip_frames[clip_cursor : clip_cursor + count])
+            clip_cursor += count
+        results[clip_index] = _attach_windows(
+            clip,
+            [None] * len(relative_windows),
+            split_frames,
+            relative_windows,
+            return_frames=True,
+        )
+        frame_cursor += clip_frame_count
+        window_cursor += len(relative_windows)
+    return results
 
 
 def make_windows_for_video(  # noqa: PLR0913
@@ -569,20 +682,36 @@ def make_windows_for_video(  # noqa: PLR0913
 
     source_path = pathlib.Path(video.input_path)
     source_available = source_path.is_file()
-
-    for clip in video.clips:
-        _windows, _frames = _make_windows_for_clip(
-            clip,
+    source_results = (
+        _make_source_windows_for_video(
+            video,
+            source_path,
             config,
-            target_bit_rate,
-            num_decode_threads,
             preprocess_mode=preprocess_mode,
-            keep_mp4=keep_mp4,
             return_frames=return_frames,
-            source_path=source_path if source_available else None,
             stream_index=stream_index,
             rotation_degrees_clockwise=rotation_degrees_clockwise,
         )
+        if source_available and not keep_mp4
+        else {}
+    )
+
+    for clip_index, clip in enumerate(video.clips):
+        if clip_index in source_results:
+            _windows, _frames = source_results[clip_index]
+        else:
+            _windows, _frames = _make_windows_for_clip(
+                clip,
+                config,
+                target_bit_rate,
+                num_decode_threads,
+                preprocess_mode=preprocess_mode,
+                keep_mp4=keep_mp4,
+                return_frames=return_frames,
+                source_path=source_path if source_available else None,
+                stream_index=stream_index,
+                rotation_degrees_clockwise=rotation_degrees_clockwise,
+            )
 
         windows.extend(_windows)
         frames.extend(_frames)

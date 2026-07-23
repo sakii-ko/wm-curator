@@ -20,6 +20,7 @@ import subprocess
 import uuid
 from uuid import UUID
 
+import attrs
 import numpy as np
 import numpy.typing as npt
 import nvtx  # type: ignore[import-untyped]
@@ -144,9 +145,10 @@ def chunk_tasks(tasks: list[SplitPipeTask], num_clips_per_chunk: int, *, verbose
             chunk_clips = primary_chunks[idx]
             end = start + len(chunk_clips)
             chunk_videos = [slice_video_clips(v, start, end, idx, num_chunks) for v in task.videos]
-            subtask = SplitPipeTask(
-                session_id=task.session_id,
+            subtask = attrs.evolve(
+                task,
                 videos=chunk_videos,
+                video=None,
                 stage_perf=copy.deepcopy(task.stage_perf),
             )
             start = end

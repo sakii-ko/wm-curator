@@ -9,6 +9,7 @@ import uuid
 import numpy as np
 import pytest
 
+from cosmos_curator.pipelines.video.annotation.data_model import AnnotationTask
 from cosmos_curator.pipelines.video.clipping.clip_extraction_stages import ClipChunkingStage
 from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask, Video, VideoMetadata
 
@@ -52,3 +53,22 @@ def test_clip_chunking_stage_rejects_non_positive_chunk_size() -> None:
     """A non-positive rechunk target should fail at construction."""
     with pytest.raises(ValueError, match="must be positive"):
         ClipChunkingStage(num_clips_per_chunk=0)
+
+
+def test_clip_chunking_stage_preserves_annotation_decode_hints() -> None:
+    """Rechunking should preserve the concrete task type and source decode hints."""
+    base_task = _make_task()
+    task = AnnotationTask(
+        session_id=base_task.session_id,
+        videos=base_task.videos,
+        stream_index=2,
+        rotation_degrees_clockwise=90,
+        dataset_metadata={"dataset": "example"},
+    )
+
+    output = ClipChunkingStage(num_clips_per_chunk=1).process_data([task])
+
+    assert all(isinstance(chunk, AnnotationTask) for chunk in output)
+    assert [chunk.stream_index for chunk in output] == [2, 2, 2]
+    assert [chunk.rotation_degrees_clockwise for chunk in output] == [90, 90, 90]
+    assert [chunk.dataset_metadata for chunk in output] == [{"dataset": "example"}] * 3

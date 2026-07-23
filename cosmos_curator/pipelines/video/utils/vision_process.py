@@ -17,6 +17,7 @@
 
 import math
 
+import numpy as np
 import torch
 from torchvision import transforms  # type: ignore[import-untyped]
 from torchvision.transforms import InterpolationMode, v2  # type: ignore[import-untyped]
@@ -133,7 +134,7 @@ def read_video_cpu(
     video_fps = (
         get_avg_frame_rate(video_path) if stream_index == 0 else get_avg_frame_rate(video_path, stream_idx=stream_index)
     )
-    idx_list = []
+    idx_list: list[int] = []
     frame_counts = []
     for window_frame_info in window_range:
         total_frames = window_frame_info.end - window_frame_info.start + 1
@@ -147,11 +148,13 @@ def read_video_cpu(
         idx_list.extend(idx)
         frame_counts.append(nframes)
 
-    video = (
-        decode_video_cpu_frame_ids(video_path, idx_list)
+    unique_ids, inverse = np.unique(np.asarray(idx_list, dtype=np.int32), return_inverse=True)
+    unique_video = (
+        decode_video_cpu_frame_ids(video_path, unique_ids.tolist())
         if stream_index == 0
-        else decode_video_cpu_frame_ids(video_path, idx_list, stream_idx=stream_index)
+        else decode_video_cpu_frame_ids(video_path, unique_ids.tolist(), stream_idx=stream_index)
     )
+    video = unique_video[inverse]
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     return video, frame_counts
 
@@ -202,6 +205,23 @@ def fetch_video(  # noqa: PLR0913
             window_range,
             stream_index=stream_index,
         )
+    return preprocess_video_frames(
+        video,
+        preprocess_mode=preprocess_mode,
+        flip_input=flip_input,
+        max_pixels_per_frame=max_pixels_per_frame,
+    ), frame_counts
+
+
+def preprocess_video_frames(
+    video: torch.Tensor,
+    *,
+    preprocess_mode: PreprocessMode = PreprocessMode.CURATOR,
+    flip_input: bool = False,
+    max_pixels_per_frame: int | None = None,
+) -> torch.Tensor:
+    """Resize and normalize an already decoded TCHW video tensor."""
+    preprocess_mode = PreprocessMode(preprocess_mode)
     nframes, _, height, width = video.shape
 
     max_pixels = max_pixels_per_frame
@@ -234,7 +254,7 @@ def fetch_video(  # noqa: PLR0913
         if flip_input:
             # Flip along the width and height dims
             video = torch.stack([torch.flip(frame, dims=[1, 2]) for frame in video], dim=0)
-        return video, frame_counts
+        return video
     video = transforms.functional.resize(
         video,
         [resized_height, resized_width],
@@ -243,4 +263,4 @@ def fetch_video(  # noqa: PLR0913
     )
     if flip_input:
         video = torch.stack([torch.flip(frame, dims=[1, 2]) for frame in video], dim=0)
-    return video.to(torch.uint8), frame_counts
+    return video.to(torch.uint8)
