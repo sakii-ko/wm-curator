@@ -55,6 +55,9 @@ def _get_default_models() -> list[str]:
         if model.startswith("seedvr2"):
             # large SR models, opt-in only
             continue
+        if model == "normalcrafter":
+            # diffusion checkpoint, opt-in only
+            continue
         if model == "sam3":
             # gated by Meta approval, opt-in only
             continue

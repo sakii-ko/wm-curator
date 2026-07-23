@@ -46,13 +46,18 @@ MOCK_MODELS = {
         "version": None,
         "filelist": None,
     },
+    "normalcrafter": {
+        "model_id": "Yanrui95/NormalCrafter",
+        "version": "main",
+        "filelist": None,
+    },
     "aesthetic_scorer": {
         "model_id": "ttj/sac-logos-ava1-l14-linearMSE",
         "version": "1e77fa05081323d99725fc40a9bf9f88180490e7",
         "filelist": ["model.safetensors"],
     },
 }
-DEFAULT_EXCLUDED_MOCK_MODELS = {"sam3"}
+DEFAULT_EXCLUDED_MOCK_MODELS = {"normalcrafter", "sam3"}
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -93,12 +98,14 @@ class TestSetupParsers:
         )
         assert args.models == expected_default
 
-    def test_default_models_exclude_gated_models(self) -> None:
-        """Test that gated models are available but not downloaded by default."""
+    def test_default_models_exclude_opt_in_models(self) -> None:
+        """Test that gated and large models are available but not downloaded by default."""
         default_models = _get_default_models()
 
         assert "sam3" in MOCK_MODELS
         assert "sam3" not in default_models
+        assert "normalcrafter" in MOCK_MODELS
+        assert "normalcrafter" not in default_models
 
     def test_download_parser_accepts_custom_models(self) -> None:
         """Test that download parser accepts custom --models argument."""

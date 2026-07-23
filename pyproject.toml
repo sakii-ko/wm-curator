@@ -82,6 +82,10 @@ build-backend = "setuptools.build_meta"
     "clip_viewer_webdocs/*",
     "clip_viewer_webdocs/images/*",
 ]
+"cosmos_curator.models._normalcrafter" = [
+    "LICENSE",
+    "PROVENANCE.md",
+]
 
 [tool.setuptools_scm]
 local_scheme = "no-local-version"

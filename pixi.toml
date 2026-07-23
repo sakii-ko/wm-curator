@@ -6,6 +6,7 @@ version = "1.0.0"
 
 [activation.env]
 PYTHONNOUSERSITE = "1"  # isolate pixi environments from user/system site-packages
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 [dependencies]
 python = ">=3.12.13,<3.13"
@@ -281,6 +282,23 @@ torchvision = "==0.26.0"
 transformers = ">=5.0.0,<6.0.0"
 wm-curator-vipe = { path = "third_party/vipe" }
 
+# NormalCrafter uses private Diffusers pipeline hooks, so keep the tested
+# versions isolated from captioning and other model workers.
+[feature.normalcrafter]
+platforms = ["linux-64"]
+
+[feature.normalcrafter.system-requirements]
+cuda = "13.0.2"
+libc = { family = "glibc", version = "2.35" }
+
+[feature.normalcrafter.pypi-dependencies]
+accelerate = "==1.12.0"
+av = "==17.0.0"
+diffusers = "==0.38.0"
+torch = "==2.11.0"
+torchvision = "==0.26.0"
+transformers = "==5.9.0"
+
 [feature.legacy-transformers.dependencies]
 einops = "*"
 transformers = "==4.55.4" # legacy models (cosmos-embed1, internvideo2) require older transformers
@@ -342,6 +360,7 @@ default = ["core", "runtime", "transformers", "tracing", "profiling"]
 dev = ["tools", "cluster", "core", "transformers", "tracing", "profiling", "dev"]
 legacy-transformers = ["core", "legacy-transformers", "tracing", "profiling"]
 model-download = ["core", "tracing"]
+normalcrafter = ["core", "normalcrafter", "tracing", "profiling"]
 paddle-ocr = ["core", "paddle-ocr", "tracing", "profiling"]
 seedvr = ["core", "runtime", "transformers", "seedvr", "tracing", "profiling"]
 sam3 = ["core", "runtime", "sam3", "tracing", "profiling"]

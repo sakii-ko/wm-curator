@@ -30,7 +30,6 @@ from typing import (
 
 import attrs
 import av
-import cv2
 import numpy as np
 import numpy.typing as npt
 
@@ -664,6 +663,8 @@ def extract_frames(  # noqa: PLR0913
     )
 
     if target_res[0] > 0 and target_res[1] > 0:
+        import cv2  # noqa: PLC0415
+
         interpolation = cv2.INTER_CUBIC
         frames = np.array(
             [cv2.resize(frame, (target_res[1], target_res[0]), interpolation=interpolation) for frame in frames]

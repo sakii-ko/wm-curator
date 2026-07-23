@@ -29,7 +29,6 @@ import numpy as np
 import numpy.typing as npt
 from loguru import logger
 
-import cosmos_curator.pipelines.video.filtering.motion.motion_vector_backend as motion
 from cosmos_curator.core.interfaces.stage_interface import PipelineTask
 from cosmos_curator.core.utils.data.lazy_data import LazyData
 from cosmos_curator.core.utils.infra.performance_utils import StagePerfStats
@@ -39,6 +38,8 @@ from cosmos_curator.pipelines.video.utils.decoder_utils import extract_video_met
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    import cosmos_curator.pipelines.video.filtering.motion.motion_vector_backend as motion
 
 try:
     import torch
@@ -435,7 +436,7 @@ class Clip:
     # No converter: producer must compute nbytes explicitly (dict has no .nbytes attr)
     extracted_frames: LazyData[dict[str, npt.NDArray[np.uint8]]] = attrs.field(factory=LazyData)
     # motion
-    decoded_motion_data: motion.DecodedData | None = None
+    decoded_motion_data: "motion.DecodedData | None" = None
     motion_score_global_mean: float | None = None
     motion_score_per_patch_min_256: float | None = None
     # aesthetic
