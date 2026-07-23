@@ -212,7 +212,7 @@ class _DiffusersNormalCrafterRuntime:
     ) -> "_DiffusersNormalCrafterRuntime":
         """Load the vendored inference-only UNet and pinned Diffusers pipeline."""
         import torch  # noqa: PLC0415
-        from diffusers import (  # noqa: PLC0415
+        from diffusers import (  # type: ignore[import-not-found]  # noqa: PLC0415
             AutoencoderKLTemporalDecoder,
             StableVideoDiffusionPipeline,
         )
@@ -501,7 +501,7 @@ def _load_vendored_unet_class() -> type[Any]:
 
 
 def _configure_sdpa(pipe: Any) -> None:  # noqa: ANN401
-    from diffusers.models.attention_processor import AttnProcessor2_0  # noqa: PLC0415
+    from diffusers.models.attention_processor import AttnProcessor2_0  # type: ignore[import-not-found]  # noqa: PLC0415
 
     for name, component in (("unet", pipe.unet), ("vae", pipe.vae)):
         setter = getattr(component, "set_attn_processor", None)

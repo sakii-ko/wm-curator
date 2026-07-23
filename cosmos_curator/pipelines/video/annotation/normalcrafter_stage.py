@@ -464,7 +464,7 @@ def _decode_with_pyav(  # noqa: PLR0913
         save_stream_position,
     )
 
-    with save_stream_position(source):
+    with save_stream_position(str(source)):
         source_timestamps = get_video_timestamps(source, stream_idx=stream_index)
     if len(source_timestamps) == 0:
         message = "source video contains no displayable frames"
@@ -491,7 +491,7 @@ def _decode_with_pyav(  # noqa: PLR0913
         max_frames=max_frames,
         span=resolved_span,
     )
-    with save_stream_position(source):
+    with save_stream_position(str(source)):
         frames = decode_video_cpu_frame_ids(
             source,
             frame_ids,

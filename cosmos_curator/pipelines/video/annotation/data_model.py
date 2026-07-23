@@ -124,9 +124,6 @@ def resolve_source_clip_request(task: SplitPipeTask) -> SourceClipRequest:
         raise ValueError(msg)
 
     source = task.video.input_video
-    if not isinstance(source, (pathlib.Path, StoragePrefix)):
-        msg = f"source must be a pathlib.Path or StoragePrefix, got {type(source).__name__}"
-        raise TypeError(msg)
     if len(task.video.clips) > 1:
         msg = f"source-backed annotation supports at most one Clip.span per task, got {len(task.video.clips)} clips"
         raise ValueError(msg)
@@ -219,9 +216,6 @@ def make_annotation_task(  # noqa: PLR0913
     dataset_metadata: Mapping[str, Any] | None = None,
 ) -> AnnotationTask:
     """Build an annotation task using the existing ``Video`` and ``Clip`` types."""
-    if not isinstance(source, (pathlib.Path, StoragePrefix)):
-        msg = f"source must be a pathlib.Path or StoragePrefix, got {type(source).__name__}"
-        raise TypeError(msg)
     if not isinstance(session_id, str) or not session_id.strip():
         msg = "session_id must be a non-empty string"
         raise ValueError(msg)

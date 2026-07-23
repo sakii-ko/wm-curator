@@ -133,9 +133,6 @@ class TemporalAnnotationWriter:
         canonical_uuid = _canonical_clip_uuid(clip_uuid)
         frame_count = _positive_int(frame_count, field_name="frame_count")
         chunk_frames = _positive_int(chunk_frames, field_name="chunk_frames")
-        if not isinstance(metadata, Mapping):
-            message = "metadata must be a mapping"
-            raise TypeError(message)
         if any(not isinstance(key, str) or not key for key in metadata):
             message = "metadata keys must be non-empty strings"
             raise ValueError(message)

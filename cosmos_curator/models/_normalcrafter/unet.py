@@ -12,7 +12,7 @@ frame-expanded ``encoder_hidden_states`` tensor.
 
 # Diffusers builds these registered modules dynamically from the checkpoint
 # config, so its static class surface does not expose them to mypy.
-# mypy: disable-error-code="attr-defined"
+# mypy: disable-error-code="attr-defined,import-not-found,misc"
 
 import torch
 from diffusers import UNetSpatioTemporalConditionModel

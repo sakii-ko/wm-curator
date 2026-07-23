@@ -1083,7 +1083,7 @@ def _split(args: argparse.Namespace) -> None:
 
     """
     validate_stage_replay_args(args)
-    if args.transcode_encoder != "none":
+    if getattr(args, "transcode_encoder", "libopenh264") != "none":
         assert_ffmpeg_supports_h264()
 
     zero_start = time.time()

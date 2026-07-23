@@ -103,6 +103,7 @@ exclude = [
     "build/",
     "dist/",
     "cosmos-xenna/",
+    "third_party/vipe/",
     "cosmos_curator/models/internvideo2_multi_modality/",
 ]
 

@@ -22,7 +22,7 @@ import attrs
 from loguru import logger
 
 try:
-    import gpustat  # type: ignore[import-untyped]
+    import gpustat  # type: ignore[import-not-found,import-untyped]
 
     HAS_PYNVML = True
 except Exception:  # noqa: BLE001
