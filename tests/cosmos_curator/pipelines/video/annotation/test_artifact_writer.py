@@ -27,6 +27,7 @@ from cosmos_curator.core.utils.storage import storage_utils
 from cosmos_curator.core.utils.storage.storage_client import StoragePrefix
 from cosmos_curator.pipelines.video.annotation import artifact_writer
 from cosmos_curator.pipelines.video.annotation.artifact_writer import (
+    TemporalAnnotationReader,
     TemporalAnnotationWriter,
 )
 from tests.cosmos_curator.core.utils.storage.conftest import FakeStorageClient
@@ -66,9 +67,19 @@ def _metadata(*, frame_count: int = 65) -> dict[str, Any]:
                 "axes": "THWC",
                 "dtype": "float16",
                 "shape": [frame_count, 2, 3, 3],
-            }
+            },
+            "timestamps_ns": {
+                "axes": "T",
+                "dtype": "int64",
+                "shape": [frame_count],
+            },
         },
-        "alignment": {"fps_num": 15, "fps_den": 1, "source_frame_step": 2},
+        "alignment": {
+            "fps_num": 15,
+            "fps_den": 1,
+            "source_frame_step": 2,
+            "timestamp_array": "timestamps_ns",
+        },
         "producer": {"id": "normalcrafter", "release": "normalcrafter-v1"},
     }
 
@@ -139,16 +150,17 @@ def test_local_chunks_are_atomically_replaced_and_metadata_is_last(
 
 
 def test_retry_overwrites_published_chunk_and_can_complete(tmp_path: Path) -> None:
-    """A whole-task retry may safely restart from a range published by its first attempt."""
+    """A fresh retry overwrites residual chunks that have no completion record."""
     output_path = tmp_path / "annotations"
     clip_uuid = str(uuid4())
     writer = TemporalAnnotationWriter(output_path)
 
     with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
         np.savez(staging_path, attempt=np.array([1], dtype=np.int8))
+    assert not TemporalAnnotationReader(output_path).is_complete(clip_uuid)
 
-    # Simulate Xenna retrying process_data() on the same actor after a later
-    # operation in the first attempt failed.
+    # Simulate a retry on a fresh actor after the first attempt failed.
+    writer = TemporalAnnotationWriter(output_path)
     with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
         np.savez(staging_path, attempt=np.array([2], dtype=np.int8))
     with writer.open_chunk(clip_uuid, 2, 3) as staging_path:
@@ -164,6 +176,130 @@ def test_retry_overwrites_published_chunk_and_can_complete(tmp_path: Path) -> No
     first_chunk = output_path / "chunks" / "v1" / clip_uuid / "frames-000000000-000000002.npz"
     with np.load(first_chunk) as chunk:
         assert chunk["attempt"].tolist() == [2]
+
+
+def test_reader_uses_metadata_as_completion_marker_and_loads_bounded_chunks(
+    tmp_path: Path,
+) -> None:
+    """The reader derives chunk paths from the final metadata record."""
+    output_path = tmp_path / "annotations"
+    clip_uuid = str(uuid4())
+    writer = TemporalAnnotationWriter(output_path)
+    reader = TemporalAnnotationReader(output_path)
+
+    with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
+        _write_chunk(staging_path, 0, 2)
+    assert not reader.is_complete(clip_uuid)
+
+    with writer.open_chunk(clip_uuid, 2, 3) as staging_path:
+        _write_chunk(staging_path, 2, 3)
+    metadata_uri = writer.complete_clip(
+        clip_uuid,
+        frame_count=3,
+        chunk_frames=2,
+        metadata=_metadata(frame_count=3),
+    )
+
+    assert reader.is_complete(clip_uuid)
+    assert reader.metadata_uri(clip_uuid) == metadata_uri
+    assert reader.read_metadata(clip_uuid)["frame_count"] == 3
+    chunks = list(reader.iter_chunks(clip_uuid))
+    assert [(chunk.frame_start, chunk.frame_stop) for chunk in chunks] == [
+        (0, 2),
+        (2, 3),
+    ]
+    np.testing.assert_array_equal(
+        np.concatenate([chunk.arrays["timestamps_ns"] for chunk in chunks]),
+        np.arange(3, dtype=np.int64),
+    )
+
+
+def test_reader_accepts_temporal_arrays_without_axis_labels(tmp_path: Path) -> None:
+    """Shape still defines temporal alignment for camera matrices without axis labels."""
+    output_path = tmp_path / "annotations"
+    clip_uuid = str(uuid4())
+    writer = TemporalAnnotationWriter(output_path)
+    with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
+        _write_chunk(staging_path, 0, 2)
+    metadata = _metadata(frame_count=2)
+    metadata["arrays"]["K"] = {
+        "dtype": "float32",
+        "shape": [2, 3, 3],
+    }
+    writer.complete_clip(
+        clip_uuid,
+        frame_count=2,
+        chunk_frames=2,
+        metadata=metadata,
+    )
+
+    assert TemporalAnnotationReader(output_path).is_complete(clip_uuid)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "error"),
+    [
+        (
+            {
+                "timestamps_ns": np.array([0, 1], dtype=np.int64),
+                "normal": np.zeros((2, 2, 3, 3), dtype=np.float32),
+            },
+            "dtype",
+        ),
+        (
+            {
+                "timestamps_ns": np.array([0, 1], dtype=np.int64),
+                "normal": np.zeros((2, 1, 3, 3), dtype=np.float16),
+            },
+            "shape",
+        ),
+        (
+            {
+                "timestamps_ns": np.array([0, 0], dtype=np.int64),
+                "normal": np.zeros((2, 2, 3, 3), dtype=np.float16),
+            },
+            "strictly increasing",
+        ),
+    ],
+)
+def test_reader_validates_chunk_dtype_shape_and_timestamps(
+    tmp_path: Path,
+    replacement: dict[str, np.ndarray],
+    error: str,
+) -> None:
+    """Chunk contents must match the lightweight metadata schema."""
+    output_path = tmp_path / "annotations"
+    clip_uuid = str(uuid4())
+    writer = TemporalAnnotationWriter(output_path)
+    with writer.open_chunk(clip_uuid, 0, 2) as staging_path:
+        _write_chunk(staging_path, 0, 2)
+    writer.complete_clip(
+        clip_uuid,
+        frame_count=2,
+        chunk_frames=2,
+        metadata=_metadata(frame_count=2),
+    )
+    chunk_path = output_path / "chunks" / "v1" / clip_uuid / "frames-000000000-000000002.npz"
+    np.savez(chunk_path, **replacement)
+
+    with pytest.raises(ValueError, match=error):
+        list(TemporalAnnotationReader(output_path).iter_chunks(clip_uuid))
+
+
+def test_reader_rejects_unknown_metadata_schema(tmp_path: Path) -> None:
+    """A completion record cannot silently change the reader contract."""
+    output_path = tmp_path / "annotations"
+    clip_uuid = str(uuid4())
+    metadata_path = output_path / "metas" / "v1" / f"{clip_uuid}.json"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(
+        json.dumps({"schema": "unknown"}),
+        encoding="utf-8",
+    )
+
+    reader = TemporalAnnotationReader(output_path)
+    with pytest.raises(ValueError, match="unsupported annotation schema"):
+        reader.is_complete(clip_uuid)
 
 
 def test_open_chunk_still_rejects_pending_range_reentry(tmp_path: Path) -> None:
@@ -291,6 +427,9 @@ def test_remote_chunks_use_file_upload_and_metadata_is_uploaded_last(
     assert metadata_location == expected_uploads[-1]
     assert set(client.objects) == set(expected_uploads)
     assert json.loads(client.objects[expected_uploads[-1]])["frame_count"] == 3
+    reader = TemporalAnnotationReader(output_path)
+    assert reader.is_complete(clip_uuid)
+    assert [(chunk.frame_start, chunk.frame_stop) for chunk in reader.iter_chunks(clip_uuid)] == [(0, 2), (2, 3)]
     assert not list(tmp_path.iterdir())
 
 

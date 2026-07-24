@@ -39,6 +39,7 @@ from cosmos_curator.models.normalcrafter import (
     NormalCrafterModel,
 )
 from cosmos_curator.pipelines.video.annotation.artifact_writer import (
+    TemporalAnnotationReader,
     TemporalAnnotationWriter,
 )
 from cosmos_curator.pipelines.video.annotation.data_model import (
@@ -134,6 +135,7 @@ class NormalCrafterStage(CuratorStage):
         self._inference_model = inference_model
         self._decoder = decoder or decode_normalcrafter_clip
         self._writer = writer
+        self._reader: TemporalAnnotationReader | None = None
 
     @property
     def resources(self) -> CuratorStageResource:
@@ -154,6 +156,10 @@ class NormalCrafterStage(CuratorStage):
                 profile_name=self._profile_name,
                 tmp_dir=self._tmp_dir,
             )
+        self._reader = TemporalAnnotationReader(
+            self._output_path,
+            profile_name=self._profile_name,
+        )
 
     def process_data(self, tasks: list[PipelineTask]) -> list[PipelineTask]:
         """Decode and annotate one source-backed task."""
@@ -167,6 +173,8 @@ class NormalCrafterStage(CuratorStage):
         request = resolve_source_clip_request(task)
         source = _validated_source(request.source)
         clip = request.clip
+        if clip is not None and self._reuse_completed(task, clip):
+            return tasks
         decoded = self._decoder(
             source,
             request.span,
@@ -191,6 +199,8 @@ class NormalCrafterStage(CuratorStage):
             clip = make_full_source_clip(source, span, request.stream_index)
             task.video.clips.append(clip)
             task.video.num_total_clips = max(task.video.num_total_clips, 1)
+        if self._reuse_completed(task, clip):
+            return tasks
 
         metadata_uri = self._infer_and_write(
             clip,
@@ -202,13 +212,7 @@ class NormalCrafterStage(CuratorStage):
             frames=frames,
             timestamps_ns=timestamps_ns,
         )
-        dataset_metadata = getattr(task, "dataset_metadata", None)
-        if isinstance(dataset_metadata, dict):
-            dataset_metadata["normal_annotation"] = {
-                "format": "npz-temporal-v1",
-                "metadata_uri": metadata_uri,
-                "producer_release": _PRODUCER_RELEASE,
-            }
+        self._set_annotation_reference(task, metadata_uri)
         return tasks
 
     def destroy(self) -> None:
@@ -331,6 +335,22 @@ class NormalCrafterStage(CuratorStage):
             message = "NormalCrafterStage.stage_setup() must be called before process_data()"
             raise RuntimeError(message)
         return self._writer
+
+    def _reuse_completed(self, task: SplitPipeTask, clip: Clip) -> bool:
+        if self._reader is None or not self._reader.is_complete(clip.uuid):
+            return False
+        self._set_annotation_reference(task, self._reader.metadata_uri(clip.uuid))
+        return True
+
+    @staticmethod
+    def _set_annotation_reference(task: SplitPipeTask, metadata_uri: str) -> None:
+        dataset_metadata = getattr(task, "dataset_metadata", None)
+        if isinstance(dataset_metadata, dict):
+            dataset_metadata["normal_annotation"] = {
+                "format": "npz-temporal-v1",
+                "metadata_uri": metadata_uri,
+                "producer_release": _PRODUCER_RELEASE,
+            }
 
 
 def decode_normalcrafter_clip(  # noqa: PLR0913

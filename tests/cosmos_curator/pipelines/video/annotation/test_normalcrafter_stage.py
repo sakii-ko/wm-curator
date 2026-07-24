@@ -231,6 +231,70 @@ def test_existing_clip_span_is_passed_directly(tmp_path: Path) -> None:
     assert decoder.calls[0]["span"] == span
 
 
+def test_existing_completion_marker_skips_decode_and_inference(tmp_path: Path) -> None:
+    """A completed clip is reused without touching the decoder or model."""
+    source = tmp_path / "source.mp4"
+    source.touch()
+    output = tmp_path / "output"
+    span = (0.25, 1.25)
+    task = make_annotation_task(
+        source,
+        session_id="sample",
+        relative_path="source.mp4",
+        span=span,
+    )
+    clip = task.video.clips[0]
+    metadata_path = output / "metas" / "v1" / f"{clip.uuid}.json"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema": "cosmos-curator.temporal-annotation/v1",
+                "clip_uuid": str(clip.uuid),
+                "format": "npz",
+                "frame_count": 1,
+                "chunk_frames": 1,
+                "chunk_path_template": (f"chunks/v1/{clip.uuid}/frames-{{frame_start:09d}}-{{frame_stop:09d}}.npz"),
+                "metadata": {
+                    "arrays": {
+                        "timestamps_ns": {
+                            "axes": "T",
+                            "dtype": "int64",
+                            "shape": [1],
+                        }
+                    },
+                    "alignment": {"timestamp_array": "timestamps_ns"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    decoded = DecodedNormalCrafterClip(
+        frames=np.zeros((15, 1, 1, 3), dtype=np.uint8),
+        timestamps_ns=np.arange(15, dtype=np.int64),
+        source_span=span,
+        decoder_backend="fake",
+    )
+    decoder = RecordingDecoder(decoded)
+    runtime = RecordingRuntime()
+    stage = NormalCrafterStage(
+        output,
+        _make_model(tmp_path, runtime),
+        decoder=decoder,
+    )
+
+    stage.stage_setup()
+    assert stage.process_data([task]) == [task]
+    assert decoder.calls == []
+    assert runtime.frames is None
+    assert task.dataset_metadata["normal_annotation"] == {
+        "format": "npz-temporal-v1",
+        "metadata_uri": str(metadata_path),
+        "producer_release": "normalcrafter-v1",
+    }
+
+
 def test_stage_rejects_decoder_output_past_model_limit(tmp_path: Path) -> None:
     """A decoder cannot bypass the explicit full-clip safety limit."""
     source = tmp_path / "source.mp4"

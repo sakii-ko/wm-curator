@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Write temporal annotation chunks without content-addressed indirection.
+"""Read and write temporal annotation chunks without a catalog.
 
 The caller owns the annotation namespace through ``output_path`` (for example,
 ``annotations/normals/normalcrafter-v1``). Each chunk is published independently,
@@ -21,6 +21,7 @@ and the per-clip metadata JSON is published last as the logical completion recor
 """
 
 import contextlib
+import io
 import json
 import os
 import stat
@@ -28,8 +29,13 @@ import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID
 
+import numpy as np
+import numpy.typing as npt
+
+from cosmos_curator.core.utils.storage import storage_utils
 from cosmos_curator.core.utils.storage.storage_utils import StorageWriter
 
 _SCHEMA = "cosmos-curator.temporal-annotation/v1"
@@ -41,6 +47,293 @@ _METADATA_PATH_TEMPLATE = "metas/v1/{clip_uuid}.json"
 class _ClipWriteState:
     published_ranges: set[tuple[int, int]] = field(default_factory=set)
     pending_ranges: set[tuple[int, int]] = field(default_factory=set)
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalAnnotationChunk:
+    """One materialized temporal chunk returned by the reader."""
+
+    frame_start: int
+    frame_stop: int
+    arrays: Mapping[str, npt.NDArray[np.generic]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ArraySpec:
+    dtype: np.dtype[np.generic]
+    shape: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _AnnotationDocument:
+    raw: dict[str, Any]
+    frame_count: int
+    chunk_frames: int
+    arrays: Mapping[str, _ArraySpec]
+    timestamp_array: str
+
+
+class TemporalAnnotationReader:
+    """Read completed annotations one NPZ chunk at a time.
+
+    The per-clip JSON is the only completion marker. Chunk paths are derived
+    from its frame count and chunk size, so no manifest or hash index is
+    required.
+    """
+
+    def __init__(
+        self,
+        output_path: str | Path,
+        *,
+        profile_name: str = "default",
+    ) -> None:
+        """Create a reader rooted at one annotation producer release."""
+        output_path_str = str(output_path)
+        if not output_path_str.strip():
+            message = "output_path must be non-empty"
+            raise ValueError(message)
+        self._base_path = output_path_str.rstrip("/")
+        self._client = storage_utils.get_storage_client(
+            self._base_path,
+            profile_name=profile_name,
+        )
+
+    def metadata_uri(self, clip_uuid: str | UUID) -> str:
+        """Return the completion-record location for one clip."""
+        canonical_uuid = _canonical_clip_uuid(clip_uuid)
+        return _join_location(self._base_path, _metadata_sub_path(canonical_uuid))
+
+    def is_complete(self, clip_uuid: str | UUID) -> bool:
+        """Return whether a valid final metadata record exists."""
+        canonical_uuid = _canonical_clip_uuid(clip_uuid)
+        if not storage_utils.path_exists(
+            self.metadata_uri(canonical_uuid),
+            client=self._client,
+        ):
+            return False
+        self._read_document(canonical_uuid)
+        return True
+
+    def read_metadata(self, clip_uuid: str | UUID) -> dict[str, Any]:
+        """Read and validate the final metadata document."""
+        canonical_uuid = _canonical_clip_uuid(clip_uuid)
+        return self._read_document(canonical_uuid).raw
+
+    def iter_chunks(
+        self,
+        clip_uuid: str | UUID,
+    ) -> Iterator[TemporalAnnotationChunk]:
+        """Load, validate, and yield one bounded NPZ chunk at a time."""
+        canonical_uuid = _canonical_clip_uuid(clip_uuid)
+        document = self._read_document(canonical_uuid)
+        previous_timestamp: int | None = None
+        for frame_start in range(0, document.frame_count, document.chunk_frames):
+            frame_stop = min(frame_start + document.chunk_frames, document.frame_count)
+            chunk_uri = _join_location(
+                self._base_path,
+                _chunk_sub_path(canonical_uuid, frame_start, frame_stop),
+            )
+            arrays = self._read_chunk(
+                chunk_uri,
+                frame_start=frame_start,
+                frame_stop=frame_stop,
+                specs=document.arrays,
+            )
+            timestamps = cast(
+                "npt.NDArray[np.int64]",
+                arrays[document.timestamp_array],
+            )
+            if timestamps.ndim != 1:
+                message = (
+                    f"annotation timestamp array {document.timestamp_array!r} "
+                    f"must be one-dimensional, got {timestamps.shape}"
+                )
+                raise ValueError(message)
+            if len(timestamps) > 1 and np.any(timestamps[1:] <= timestamps[:-1]):
+                message = f"annotation timestamps are not strictly increasing in {chunk_uri}"
+                raise ValueError(message)
+            if len(timestamps) and previous_timestamp is not None and int(timestamps[0]) <= previous_timestamp:
+                message = f"annotation timestamps are not strictly increasing across chunks at {chunk_uri}"
+                raise ValueError(message)
+            if len(timestamps):
+                previous_timestamp = int(timestamps[-1])
+            yield TemporalAnnotationChunk(
+                frame_start=frame_start,
+                frame_stop=frame_stop,
+                arrays=arrays,
+            )
+
+    def _read_document(self, canonical_uuid: str) -> _AnnotationDocument:
+        metadata_uri = _join_location(
+            self._base_path,
+            _metadata_sub_path(canonical_uuid),
+        )
+        try:
+            value = json.loads(
+                storage_utils.read_bytes(metadata_uri, client=self._client).decode("utf-8"),
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            message = f"invalid annotation metadata JSON: {metadata_uri}"
+            raise ValueError(message) from error
+        return _parse_annotation_document(
+            value,
+            canonical_uuid=canonical_uuid,
+            metadata_uri=metadata_uri,
+        )
+
+    def _read_chunk(
+        self,
+        chunk_uri: str,
+        *,
+        frame_start: int,
+        frame_stop: int,
+        specs: Mapping[str, _ArraySpec],
+    ) -> dict[str, npt.NDArray[np.generic]]:
+        source: Path | io.BytesIO
+        if self._client is None:
+            source = Path(chunk_uri)
+        else:
+            source = io.BytesIO(storage_utils.read_bytes(chunk_uri, client=self._client))
+        loaded = np.load(source, allow_pickle=False)
+        if not isinstance(loaded, np.lib.npyio.NpzFile):
+            message = f"annotation chunk is not an NPZ archive: {chunk_uri}"
+            raise TypeError(message)
+        try:
+            if set(loaded.files) != set(specs):
+                message = (
+                    f"annotation chunk arrays do not match metadata in {chunk_uri}: "
+                    f"expected={sorted(specs)}, observed={sorted(loaded.files)}"
+                )
+                raise ValueError(message)
+            arrays: dict[str, npt.NDArray[np.generic]] = {}
+            chunk_length = frame_stop - frame_start
+            for name, spec in specs.items():
+                array = loaded[name]
+                expected_shape = (chunk_length, *spec.shape[1:])
+                if array.dtype != spec.dtype:
+                    message = f"annotation array {name!r} has dtype {array.dtype} in {chunk_uri}, expected {spec.dtype}"
+                    raise ValueError(message)
+                if array.shape != expected_shape:
+                    message = (
+                        f"annotation array {name!r} has shape {array.shape} in {chunk_uri}, expected {expected_shape}"
+                    )
+                    raise ValueError(message)
+                arrays[name] = array
+            return arrays
+        finally:
+            loaded.close()
+
+
+def _parse_annotation_document(
+    value: object,
+    *,
+    canonical_uuid: str,
+    metadata_uri: str,
+) -> _AnnotationDocument:
+    if not isinstance(value, dict):
+        message = f"annotation metadata must be a JSON object: {metadata_uri}"
+        raise TypeError(message)
+    document = cast("dict[str, Any]", value)
+    if document.get("schema") != _SCHEMA:
+        message = f"unsupported annotation schema in {metadata_uri}: {document.get('schema')!r}"
+        raise ValueError(message)
+    if document.get("clip_uuid") != canonical_uuid:
+        message = f"annotation metadata UUID does not match {canonical_uuid}: {document.get('clip_uuid')!r}"
+        raise ValueError(message)
+    if document.get("format") != "npz":
+        message = f"unsupported annotation format in {metadata_uri}: {document.get('format')!r}"
+        raise ValueError(message)
+
+    frame_count = _positive_int(document.get("frame_count"), field_name="frame_count")
+    chunk_frames = _positive_int(document.get("chunk_frames"), field_name="chunk_frames")
+    expected_template = f"chunks/v1/{canonical_uuid}/frames-{{frame_start:09d}}-{{frame_stop:09d}}.npz"
+    if document.get("chunk_path_template") != expected_template:
+        message = f"unsupported annotation chunk path template in {metadata_uri}"
+        raise ValueError(message)
+
+    metadata = _string_mapping(document.get("metadata"), field_name="metadata")
+    arrays = _parse_array_specs(metadata.get("arrays"), frame_count=frame_count)
+    timestamp_array = _parse_timestamp_array(
+        metadata.get("alignment"),
+        arrays=arrays,
+        frame_count=frame_count,
+    )
+    return _AnnotationDocument(
+        raw=document,
+        frame_count=frame_count,
+        chunk_frames=chunk_frames,
+        arrays=arrays,
+        timestamp_array=timestamp_array,
+    )
+
+
+def _parse_array_specs(value: object, *, frame_count: int) -> dict[str, _ArraySpec]:
+    array_values = _string_mapping(value, field_name="metadata.arrays")
+    if not array_values:
+        message = "metadata.arrays must not be empty"
+        raise ValueError(message)
+    arrays: dict[str, _ArraySpec] = {}
+    for name, spec_value in array_values.items():
+        if not name:
+            message = "metadata.arrays keys must be non-empty strings"
+            raise ValueError(message)
+        arrays[name] = _parse_array_spec(
+            spec_value,
+            name=name,
+            frame_count=frame_count,
+        )
+    return arrays
+
+
+def _parse_array_spec(value: object, *, name: str, frame_count: int) -> _ArraySpec:
+    spec = _string_mapping(value, field_name=f"metadata.arrays.{name}")
+    dtype_value = spec.get("dtype")
+    if not isinstance(dtype_value, str):
+        message = f"metadata.arrays.{name}.dtype must be a string"
+        raise TypeError(message)
+    try:
+        dtype = np.dtype(dtype_value)
+    except TypeError as error:
+        message = f"metadata.arrays.{name}.dtype is invalid: {dtype_value!r}"
+        raise ValueError(message) from error
+    if dtype.name != dtype_value:
+        message = f"metadata.arrays.{name}.dtype must use canonical NumPy name {dtype.name!r}"
+        raise ValueError(message)
+
+    shape_value = spec.get("shape")
+    if not isinstance(shape_value, list) or not shape_value:
+        message = f"metadata.arrays.{name}.shape must be a non-empty list"
+        raise ValueError(message)
+    if any(isinstance(size, bool) or not isinstance(size, int) or size <= 0 for size in shape_value):
+        message = f"metadata.arrays.{name}.shape must contain positive integers"
+        raise ValueError(message)
+    shape = tuple(shape_value)
+    axes = spec.get("axes")
+    if axes is not None and (not isinstance(axes, str) or len(axes) != len(shape) or not axes.startswith("T")):
+        message = f"metadata.arrays.{name}.axes must describe a leading temporal axis"
+        raise ValueError(message)
+    if shape[0] != frame_count:
+        message = f"metadata.arrays.{name}.shape starts with {shape[0]}, expected frame_count={frame_count}"
+        raise ValueError(message)
+    return _ArraySpec(dtype=dtype, shape=shape)
+
+
+def _parse_timestamp_array(
+    value: object,
+    *,
+    arrays: Mapping[str, _ArraySpec],
+    frame_count: int,
+) -> str:
+    alignment = _string_mapping(value, field_name="metadata.alignment")
+    timestamp_array = alignment.get("timestamp_array")
+    if not isinstance(timestamp_array, str) or timestamp_array not in arrays:
+        message = "metadata.alignment.timestamp_array must name a declared array"
+        raise ValueError(message)
+    timestamp_spec = arrays[timestamp_array]
+    if timestamp_spec.dtype != np.dtype(np.int64) or timestamp_spec.shape != (frame_count,):
+        message = f"timestamp array {timestamp_array!r} must be int64 with shape [{frame_count}]"
+        raise ValueError(message)
+    return timestamp_array
 
 
 class TemporalAnnotationWriter:
@@ -234,7 +527,7 @@ def _canonical_clip_uuid(value: str | UUID) -> str:
         raise ValueError(message) from error
 
 
-def _positive_int(value: int, *, field_name: str) -> int:
+def _positive_int(value: object, *, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         message = f"{field_name} must be an integer"
         raise TypeError(message)
@@ -242,6 +535,16 @@ def _positive_int(value: int, *, field_name: str) -> int:
         message = f"{field_name} must be positive"
         raise ValueError(message)
     return value
+
+
+def _string_mapping(value: object, *, field_name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        message = f"{field_name} must be an object"
+        raise TypeError(message)
+    if any(not isinstance(key, str) for key in value):
+        message = f"{field_name} keys must be strings"
+        raise ValueError(message)
+    return cast("Mapping[str, object]", value)
 
 
 def _validate_frame_range(frame_start: int, frame_stop: int) -> tuple[int, int]:
@@ -276,4 +579,8 @@ def _join_location(base_path: str, sub_path: str) -> str:
     return f"{base_path.rstrip('/')}/{sub_path}"
 
 
-__all__ = ["TemporalAnnotationWriter"]
+__all__ = [
+    "TemporalAnnotationChunk",
+    "TemporalAnnotationReader",
+    "TemporalAnnotationWriter",
+]

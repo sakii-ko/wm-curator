@@ -14,6 +14,7 @@
 # limitations under the License.
 """CPU tests for ViPE decode, alignment, validation, and chunk publication."""
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from fractions import Fraction
@@ -38,8 +39,14 @@ from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask,
 
 
 class _FakeViPEModel(ModelInterface):
-    def __init__(self, *, bad_first_index: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        bad_first_index: bool = False,
+        depth_overrides: dict[int, npt.NDArray[np.float32]] | None = None,
+    ) -> None:
         self.bad_first_index = bad_first_index
+        self.depth_overrides = depth_overrides or {}
         self.setup_called = False
         self.closed = False
         self.infer_called = False
@@ -73,7 +80,9 @@ class _FakeViPEModel(ModelInterface):
         for index in range(len(frames)):
             self.produced = index + 1
             depth = np.full((height, width), index + 1, dtype=np.float32)
-            if index == 0:
+            if index in self.depth_overrides:
+                depth = self.depth_overrides[index].copy()
+            elif index == 0:
                 depth[0, 0] = np.nan
             pose = np.eye(4, dtype=np.float32)
             pose[0, 3] = index
@@ -258,6 +267,60 @@ def test_stage_writes_aligned_bounded_chunks(tmp_path: Path) -> None:
     }
 
 
+def test_existing_completion_marker_skips_decode_and_inference(tmp_path: Path) -> None:
+    """A completed clip is reused without touching the decoder or model."""
+    source = tmp_path / "complete.mkv"
+    source.touch()
+    task = make_annotation_task(
+        source,
+        session_id="complete",
+        relative_path="complete.mkv",
+        span=(1.0, 2.0),
+    )
+    clip = task.video.clips[0]
+    output = tmp_path / "output"
+    metadata_path = output / "metas" / "v1" / f"{clip.uuid}.json"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema": "cosmos-curator.temporal-annotation/v1",
+                "clip_uuid": str(clip.uuid),
+                "format": "npz",
+                "frame_count": 1,
+                "chunk_frames": 1,
+                "chunk_path_template": (f"chunks/v1/{clip.uuid}/frames-{{frame_start:09d}}-{{frame_stop:09d}}.npz"),
+                "metadata": {
+                    "arrays": {
+                        "timestamps_ns": {
+                            "axes": "T",
+                            "dtype": "int64",
+                            "shape": [1],
+                        }
+                    },
+                    "alignment": {"timestamp_array": "timestamps_ns"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    decoder = _FakeDecoder()
+    stage, model, writer = _make_stage(tmp_path, decoder=decoder)
+
+    stage.stage_setup()
+    assert stage.process_data([task]) == [task]
+
+    assert decoder.calls == []
+    assert not model.infer_called
+    assert writer.chunks == []
+    assert writer.completion is None
+    assert task.dataset_metadata["vipe_annotation"] == {
+        "format": "npz-temporal-v1",
+        "metadata_uri": str(metadata_path),
+        "producer": "vipe-dav3",
+    }
+
+
 def test_whole_video_annotation_task_creates_a_reusable_clip(tmp_path: Path) -> None:
     """An adapter task without clips should mean one full-source annotation."""
     source = tmp_path / "whole.mp4"
@@ -366,6 +429,121 @@ def test_stage_rejects_changed_frame_indices_before_writing(tmp_path: Path) -> N
 
     assert writer.chunks == []
     assert writer.completion is None
+
+
+def test_stage_bounds_depth_before_float16_conversion(tmp_path: Path) -> None:
+    """Out-of-range depth must become invalid zero rather than float16 infinity."""
+    source = tmp_path / "depth-range.mp4"
+    source.touch()
+    task = make_annotation_task(
+        source,
+        session_id="depth-range",
+        relative_path="depth-range.mp4",
+        span=(1.0, 2.0),
+    )
+    depth = np.ones((16, 24), dtype=np.float32)
+    depth[0, :6] = np.asarray(
+        [np.nan, np.inf, -1.0, 1.0e-5, 1.0e8, 1.0e3],
+        dtype=np.float32,
+    )
+    model = _FakeViPEModel(depth_overrides={0: depth})
+    stage, _, writer = _make_stage(
+        tmp_path,
+        decoder=_FakeDecoder(frame_count=8),
+        model=model,
+    )
+
+    stage.process_data([task])
+
+    first_chunk = writer.chunks[0][3]
+    stored_depth = first_chunk["depth"][0, 0, :6]
+    stored_valid = first_chunk["valid"][0, 0, :6]
+    np.testing.assert_array_equal(
+        stored_valid,
+        np.asarray([False, False, False, False, False, True]),
+    )
+    np.testing.assert_array_equal(
+        stored_depth,
+        np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 1.0e3], dtype=np.float16),
+    )
+    assert np.isfinite(first_chunk["depth"]).all()
+    assert writer.completion is not None
+    metadata = writer.completion["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["recipe"]["valid_depth_range_meters"] == [1.0e-4, 1.0e4]  # type: ignore[index]
+    assert metadata["recipe"]["min_valid_fraction_per_frame"] == 0.5  # type: ignore[index]
+
+
+def test_stage_rejects_one_frame_below_valid_depth_fraction(tmp_path: Path) -> None:
+    """The quality threshold applies independently to every output frame."""
+    source = tmp_path / "low-valid-depth.mp4"
+    source.touch()
+    task = make_annotation_task(
+        source,
+        session_id="low-valid-depth",
+        relative_path="low-valid-depth.mp4",
+        span=(1.0, 2.0),
+    )
+    low_valid_depth = np.zeros((16, 24), dtype=np.float32)
+    low_valid_depth.reshape(-1)[:191] = 1.0
+    model = _FakeViPEModel(depth_overrides={3: low_valid_depth})
+    stage, _, writer = _make_stage(
+        tmp_path,
+        decoder=_FakeDecoder(frame_count=8),
+        model=model,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"frame 3 valid depth fraction .* below the required 0\.5000",
+    ):
+        stage.process_data([task])
+
+    assert writer.completion is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"min_valid_fraction": -0.1}, "min_valid_fraction"),
+        ({"min_valid_fraction": 1.1}, "min_valid_fraction"),
+        ({"min_valid_fraction": float("nan")}, "min_valid_fraction"),
+        ({"gpus_per_worker": 0.0}, "gpus_per_worker"),
+        ({"gpus_per_worker": 1.1}, "gpus_per_worker"),
+        ({"gpus_per_worker": float("inf")}, "gpus_per_worker"),
+    ],
+)
+def test_stage_rejects_invalid_quality_or_resource_configuration(
+    tmp_path: Path,
+    kwargs: dict[str, float],
+    message: str,
+) -> None:
+    """Resource fractions and quality thresholds should fail at construction."""
+    with pytest.raises(ValueError, match=message):
+        ViPEStage(
+            tmp_path / "output",
+            _FakeViPEModel(),
+            decoder=_FakeDecoder(),
+            **kwargs,
+        )
+
+
+def test_stage_exposes_configured_gpu_fraction(tmp_path: Path) -> None:
+    """Fractional scheduling should be explicit and retain the safe default."""
+    default_stage = ViPEStage(
+        tmp_path / "default-output",
+        _FakeViPEModel(),
+        decoder=_FakeDecoder(),
+    )
+    shared_h100_stage = ViPEStage(
+        tmp_path / "shared-output",
+        _FakeViPEModel(),
+        gpus_per_worker=0.5,
+        decoder=_FakeDecoder(),
+    )
+
+    assert default_stage.resources.gpus == 1.0
+    assert shared_h100_stage.resources.gpus == 0.5
 
 
 def test_sequential_pyav_fallback_keeps_native_timestamps_and_rotation(

@@ -33,7 +33,10 @@ from cosmos_curator.core.sensors.sampling.grid import SamplingGrid
 from cosmos_curator.core.sensors.sampling.spec import SamplingSpec
 from cosmos_curator.core.sensors.sensors.camera_sensor import CameraSensor
 from cosmos_curator.models.vipe import ViPEFrameResult
-from cosmos_curator.pipelines.video.annotation.artifact_writer import TemporalAnnotationWriter
+from cosmos_curator.pipelines.video.annotation.artifact_writer import (
+    TemporalAnnotationReader,
+    TemporalAnnotationWriter,
+)
 from cosmos_curator.pipelines.video.annotation.data_model import (
     make_full_source_clip,
     normalize_span,
@@ -44,6 +47,8 @@ from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _FRAME_ARRAY_NDIM = 4
 _RGB_CHANNELS = 3
+_MIN_VALID_DEPTH_METERS = 1.0e-4
+_MAX_VALID_DEPTH_METERS = 1.0e4
 VIPE_MIN_FRAMES = 8
 
 
@@ -139,6 +144,8 @@ class ViPEStage(CuratorStage):
         tmp_dir: str | Path | None = None,
         chunk_frames: int = 16,
         max_frames: int = 2048,
+        min_valid_fraction: float = 0.5,
+        gpus_per_worker: float = 1.0,
         decoder: ViPEClipDecoder | None = None,
         writer: TemporalWriter | None = None,
     ) -> None:
@@ -159,18 +166,37 @@ class ViPEStage(CuratorStage):
         if self._max_frames < VIPE_MIN_FRAMES:
             msg = f"max_frames must be at least {VIPE_MIN_FRAMES}"
             raise ValueError(msg)
+        if (
+            isinstance(min_valid_fraction, bool)
+            or not isinstance(min_valid_fraction, (int, float))
+            or not math.isfinite(min_valid_fraction)
+            or not 0.0 <= min_valid_fraction <= 1.0
+        ):
+            msg = "min_valid_fraction must be finite and between 0 and 1"
+            raise ValueError(msg)
+        if (
+            isinstance(gpus_per_worker, bool)
+            or not isinstance(gpus_per_worker, (int, float))
+            or not math.isfinite(gpus_per_worker)
+            or not 0.0 < gpus_per_worker <= 1.0
+        ):
+            msg = "gpus_per_worker must be finite and in the interval (0, 1]"
+            raise ValueError(msg)
 
         self._output_path = output_path
         self._profile_name = profile_name
         self._tmp_dir = tmp_dir
+        self._min_valid_fraction = float(min_valid_fraction)
+        self._gpus_per_worker = float(gpus_per_worker)
         self._inference_model = inference_model
         self._decoder = decoder or decode_local_vipe_clip
         self._writer = writer
+        self._reader: TemporalAnnotationReader | None = None
 
     @property
     def resources(self) -> CuratorStageResource:
-        """Reserve one GPU for the resident ViPE pipeline."""
-        return CuratorStageResource(cpus=2.0, gpus=1.0)
+        """Reserve the configured GPU scheduling share for the resident model."""
+        return CuratorStageResource(cpus=2.0, gpus=self._gpus_per_worker)
 
     @property
     def model(self) -> ModelInterface:
@@ -186,6 +212,10 @@ class ViPEStage(CuratorStage):
                 profile_name=self._profile_name,
                 tmp_dir=self._tmp_dir,
             )
+        self._reader = TemporalAnnotationReader(
+            self._output_path,
+            profile_name=self._profile_name,
+        )
 
     def process_data(self, tasks: list[PipelineTask]) -> list[PipelineTask]:
         """Decode one task's clip, treating an empty clip list as the full video."""
@@ -205,6 +235,8 @@ class ViPEStage(CuratorStage):
             msg = f"ViPE source is not a file: {source_path}"
             raise ValueError(msg)
         clip = request.clip
+        if clip is not None and self._reuse_completed(task, clip):
+            return tasks
         decoded = self._decoder(
             source_path,
             request.span,
@@ -219,6 +251,8 @@ class ViPEStage(CuratorStage):
             clip = make_full_source_clip(source_path, span, request.stream_index)
             task.video.clips.append(clip)
             task.video.num_total_clips = max(task.video.num_total_clips, 1)
+        if self._reuse_completed(task, clip):
+            return tasks
         metadata_uri = self._infer_and_write(
             clip,
             source_path=source_path,
@@ -230,13 +264,7 @@ class ViPEStage(CuratorStage):
             fps=fps,
             decoder_backend=decoded.decoder_backend,
         )
-        dataset_metadata = getattr(task, "dataset_metadata", None)
-        if isinstance(dataset_metadata, dict):
-            dataset_metadata["vipe_annotation"] = {
-                "format": "npz-temporal-v1",
-                "metadata_uri": metadata_uri,
-                "producer": "vipe-dav3",
-            }
+        self._set_annotation_reference(task, metadata_uri)
         return tasks
 
     def destroy(self) -> None:
@@ -392,6 +420,11 @@ class ViPEStage(CuratorStage):
                     "depth_representation": "z_depth",
                     "depth_scale": "metric",
                     "length_unit": "meter",
+                    "valid_depth_range_meters": [
+                        _MIN_VALID_DEPTH_METERS,
+                        _MAX_VALID_DEPTH_METERS,
+                    ],
+                    "min_valid_fraction_per_frame": self._min_valid_fraction,
                     "camera_pose": "camera_to_world",
                     "camera_convention": "opencv",
                     "input_buffering": "full_clip_bounded",
@@ -437,7 +470,14 @@ class ViPEStage(CuratorStage):
         if depth_f32.shape != (height, width):
             msg = f"ViPE frame {expected_index} depth shape is {depth_f32.shape}; expected {(height, width)}"
             raise ValueError(msg)
-        valid = np.isfinite(depth_f32) & (depth_f32 > 0)
+        valid = np.isfinite(depth_f32) & (depth_f32 > _MIN_VALID_DEPTH_METERS) & (depth_f32 < _MAX_VALID_DEPTH_METERS)
+        valid_fraction = float(valid.mean())
+        if valid_fraction < self._min_valid_fraction:
+            msg = (
+                f"ViPE frame {expected_index} valid depth fraction {valid_fraction:.4f} "
+                f"is below the required {self._min_valid_fraction:.4f}"
+            )
+            raise ValueError(msg)
         depth = np.ascontiguousarray(np.where(valid, depth_f32, 0.0), dtype=np.float16)
         valid = np.ascontiguousarray(valid, dtype=np.bool_)
 
@@ -507,6 +547,22 @@ class ViPEStage(CuratorStage):
             msg = "ViPEStage.stage_setup() must be called before process_data()"
             raise RuntimeError(msg)
         return self._writer
+
+    def _reuse_completed(self, task: SplitPipeTask, clip: Clip) -> bool:
+        if self._reader is None or not self._reader.is_complete(clip.uuid):
+            return False
+        self._set_annotation_reference(task, self._reader.metadata_uri(clip.uuid))
+        return True
+
+    @staticmethod
+    def _set_annotation_reference(task: SplitPipeTask, metadata_uri: str) -> None:
+        dataset_metadata = getattr(task, "dataset_metadata", None)
+        if isinstance(dataset_metadata, dict):
+            dataset_metadata["vipe_annotation"] = {
+                "format": "npz-temporal-v1",
+                "metadata_uri": metadata_uri,
+                "producer": "vipe-dav3",
+            }
 
 
 def decode_local_vipe_clip(  # noqa: PLR0913
