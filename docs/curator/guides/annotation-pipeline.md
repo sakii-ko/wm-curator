@@ -125,10 +125,12 @@ from cosmos_curator.core.interfaces.pipeline_interface import run_pipeline
 from cosmos_curator.core.interfaces.stage_interface import CuratorStageSpec
 from cosmos_curator.models.normalcrafter import NormalCrafterModel
 from cosmos_curator.models.vipe import ViPEModel, ViPEModelConfig
+from cosmos_curator.pipelines.video.annotation.decode_grid import AnnotationGrid
 from cosmos_curator.pipelines.video.annotation.normalcrafter_stage import NormalCrafterStage
 from cosmos_curator.pipelines.video.annotation.vipe_stage import ViPEStage
 
 annotation_root = Path("/shared/datasets/annotations")
+annotation_grid = AnnotationGrid()  # 15 FPS, 832x480
 
 vipe_model = ViPEModel(
     ViPEModelConfig(
@@ -143,11 +145,19 @@ normal_model = NormalCrafterModel(
 
 stages = [
     CuratorStageSpec(
-        ViPEStage(annotation_root / "vipe-dav3", vipe_model),
+        ViPEStage(
+            annotation_root / "vipe-dav3-grid-v1",
+            vipe_model,
+            annotation_grid=annotation_grid,
+        ),
         num_workers_per_node=1,
     ),
     CuratorStageSpec(
-        NormalCrafterStage(annotation_root / "normalcrafter", normal_model),
+        NormalCrafterStage(
+            annotation_root / "normalcrafter-grid-v1",
+            normal_model,
+            annotation_grid=annotation_grid,
+        ),
         num_workers_per_node=1,
     ),
 ]
@@ -193,26 +203,57 @@ worker on a 24 GiB 4090.
 
 The input videos must currently be local `Path` objects visible at the same
 path on every geometry worker. The annotation output may be local, S3, or
-Azure. Both stages buffer one complete clip before inference. ViPE accepts at
-least 8 native-rate frames and defaults to a 2,048-frame limit; NormalCrafter
-accepts at least 14 frames sampled at 15 FPS and defaults to a 1,350-frame
+Azure. ViPE and NormalCrafter share one decode-time annotation grid by default:
+15 FPS, 832x480 RGB, with a centered aspect-preserving crop followed by
+bilinear resize. Each selected source frame is rotated, cropped, and resized
+before it is retained. The model still receives a complete clip, but the
+decoder never retains a complete native-resolution clip; a 4K source therefore
+keeps only a per-frame native decode buffer in the annotation code rather than
+a full 4K frame stack. The fixed canvas crops field of view on portrait or
+unusual-aspect footage; it does not add synthetic letterbox pixels. Use a
+different grid in a separate output root if that tradeoff is unsuitable for
+the training raster.
+
+`timestamps_ns` is the regular half-open 15 FPS alignment grid consumed by both
+models. `source_timestamps_ns` records the actual presentation time of the
+source frame selected nearest to each grid timestamp, normalized to stream
+start. They can differ for VFR video, and a low-frame-rate source can select the
+same source frame more than once. Use `timestamps_ns` for model alignment and
+`source_timestamps_ns` when exact correspondence to the original media matters.
+
+ViPE accepts at least 8 grid frames and defaults to a 2,048-frame limit;
+NormalCrafter accepts at least 14 grid frames and defaults to a 1,350-frame
 limit. An out-of-range clip fails rather than being truncated, so split long
 videos upstream. Override the bounds with `ViPEStage(..., max_frames=...)` and
-`NormalCrafterModel(..., max_frames=...)` when appropriate.
+`NormalCrafterModel(..., max_frames=...)` when appropriate. Memory still scales
+with grid frame count and model working state, but not with a complete
+native-resolution decode buffer.
 
-These limits currently bound only frame count, not `height * width`. Native 4K
-clips can still require tens of GiB when buffered as a complete clip. Use short
-source spans for now; a shared decode-time annotation grid is intentionally
-left as a separate change because it must also record the exact source-to-grid
-raster transform.
+Sampling ViPE at 15 FPS reduces decode and inference cost and makes its outputs
+directly align with NormalCrafter, but it gives camera tracking fewer
+observations than the previous native-rate path. Fast motion, motion blur, or
+low-texture footage may benefit from a higher-rate ViPE grid. In that case,
+pass a different
+`cosmos_curator.pipelines.video.annotation.decode_grid.AnnotationGrid` to
+`ViPEStage`, write it to a separate output root, and align it with the default
+NormalCrafter result by time rather than array index.
 
 Each stage writes retry-safe NPZ chunks below `chunks/v1/<clip_uuid>/` and publishes
 `metas/v1/<clip_uuid>.json` last as the completion record. ViPE chunks contain
-`depth`, `valid`, `K`, `camera_to_world`, and `timestamps_ns`; NormalCrafter
-chunks contain `normal`, `valid`, and `timestamps_ns`. The two estimators use
-different frame schedules, so consumers should align them by
-`timestamps_ns`, not by array index. Their raster sizes may also differ; do not
-combine pixels without an explicit spatial transform.
+`depth`, `valid`, `K`, `camera_to_world`, `timestamps_ns`, and
+`source_timestamps_ns`; NormalCrafter chunks contain `normal`, `valid`,
+`timestamps_ns`, and `source_timestamps_ns`.
+
+Both metadata records include the grid configuration, source and oriented
+source sizes, rotation, crop rectangle, and pixel-center transforms from grid
+coordinates to the oriented and original source rasters. ViPE intrinsics `K`
+are expressed in the 832x480 annotation-grid coordinate space.
+
+Consumers may join ViPE and NormalCrafter arrays by index only after verifying
+that both records describe the same source span, have identical `grid`
+configuration and transforms, and contain identical `timestamps_ns` arrays.
+Otherwise, align by timestamps and apply the recorded raster transform before
+combining pixels.
 
 These are tensor sidecars, not encoded depth or normal MP4 files. The geometry
 roots do not write another `summary.json` or chunk manifest. The retained
@@ -223,11 +264,17 @@ media-prep-output/
   summary.json
   metas/v0/<clip_uuid>.json
 annotations/
-  vipe-dav3/{chunks/v1/<clip_uuid>/..., metas/v1/<clip_uuid>.json}
-  normalcrafter/{chunks/v1/<clip_uuid>/..., metas/v1/<clip_uuid>.json}
+  vipe-dav3-grid-v1/{chunks/v1/<clip_uuid>/..., metas/v1/<clip_uuid>.json}
+  normalcrafter-grid-v1/{chunks/v1/<clip_uuid>/..., metas/v1/<clip_uuid>.json}
 ```
 
-On retry, a valid metadata completion record skips decode and inference.
+On retry, a valid metadata completion record skips decode and inference only
+when its source, producer, and annotation-grid contract match the requested
+run. A changed FPS, output size, spatial policy, rotation, producer contract,
+or source span is not resumed in place. Use a new output root for that run,
+including when migrating older native-rate annotations to the shared grid.
+Whole-source tasks derive their stable source-and-stream UUID before decode, so
+they receive the same skip behavior as pre-split clips.
 Residual chunks without metadata are not considered complete; that clip is
 rerun from the beginning and the same paths are atomically overwritten.
 
@@ -236,7 +283,7 @@ Training code can stream completed tensors one chunk at a time:
 ```python
 from cosmos_curator.pipelines.video.annotation.artifact_writer import TemporalAnnotationReader
 
-reader = TemporalAnnotationReader(annotation_root / "vipe-dav3")
+reader = TemporalAnnotationReader(annotation_root / "vipe-dav3-grid-v1")
 if reader.is_complete(clip_uuid):
     for chunk in reader.iter_chunks(clip_uuid):
         depth = chunk.arrays["depth"]
@@ -247,9 +294,10 @@ The reader validates the metadata schema plus chunk dtypes, shapes, and
 timestamps. It derives chunk paths from `frame_count` and `chunk_frames`; it
 does not create a manifest, checksum, or catalog.
 
-The stages decode independently on purpose. Passing decoded frame tensors
-between Ray stages would retain large buffers in the object store and would
-still not remove NormalCrafter's 15 FPS resampling.
+The stages decode independently but use the same deterministic grid. Passing
+decoded frame tensors between Ray stages would add an object-store lifetime
+and cache protocol for a buffer that is already bounded to 832x480; no shared
+tensor cache, manifest, or hash layer is needed.
 
 ## Use Qwen3.6 35B A3B FP8 for captions
 

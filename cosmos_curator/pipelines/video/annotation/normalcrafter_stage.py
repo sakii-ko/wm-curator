@@ -15,8 +15,8 @@
 
 """Direct-decode NormalCrafter stage with bounded, chunked annotation output."""
 
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -43,48 +43,29 @@ from cosmos_curator.pipelines.video.annotation.artifact_writer import (
     TemporalAnnotationWriter,
 )
 from cosmos_curator.pipelines.video.annotation.data_model import (
+    full_source_clip_uuid,
     make_full_source_clip,
     normalize_span,
     resolve_source_clip_request,
     source_path_string,
 )
+from cosmos_curator.pipelines.video.annotation.decode_grid import (
+    DEFAULT_ANNOTATION_GRID,
+    AnnotationClipDecoder,
+    AnnotationGrid,
+    DecodedAnnotationClip,
+    RasterTransform,
+    annotation_grid_configuration_matches,
+    annotation_grid_frame_count,
+    decode_annotation_clip,
+    validate_decoded_annotation_clip,
+)
 from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask
 
-_NANOSECONDS_PER_SECOND = 1_000_000_000
-_SAMPLE_FPS = 15.0
-_PRODUCER_RELEASE = "normalcrafter-v1"
-_VIDEO_NDIM = 4
-_RGB_CHANNELS = 3
+_PRODUCER_RELEASE = "normalcrafter-grid-v1"
 
-
-class _IndexedDecodeUnavailableError(RuntimeError):
-    """Signal that the PyAV timestamp fallback should be used."""
-
-
-@dataclass(frozen=True, slots=True)
-class DecodedNormalCrafterClip:
-    """Sampled RGB frames and exact selected source timestamps."""
-
-    frames: npt.NDArray[np.uint8]
-    timestamps_ns: npt.NDArray[np.int64]
-    source_span: tuple[float, float]
-    decoder_backend: str
-
-
-class NormalCrafterClipDecoder(Protocol):
-    """Decode one source span at NormalCrafter's fixed sampling rate."""
-
-    def __call__(  # noqa: PLR0913
-        self,
-        source: Path,
-        span: tuple[float, float] | None,
-        *,
-        stream_index: int,
-        sample_fps: float,
-        min_frames: int,
-        max_frames: int,
-    ) -> DecodedNormalCrafterClip:
-        """Decode the requested span, or probe and decode the whole source."""
+DecodedNormalCrafterClip = DecodedAnnotationClip
+NormalCrafterClipDecoder = AnnotationClipDecoder
 
 
 class TemporalWriter(Protocol):
@@ -119,6 +100,7 @@ class NormalCrafterStage(CuratorStage):
         *,
         profile_name: str = "default",
         tmp_dir: str | Path | None = None,
+        annotation_grid: AnnotationGrid = DEFAULT_ANNOTATION_GRID,
         decoder: NormalCrafterClipDecoder | None = None,
         writer: TemporalWriter | None = None,
     ) -> None:
@@ -132,6 +114,7 @@ class NormalCrafterStage(CuratorStage):
         self._output_path = output_path
         self._profile_name = profile_name
         self._tmp_dir = tmp_dir
+        self._annotation_grid = annotation_grid
         self._inference_model = inference_model
         self._decoder = decoder or decode_normalcrafter_clip
         self._writer = writer
@@ -173,33 +156,53 @@ class NormalCrafterStage(CuratorStage):
         request = resolve_source_clip_request(task)
         source = _validated_source(request.source)
         clip = request.clip
-        if clip is not None and self._reuse_completed(task, clip):
+        if self._reuse_completed(
+            task,
+            clip,
+            source=source,
+            span=request.span,
+            stream_index=request.stream_index,
+            rotation_degrees_clockwise=request.rotation_degrees_clockwise,
+        ):
             return tasks
         decoded = self._decoder(
             source,
             request.span,
             stream_index=request.stream_index,
-            sample_fps=_SAMPLE_FPS,
+            rotation_degrees_clockwise=request.rotation_degrees_clockwise,
+            grid=self._annotation_grid,
             min_frames=NORMALCRAFTER_WINDOW_SIZE,
             max_frames=self._inference_model.max_frames,
         )
-        frames, timestamps_ns, decoded_span = _validate_decoded_clip(
+        frames, timestamps_ns, source_timestamps_ns, decoded_span = validate_decoded_annotation_clip(
             decoded,
+            grid=self._annotation_grid,
+            min_frames=NORMALCRAFTER_WINDOW_SIZE,
             max_frames=self._inference_model.max_frames,
+            consumer_name="NormalCrafter",
         )
-        if request.rotation_degrees_clockwise:
-            frames = np.rot90(
-                frames,
-                k=-(request.rotation_degrees_clockwise // 90),
-                axes=(1, 2),
-            ).copy()
-
-        span = request.span or decoded_span
+        if request.span is not None and decoded_span != request.span:
+            message = f"NormalCrafter decoder returned source_span={decoded_span}, expected {request.span}"
+            raise ValueError(message)
+        if decoded.raster.rotation_degrees_clockwise != request.rotation_degrees_clockwise:
+            message = (
+                "NormalCrafter decoder returned rotation_degrees_clockwise="
+                f"{decoded.raster.rotation_degrees_clockwise}, expected {request.rotation_degrees_clockwise}"
+            )
+            raise ValueError(message)
+        span = decoded_span
         if clip is None:
             clip = make_full_source_clip(source, span, request.stream_index)
             task.video.clips.append(clip)
             task.video.num_total_clips = max(task.video.num_total_clips, 1)
-        if self._reuse_completed(task, clip):
+        if self._reuse_completed(
+            task,
+            clip,
+            source=source,
+            span=span,
+            stream_index=request.stream_index,
+            rotation_degrees_clockwise=request.rotation_degrees_clockwise,
+        ):
             return tasks
 
         metadata_uri = self._infer_and_write(
@@ -211,6 +214,8 @@ class NormalCrafterStage(CuratorStage):
             decoder_backend=decoded.decoder_backend,
             frames=frames,
             timestamps_ns=timestamps_ns,
+            source_timestamps_ns=source_timestamps_ns,
+            raster=decoded.raster,
         )
         self._set_annotation_reference(task, metadata_uri)
         return tasks
@@ -230,6 +235,8 @@ class NormalCrafterStage(CuratorStage):
         decoder_backend: str,
         frames: npt.NDArray[np.uint8],
         timestamps_ns: npt.NDArray[np.int64],
+        source_timestamps_ns: npt.NDArray[np.int64],
+        raster: RasterTransform,
     ) -> str:
         frame_count, height, width, _ = frames.shape
         expected_start = 0
@@ -262,6 +269,10 @@ class NormalCrafterStage(CuratorStage):
                             timestamps_ns[chunk.frame_start : frame_stop],
                             dtype=np.int64,
                         ),
+                        source_timestamps_ns=np.ascontiguousarray(
+                            source_timestamps_ns[chunk.frame_start : frame_stop],
+                            dtype=np.int64,
+                        ),
                     )
                 expected_start = frame_stop
         finally:
@@ -291,11 +302,13 @@ class NormalCrafterStage(CuratorStage):
                     "decoder_backend": decoder_backend,
                 },
                 "alignment": {
-                    "sample_fps": _SAMPLE_FPS,
+                    "sample_fps": self._annotation_grid.sample_fps,
                     "timestamp_array": "timestamps_ns",
+                    "source_timestamp_array": "source_timestamps_ns",
                     "timestamp_unit": "nanosecond",
                     "timestamp_origin": "source_stream_start",
                 },
+                "grid": self._annotation_grid.metadata(raster),
                 "recipe": {
                     "window_size": NORMALCRAFTER_WINDOW_SIZE,
                     "window_stride": NORMALCRAFTER_WINDOW_STRIDE,
@@ -305,6 +318,7 @@ class NormalCrafterStage(CuratorStage):
                     "conditioning_fps": NORMALCRAFTER_CONDITIONING_FPS,
                     "axis_transform_from_raw": [-1, 1, 1],
                     "normalization": "unit_length",
+                    "normal_coordinate_space": "annotation_grid_camera_opencv",
                     "invalid_value": [0.0, 0.0, 0.0],
                     "input_buffering": "full_clip_bounded",
                     "max_frames": self._inference_model.max_frames,
@@ -326,6 +340,11 @@ class NormalCrafterStage(CuratorStage):
                         "dtype": "int64",
                         "shape": [frame_count],
                     },
+                    "source_timestamps_ns": {
+                        "axes": "T",
+                        "dtype": "int64",
+                        "shape": [frame_count],
+                    },
                 },
             },
         )
@@ -336,9 +355,70 @@ class NormalCrafterStage(CuratorStage):
             raise RuntimeError(message)
         return self._writer
 
-    def _reuse_completed(self, task: SplitPipeTask, clip: Clip) -> bool:
-        if self._reader is None or not self._reader.is_complete(clip.uuid):
+    def _reuse_completed(  # noqa: PLR0913
+        self,
+        task: SplitPipeTask,
+        clip: Clip | None,
+        *,
+        source: Path,
+        span: tuple[float, float] | None,
+        stream_index: int,
+        rotation_degrees_clockwise: int,
+    ) -> bool:
+        if self._reader is None:
             return False
+        clip_uuid = clip.uuid if clip is not None else full_source_clip_uuid(source, stream_index)
+        document = self._reader.read_metadata_if_complete(clip_uuid)
+        if document is None:
+            return False
+        metadata = document.get("metadata")
+        frame_count = document.get("frame_count")
+        expected_producer = {
+            "id": "normalcrafter",
+            "release": _PRODUCER_RELEASE,
+            "model_id": self._inference_model.model_id,
+        }
+        expected_span = None if span is None else [span[0], span[1]]
+        completed_span = _source_span_from_metadata(metadata.get("source")) if isinstance(metadata, Mapping) else None
+        frame_count_matches = (
+            isinstance(frame_count, int)
+            and not isinstance(frame_count, bool)
+            and completed_span is not None
+            and annotation_grid_frame_count(completed_span, self._annotation_grid) == frame_count
+        )
+        full_source_span_matches = clip is not None or (completed_span is not None and completed_span[0] == 0.0)
+        if (
+            not isinstance(metadata, Mapping)
+            or metadata.get("producer") != expected_producer
+            or not _source_metadata_matches(
+                metadata.get("source"),
+                source=source,
+                span=expected_span,
+                stream_index=stream_index,
+                rotation_degrees_clockwise=rotation_degrees_clockwise,
+            )
+            or not annotation_grid_configuration_matches(
+                metadata.get("grid"),
+                self._annotation_grid,
+            )
+            or not frame_count_matches
+            or not full_source_span_matches
+            or not _output_contract_matches(
+                metadata,
+                frame_count=frame_count,
+                grid=self._annotation_grid,
+            )
+        ):
+            message = (
+                f"completed NormalCrafter annotation {clip_uuid} uses a different source, producer, or annotation "
+                "grid, or an incompatible output contract; use a new output_path instead of overwriting it"
+            )
+            raise ValueError(message)
+        if clip is None:
+            assert completed_span is not None
+            clip = make_full_source_clip(source, completed_span, stream_index)
+            task.video.clips.append(clip)
+            task.video.num_total_clips = max(task.video.num_total_clips, 1)
         self._set_annotation_reference(task, self._reader.metadata_uri(clip.uuid))
         return True
 
@@ -358,272 +438,97 @@ def decode_normalcrafter_clip(  # noqa: PLR0913
     span: tuple[float, float] | None,
     *,
     stream_index: int,
-    sample_fps: float,
+    rotation_degrees_clockwise: int,
+    grid: AnnotationGrid,
     min_frames: int,
     max_frames: int,
 ) -> DecodedNormalCrafterClip:
-    """Prefer indexed sampling and fall back to PyAV timestamp/frame-id decode."""
-    try:
-        return _decode_with_camera_sensor(
-            source,
-            span,
-            stream_index=stream_index,
-            sample_fps=sample_fps,
-            min_frames=min_frames,
-            max_frames=max_frames,
-        )
-    except _IndexedDecodeUnavailableError as indexed_error:
-        try:
-            return _decode_with_pyav(
-                source,
-                span,
-                stream_index=stream_index,
-                sample_fps=sample_fps,
-                min_frames=min_frames,
-                max_frames=max_frames,
-            )
-        except Exception as fallback_error:
-            message = (
-                "both indexed CameraSensor and PyAV fallback failed: "
-                f"CameraSensor={indexed_error}; PyAV={fallback_error}"
-            )
-            raise RuntimeError(message) from fallback_error
-
-
-def _decode_with_camera_sensor(  # noqa: PLR0913
-    source: Path,
-    span: tuple[float, float] | None,
-    *,
-    stream_index: int,
-    sample_fps: float,
-    min_frames: int,
-    max_frames: int,
-) -> DecodedNormalCrafterClip:
-    from cosmos_curator.core.sensors.sampling.grid import (  # noqa: PLC0415
-        SamplingGrid,
-        make_ts_grid,
-    )
-    from cosmos_curator.core.sensors.sampling.spec import SamplingSpec  # noqa: PLC0415
-    from cosmos_curator.core.sensors.sensors.camera_sensor import CameraSensor  # noqa: PLC0415
-
-    try:
-        sensor = CameraSensor(source, stream_idx=stream_index)
-    except Exception as error:
-        message = "CameraSensor could not index the source container"
-        raise _IndexedDecodeUnavailableError(message) from error
-
-    source_duration_ns = _timeline_duration_ns(
-        sensor.timestamps_ns,
-        fallback_period_ns=max(1, round(_NANOSECONDS_PER_SECOND / sample_fps)),
-    )
-    resolved_span = _resolve_span(span, source_duration_ns)
-    absolute_start_ns = sensor.start_ns + round(resolved_span[0] * _NANOSECONDS_PER_SECOND)
-    absolute_stop_ns = sensor.start_ns + round(resolved_span[1] * _NANOSECONDS_PER_SECOND)
-    grid_start_ns, exclusive_end_ns, sample_timestamps_ns = make_ts_grid(
-        absolute_start_ns,
-        exclusive_end_ns=absolute_stop_ns,
-        sample_rate_hz=sample_fps,
-    )
-    _validate_sample_count(
-        len(sample_timestamps_ns),
+    """Decode NormalCrafter input on the shared, low-resolution annotation grid."""
+    return decode_annotation_clip(
+        source,
+        span,
+        stream_index=stream_index,
+        rotation_degrees_clockwise=rotation_degrees_clockwise,
+        grid=grid,
         min_frames=min_frames,
         max_frames=max_frames,
-        span=resolved_span,
-    )
-    duration_ns = exclusive_end_ns - grid_start_ns
-    grid = SamplingGrid(
-        start_ns=grid_start_ns,
-        exclusive_end_ns=exclusive_end_ns,
-        timestamps_ns=sample_timestamps_ns,
-        stride_ns=duration_ns,
-        duration_ns=duration_ns,
-    )
-    try:
-        batches = sensor.sample(SamplingSpec(grid=grid))
-        batch = next(batches)
-        try:
-            next(batches)
-        except StopIteration:
-            pass
-        else:
-            message = "CameraSensor returned multiple batches for one clip"
-            raise RuntimeError(message)
-    except Exception as error:
-        message = "CameraSensor could not decode the indexed sample grid"
-        raise _IndexedDecodeUnavailableError(message) from error
-
-    frames = np.ascontiguousarray(batch.frames, dtype=np.uint8)
-    timestamps_ns = np.ascontiguousarray(
-        batch.sensor_timestamps_ns - sensor.start_ns,
-        dtype=np.int64,
-    )
-    if len(frames) != len(sample_timestamps_ns):
-        message = f"CameraSensor returned {len(frames)} frames for {len(sample_timestamps_ns)} requested timestamps"
-        raise _IndexedDecodeUnavailableError(message)
-    return DecodedNormalCrafterClip(
-        frames=frames,
-        timestamps_ns=timestamps_ns,
-        source_span=resolved_span,
-        decoder_backend="camera_sensor",
     )
 
 
-def _decode_with_pyav(  # noqa: PLR0913
+def _source_metadata_matches(
+    value: object,
+    *,
     source: Path,
-    span: tuple[float, float] | None,
-    *,
+    span: list[float] | None,
     stream_index: int,
-    sample_fps: float,
-    min_frames: int,
-    max_frames: int,
-) -> DecodedNormalCrafterClip:
-    from cosmos_curator.pipelines.video.utils.decoder_utils import (  # noqa: PLC0415
-        decode_video_cpu_frame_ids,
-        get_video_timestamps,
-        sample_closest,
-        save_stream_position,
-    )
-
-    with save_stream_position(str(source)):
-        source_timestamps = get_video_timestamps(source, stream_idx=stream_index)
-    if len(source_timestamps) == 0:
-        message = "source video contains no displayable frames"
-        raise ValueError(message)
-    origin = float(source_timestamps[0])
-    relative_timestamps = source_timestamps.astype(np.float64) - origin
-    source_duration_ns = _timeline_duration_ns(
-        np.rint(relative_timestamps * _NANOSECONDS_PER_SECOND).astype(np.int64),
-        fallback_period_ns=max(1, round(_NANOSECONDS_PER_SECOND / sample_fps)),
-    )
-    resolved_span = _resolve_span(span, source_duration_ns)
-    frame_ids, counts, _ = sample_closest(
-        source_timestamps,
-        sample_rate=sample_fps,
-        start=origin + resolved_span[0],
-        stop=origin + resolved_span[1],
-        endpoint=False,
-        dedup=True,
-    )
-    frame_count = int(counts.sum())
-    _validate_sample_count(
-        frame_count,
-        min_frames=min_frames,
-        max_frames=max_frames,
-        span=resolved_span,
-    )
-    with save_stream_position(str(source)):
-        frames = decode_video_cpu_frame_ids(
-            source,
-            frame_ids,
-            counts,
-            stream_idx=stream_index,
-        )
-    selected_timestamps = np.repeat(source_timestamps[frame_ids], counts)
-    timestamps_ns = np.rint((selected_timestamps.astype(np.float64) - origin) * _NANOSECONDS_PER_SECOND).astype(
-        np.int64
-    )
-    return DecodedNormalCrafterClip(
-        frames=np.ascontiguousarray(frames, dtype=np.uint8),
-        timestamps_ns=np.ascontiguousarray(timestamps_ns),
-        source_span=resolved_span,
-        decoder_backend="pyav",
-    )
-
-
-def _validate_decoded_clip(
-    decoded: DecodedNormalCrafterClip,
-    *,
-    max_frames: int,
-) -> tuple[
-    npt.NDArray[np.uint8],
-    npt.NDArray[np.int64],
-    tuple[float, float],
-]:
-    frames = decoded.frames
-    if (
-        not isinstance(frames, np.ndarray)
-        or frames.dtype != np.uint8
-        or frames.ndim != _VIDEO_NDIM
-        or frames.shape[-1] != _RGB_CHANNELS
-    ):
-        message = "decoded NormalCrafter frames must be uint8 [T,H,W,3] RGB"
-        raise ValueError(message)
-    frame_count = frames.shape[0]
-    _validate_sample_count(
-        frame_count,
-        min_frames=NORMALCRAFTER_WINDOW_SIZE,
-        max_frames=max_frames,
-        span=decoded.source_span,
-    )
-    timestamps_ns = decoded.timestamps_ns
-    if (
-        not isinstance(timestamps_ns, np.ndarray)
-        or timestamps_ns.dtype != np.int64
-        or timestamps_ns.ndim != 1
-        or len(timestamps_ns) != frame_count
-    ):
-        message = f"decoded timestamps_ns must be int64 [T] aligned with {frame_count} frames"
-        raise ValueError(message)
-    if timestamps_ns[0] < 0 or (frame_count > 1 and bool(np.any(np.diff(timestamps_ns) < 0))):
-        message = "decoded timestamps_ns must be non-negative and non-decreasing"
-        raise ValueError(message)
-    source_span = _validated_span(decoded.source_span)
-    if not decoded.decoder_backend.strip():
-        message = "decoded decoder_backend must be non-empty"
-        raise ValueError(message)
+    rotation_degrees_clockwise: int,
+) -> bool:
+    if not isinstance(value, Mapping):
+        return False
     return (
-        np.ascontiguousarray(frames),
-        np.ascontiguousarray(timestamps_ns),
-        source_span,
+        value.get("path") == source_path_string(source)
+        and (span is None or value.get("span_seconds") == span)
+        and value.get("stream_index") == stream_index
+        and value.get("rotation_degrees_clockwise") == rotation_degrees_clockwise
     )
 
 
-def _timeline_duration_ns(
-    timestamps_ns: npt.NDArray[np.int64],
+def _output_contract_matches(
+    metadata: Mapping[object, object],
     *,
-    fallback_period_ns: int,
-) -> int:
-    if len(timestamps_ns) == 0:
-        message = "source timeline must be non-empty"
-        raise ValueError(message)
-    differences = np.diff(timestamps_ns)
-    positive_differences = differences[differences > 0]
-    period_ns = int(np.median(positive_differences)) if len(positive_differences) else fallback_period_ns
-    return int(timestamps_ns[-1]) - int(timestamps_ns[0]) + max(1, period_ns)
+    frame_count: object,
+    grid: AnnotationGrid,
+) -> bool:
+    if isinstance(frame_count, bool) or not isinstance(frame_count, int) or frame_count <= 0:
+        return False
+    alignment = metadata.get("alignment")
+    arrays = metadata.get("arrays")
+    recipe = metadata.get("recipe")
+    if not isinstance(alignment, Mapping) or not isinstance(arrays, Mapping) or not isinstance(recipe, Mapping):
+        return False
+    return (
+        alignment.get("timestamp_array") == "timestamps_ns"
+        and alignment.get("source_timestamp_array") == "source_timestamps_ns"
+        and alignment.get("sample_fps") == grid.sample_fps
+        and alignment.get("timestamp_unit") == "nanosecond"
+        and alignment.get("timestamp_origin") == "source_stream_start"
+        and arrays.get("normal")
+        == {
+            "axes": "THWC",
+            "dtype": "float16",
+            "shape": [frame_count, grid.height, grid.width, 3],
+        }
+        and arrays.get("valid")
+        == {
+            "axes": "THW",
+            "dtype": "bool",
+            "shape": [frame_count, grid.height, grid.width],
+        }
+        and arrays.get("timestamps_ns")
+        == {
+            "axes": "T",
+            "dtype": "int64",
+            "shape": [frame_count],
+        }
+        and arrays.get("source_timestamps_ns")
+        == {
+            "axes": "T",
+            "dtype": "int64",
+            "shape": [frame_count],
+        }
+        and recipe.get("axis_transform_from_raw") == [-1, 1, 1]
+        and recipe.get("normalization") == "unit_length"
+        and recipe.get("normal_coordinate_space") == "annotation_grid_camera_opencv"
+    )
 
 
-def _resolve_span(
-    span: tuple[float, float] | None,
-    source_duration_ns: int,
-) -> tuple[float, float]:
-    source_duration = source_duration_ns / _NANOSECONDS_PER_SECOND
-    if span is None:
-        return 0.0, source_duration
-    start, stop = _validated_span(span)
-    tolerance = 1.0 / _NANOSECONDS_PER_SECOND
-    if start >= source_duration or stop > source_duration + tolerance:
-        message = f"clip span {span} exceeds source duration {source_duration:.9f} seconds"
-        raise ValueError(message)
-    return start, min(stop, source_duration)
-
-
-def _validate_sample_count(
-    frame_count: int,
-    *,
-    min_frames: int,
-    max_frames: int,
-    span: tuple[float, float],
-) -> None:
-    if frame_count < min_frames:
-        message = f"NormalCrafter requires at least {min_frames} sampled frames, got {frame_count} in span {span}"
-        raise ValueError(message)
-    if frame_count > max_frames:
-        message = (
-            "NormalCrafter retains full-clip conditioning latents and this "
-            f"runtime is explicitly bounded to max_frames={max_frames}; "
-            f"span {span} sampled {frame_count} frames, split it upstream"
-        )
-        raise ValueError(message)
+def _source_span_from_metadata(value: object) -> tuple[float, float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return normalize_span(value.get("span_seconds"))
+    except ValueError:
+        return None
 
 
 def _validated_source(source: object) -> Path:
@@ -635,14 +540,6 @@ def _validated_source(source: object) -> Path:
         return resolved
     message = f"NormalCrafter source must be a local pathlib.Path, got {type(source).__name__}"
     raise TypeError(message)
-
-
-def _validated_span(span: object) -> tuple[float, float]:
-    normalized = normalize_span(span)
-    if normalized is None:
-        message = "Clip.span must not be empty"
-        raise ValueError(message)
-    return normalized
 
 
 __all__ = [

@@ -141,22 +141,30 @@ def resolve_source_clip_request(task: SplitPipeTask) -> SourceClipRequest:
     )
 
 
+def full_source_clip_uuid(source: SourcePath, stream_index: int) -> uuid.UUID:
+    """Return the stable identity used when a task denotes the whole source."""
+    normalized_stream_index = normalize_stream_index(stream_index)
+    if normalized_stream_index is None:
+        msg = "full-source clip requires a stream index"
+        raise ValueError(msg)
+    source_path = source_path_string(source)
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{source_path}#video-stream={normalized_stream_index}#full-source",
+    )
+
+
 def make_full_source_clip(source: SourcePath, span: TimeSpan, stream_index: int) -> Clip:
     """Create the stable clip identity used when a task denotes the whole source."""
     normalized_span = normalize_span(span)
     if normalized_span is None:
         msg = "full-source clip requires a span"
         raise ValueError(msg)
-    normalized_stream_index = normalize_stream_index(stream_index)
-    if normalized_stream_index is None:
-        msg = "full-source clip requires a stream index"
-        raise ValueError(msg)
-    source_path = source_path_string(source)
-    clip_uuid = uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"{source_path}#video-stream={normalized_stream_index}#full-source",
+    return Clip(
+        uuid=full_source_clip_uuid(source, stream_index),
+        source_video=source_path_string(source),
+        span=normalized_span,
     )
-    return Clip(uuid=clip_uuid, source_video=source_path, span=normalized_span)
 
 
 def normalize_clip_uuid(value: object) -> uuid.UUID:

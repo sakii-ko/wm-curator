@@ -15,56 +15,49 @@
 """Direct-decode ViPE annotation stage with bounded full-clip input memory."""
 
 import math
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
-from fractions import Fraction
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
 
-import av
 import numpy as np
 import numpy.typing as npt
 
 from cosmos_curator.core.interfaces.model_interface import ModelInterface
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageResource, PipelineTask
-from cosmos_curator.core.sensors.sampling.grid import SamplingGrid
-from cosmos_curator.core.sensors.sampling.spec import SamplingSpec
-from cosmos_curator.core.sensors.sensors.camera_sensor import CameraSensor
 from cosmos_curator.models.vipe import ViPEFrameResult
 from cosmos_curator.pipelines.video.annotation.artifact_writer import (
     TemporalAnnotationReader,
     TemporalAnnotationWriter,
 )
 from cosmos_curator.pipelines.video.annotation.data_model import (
+    full_source_clip_uuid,
     make_full_source_clip,
     normalize_span,
     resolve_source_clip_request,
 )
+from cosmos_curator.pipelines.video.annotation.decode_grid import (
+    DEFAULT_ANNOTATION_GRID,
+    AnnotationClipDecoder,
+    AnnotationGrid,
+    DecodedAnnotationClip,
+    RasterTransform,
+    annotation_grid_configuration_matches,
+    annotation_grid_frame_count,
+    decode_annotation_clip,
+    validate_decoded_annotation_clip,
+)
 from cosmos_curator.pipelines.video.utils.data_model import Clip, SplitPipeTask
 
-_NANOSECONDS_PER_SECOND = 1_000_000_000
 _FRAME_ARRAY_NDIM = 4
-_RGB_CHANNELS = 3
 _MIN_VALID_DEPTH_METERS = 1.0e-4
 _MAX_VALID_DEPTH_METERS = 1.0e4
+_PRODUCER_RELEASE = "vipe-dav3-grid-v1"
 VIPE_MIN_FRAMES = 8
 
-
-class _IndexedDecodeUnavailableError(RuntimeError):
-    """Signal that the sequential PyAV compatibility path should be used."""
-
-
-@dataclass(frozen=True, slots=True)
-class DecodedViPEClip:
-    """Native-rate RGB frames and their exact source-relative timestamps."""
-
-    frames: npt.NDArray[np.uint8]
-    timestamps_ns: npt.NDArray[np.int64]
-    fps: float
-    source_span: tuple[float, float]
-    decoder_backend: str
+DecodedViPEClip = DecodedAnnotationClip
+ViPEClipDecoder = AnnotationClipDecoder
 
 
 class ViPEInferenceModel(Protocol):
@@ -92,22 +85,6 @@ class ViPEInferenceModel(Protocol):
 
     def close(self) -> None:
         """Release resident model references."""
-
-
-class ViPEClipDecoder(Protocol):
-    """Decode one native-rate source span into bounded host memory."""
-
-    def __call__(  # noqa: PLR0913
-        self,
-        source_path: Path,
-        span: tuple[float, float] | None,
-        *,
-        stream_index: int,
-        rotation_degrees_clockwise: int,
-        min_frames: int,
-        max_frames: int,
-    ) -> DecodedViPEClip:
-        """Decode the requested span."""
 
 
 class TemporalWriter(Protocol):
@@ -146,6 +123,7 @@ class ViPEStage(CuratorStage):
         max_frames: int = 2048,
         min_valid_fraction: float = 0.5,
         gpus_per_worker: float = 1.0,
+        annotation_grid: AnnotationGrid = DEFAULT_ANNOTATION_GRID,
         decoder: ViPEClipDecoder | None = None,
         writer: TemporalWriter | None = None,
     ) -> None:
@@ -182,12 +160,12 @@ class ViPEStage(CuratorStage):
         ):
             msg = "gpus_per_worker must be finite and in the interval (0, 1]"
             raise ValueError(msg)
-
         self._output_path = output_path
         self._profile_name = profile_name
         self._tmp_dir = tmp_dir
         self._min_valid_fraction = float(min_valid_fraction)
         self._gpus_per_worker = float(gpus_per_worker)
+        self._annotation_grid = annotation_grid
         self._inference_model = inference_model
         self._decoder = decoder or decode_local_vipe_clip
         self._writer = writer
@@ -235,23 +213,47 @@ class ViPEStage(CuratorStage):
             msg = f"ViPE source is not a file: {source_path}"
             raise ValueError(msg)
         clip = request.clip
-        if clip is not None and self._reuse_completed(task, clip):
+        if self._reuse_completed(
+            task,
+            clip,
+            source_path=source_path,
+            span=request.span,
+            stream_index=request.stream_index,
+            rotation_degrees_clockwise=request.rotation_degrees_clockwise,
+        ):
             return tasks
         decoded = self._decoder(
             source_path,
             request.span,
             stream_index=request.stream_index,
             rotation_degrees_clockwise=request.rotation_degrees_clockwise,
+            grid=self._annotation_grid,
             min_frames=VIPE_MIN_FRAMES,
             max_frames=self._max_frames,
         )
-        frames, timestamps_ns, fps, decoded_span = self._validate_decoded(decoded)
-        span = request.span or decoded_span
+        frames, timestamps_ns, source_timestamps_ns, decoded_span = self._validate_decoded(decoded)
+        if request.span is not None and decoded_span != request.span:
+            msg = f"ViPE decoder returned source_span={decoded_span}, expected {request.span}"
+            raise ValueError(msg)
+        if decoded.raster.rotation_degrees_clockwise != request.rotation_degrees_clockwise:
+            msg = (
+                "ViPE decoder returned rotation_degrees_clockwise="
+                f"{decoded.raster.rotation_degrees_clockwise}, expected {request.rotation_degrees_clockwise}"
+            )
+            raise ValueError(msg)
+        span = decoded_span
         if clip is None:
             clip = make_full_source_clip(source_path, span, request.stream_index)
             task.video.clips.append(clip)
             task.video.num_total_clips = max(task.video.num_total_clips, 1)
-        if self._reuse_completed(task, clip):
+        if self._reuse_completed(
+            task,
+            clip,
+            source_path=source_path,
+            span=span,
+            stream_index=request.stream_index,
+            rotation_degrees_clockwise=request.rotation_degrees_clockwise,
+        ):
             return tasks
         metadata_uri = self._infer_and_write(
             clip,
@@ -261,7 +263,8 @@ class ViPEStage(CuratorStage):
             rotation_degrees_clockwise=request.rotation_degrees_clockwise,
             frames=frames,
             timestamps_ns=timestamps_ns,
-            fps=fps,
+            source_timestamps_ns=source_timestamps_ns,
+            raster=decoded.raster,
             decoder_backend=decoded.decoder_backend,
         )
         self._set_annotation_reference(task, metadata_uri)
@@ -274,50 +277,19 @@ class ViPEStage(CuratorStage):
     def _validate_decoded(
         self,
         decoded: DecodedViPEClip,
-    ) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.int64], float, tuple[float, float]]:
-        frames = decoded.frames
-        timestamps_ns = decoded.timestamps_ns
-        fps = float(decoded.fps)
-        if (
-            not isinstance(frames, np.ndarray)
-            or frames.dtype != np.uint8
-            or frames.ndim != _FRAME_ARRAY_NDIM
-            or frames.shape[-1] != _RGB_CHANNELS
-        ):
-            msg = "decoded ViPE frames must be uint8 [T,H,W,3] RGB"
-            raise ValueError(msg)
-        frame_count = frames.shape[0]
-        if frame_count < VIPE_MIN_FRAMES:
-            msg = f"ViPE requires at least {VIPE_MIN_FRAMES} frames, got {frame_count}"
-            raise ValueError(msg)
-        if frame_count > self._max_frames:
-            msg = (
-                "ViPE requires full-clip SLAM and this adapter does not claim streaming input support: "
-                f"got {frame_count} frames, max_frames={self._max_frames}; split the source span upstream"
-            )
-            raise ValueError(msg)
-        if (
-            not isinstance(timestamps_ns, np.ndarray)
-            or timestamps_ns.dtype != np.int64
-            or timestamps_ns.ndim != 1
-            or len(timestamps_ns) != frame_count
-        ):
-            msg = f"decoded timestamps_ns must be int64 [T] aligned with {frame_count} frames"
-            raise ValueError(msg)
-        if frame_count > 1 and bool(np.any(np.diff(timestamps_ns) <= 0)):
-            msg = "decoded timestamps_ns must be strictly increasing"
-            raise ValueError(msg)
-        if not math.isfinite(fps) or fps <= 0:
-            msg = "decoded source fps must be finite and positive"
-            raise ValueError(msg)
-        source_span = normalize_span(decoded.source_span)
-        if source_span is None:
-            msg = "decoded source_span must not be empty"
-            raise ValueError(msg)
-        if not isinstance(decoded.decoder_backend, str) or not decoded.decoder_backend:
-            msg = "decoded decoder_backend must be a non-empty string"
-            raise ValueError(msg)
-        return np.ascontiguousarray(frames), np.ascontiguousarray(timestamps_ns), fps, source_span
+    ) -> tuple[
+        npt.NDArray[np.uint8],
+        npt.NDArray[np.int64],
+        npt.NDArray[np.int64],
+        tuple[float, float],
+    ]:
+        return validate_decoded_annotation_clip(
+            decoded,
+            grid=self._annotation_grid,
+            min_frames=VIPE_MIN_FRAMES,
+            max_frames=self._max_frames,
+            consumer_name="ViPE",
+        )
 
     def _infer_and_write(  # noqa: PLR0913
         self,
@@ -329,7 +301,8 @@ class ViPEStage(CuratorStage):
         rotation_degrees_clockwise: int,
         frames: npt.NDArray[np.uint8],
         timestamps_ns: npt.NDArray[np.int64],
-        fps: float,
+        source_timestamps_ns: npt.NDArray[np.int64],
+        raster: RasterTransform,
         decoder_backend: str,
     ) -> str:
         frame_count, height, width, _ = frames.shape
@@ -341,7 +314,13 @@ class ViPEStage(CuratorStage):
         valid_count = 0
         result_count = 0
 
-        results = iter(self._inference_model.infer(frames, name=str(clip.uuid), fps=fps))
+        results = iter(
+            self._inference_model.infer(
+                frames,
+                name=str(clip.uuid),
+                fps=self._annotation_grid.sample_fps,
+            )
+        )
         try:
             for result in results:
                 if result_count >= frame_count:
@@ -369,6 +348,7 @@ class ViPEStage(CuratorStage):
                         camera_k=chunk_k,
                         camera_to_world=chunk_c2w,
                         timestamps_ns=timestamps_ns[chunk_start:result_count],
+                        source_timestamps_ns=source_timestamps_ns[chunk_start:result_count],
                     )
                     chunk_start = result_count
                     chunk_depth.clear()
@@ -393,6 +373,7 @@ class ViPEStage(CuratorStage):
                 camera_k=chunk_k,
                 camera_to_world=chunk_c2w,
                 timestamps_ns=timestamps_ns[chunk_start:result_count],
+                source_timestamps_ns=source_timestamps_ns[chunk_start:result_count],
             )
 
         valid_fraction = valid_count / (frame_count * height * width)
@@ -402,7 +383,11 @@ class ViPEStage(CuratorStage):
             frame_count=frame_count,
             chunk_frames=self._chunk_frames,
             metadata={
-                "producer": {"id": "vipe", "pipeline": "dav3"},
+                "producer": {
+                    "id": "vipe",
+                    "pipeline": "dav3",
+                    "release": _PRODUCER_RELEASE,
+                },
                 "source": {
                     "path": str(source_path),
                     "span_seconds": [span[0], span[1]],
@@ -411,11 +396,13 @@ class ViPEStage(CuratorStage):
                     "decoder_backend": decoder_backend,
                 },
                 "alignment": {
-                    "source_fps": fps,
+                    "sample_fps": self._annotation_grid.sample_fps,
                     "timestamp_array": "timestamps_ns",
+                    "source_timestamp_array": "source_timestamps_ns",
                     "timestamp_unit": "nanosecond",
                     "timestamp_origin": "source_stream_start",
                 },
+                "grid": self._annotation_grid.metadata(raster),
                 "recipe": {
                     "depth_representation": "z_depth",
                     "depth_scale": "metric",
@@ -427,6 +414,7 @@ class ViPEStage(CuratorStage):
                     "min_valid_fraction_per_frame": self._min_valid_fraction,
                     "camera_pose": "camera_to_world",
                     "camera_convention": "opencv",
+                    "K_coordinate_space": "annotation_grid",
                     "input_buffering": "full_clip_bounded",
                     "max_frames": self._max_frames,
                 },
@@ -440,6 +428,11 @@ class ViPEStage(CuratorStage):
                         "shape": [frame_count, 4, 4],
                     },
                     "timestamps_ns": {"axes": "T", "dtype": "int64", "shape": [frame_count]},
+                    "source_timestamps_ns": {
+                        "axes": "T",
+                        "dtype": "int64",
+                        "shape": [frame_count],
+                    },
                 },
             },
         )
@@ -530,6 +523,7 @@ class ViPEStage(CuratorStage):
         camera_k: list[npt.NDArray[np.float32]],
         camera_to_world: list[npt.NDArray[np.float32]],
         timestamps_ns: npt.NDArray[np.int64],
+        source_timestamps_ns: npt.NDArray[np.int64],
     ) -> None:
         writer = self._require_writer()
         with writer.open_chunk(clip.uuid, frame_start, frame_stop) as chunk_path:
@@ -540,6 +534,10 @@ class ViPEStage(CuratorStage):
                 K=np.stack(camera_k),
                 camera_to_world=np.stack(camera_to_world),
                 timestamps_ns=np.ascontiguousarray(timestamps_ns, dtype=np.int64),
+                source_timestamps_ns=np.ascontiguousarray(
+                    source_timestamps_ns,
+                    dtype=np.int64,
+                ),
             )
 
     def _require_writer(self) -> TemporalWriter:
@@ -548,9 +546,71 @@ class ViPEStage(CuratorStage):
             raise RuntimeError(msg)
         return self._writer
 
-    def _reuse_completed(self, task: SplitPipeTask, clip: Clip) -> bool:
-        if self._reader is None or not self._reader.is_complete(clip.uuid):
+    def _reuse_completed(  # noqa: PLR0913
+        self,
+        task: SplitPipeTask,
+        clip: Clip | None,
+        *,
+        source_path: Path,
+        span: tuple[float, float] | None,
+        stream_index: int,
+        rotation_degrees_clockwise: int,
+    ) -> bool:
+        if self._reader is None:
             return False
+        clip_uuid = clip.uuid if clip is not None else full_source_clip_uuid(source_path, stream_index)
+        document = self._reader.read_metadata_if_complete(clip_uuid)
+        if document is None:
+            return False
+        metadata = document.get("metadata")
+        frame_count = document.get("frame_count")
+        expected_span = None if span is None else [span[0], span[1]]
+        expected_producer = {
+            "id": "vipe",
+            "pipeline": "dav3",
+            "release": _PRODUCER_RELEASE,
+        }
+        completed_span = _source_span_from_metadata(metadata.get("source")) if isinstance(metadata, Mapping) else None
+        frame_count_matches = (
+            isinstance(frame_count, int)
+            and not isinstance(frame_count, bool)
+            and completed_span is not None
+            and annotation_grid_frame_count(completed_span, self._annotation_grid) == frame_count
+        )
+        full_source_span_matches = clip is not None or (completed_span is not None and completed_span[0] == 0.0)
+        if (
+            not isinstance(metadata, Mapping)
+            or metadata.get("producer") != expected_producer
+            or not _source_metadata_matches(
+                metadata.get("source"),
+                source_path=source_path,
+                span=expected_span,
+                stream_index=stream_index,
+                rotation_degrees_clockwise=rotation_degrees_clockwise,
+            )
+            or not annotation_grid_configuration_matches(
+                metadata.get("grid"),
+                self._annotation_grid,
+            )
+            or not frame_count_matches
+            or not full_source_span_matches
+            or not _output_contract_matches(
+                metadata,
+                frame_count=frame_count,
+                grid=self._annotation_grid,
+                min_valid_fraction=self._min_valid_fraction,
+            )
+        ):
+            msg = (
+                f"completed ViPE annotation {clip_uuid} uses a different source, producer, or annotation grid, "
+                "or an incompatible output contract; use a new output_path instead of overwriting it"
+            )
+            raise ValueError(msg)
+        if clip is None:
+            assert completed_span is not None
+            clip = make_full_source_clip(source_path, completed_span, stream_index)
+            task.video.clips.append(clip)
+            task.video.num_total_clips = max(task.video.num_total_clips, 1)
         self._set_annotation_reference(task, self._reader.metadata_uri(clip.uuid))
         return True
 
@@ -561,7 +621,7 @@ class ViPEStage(CuratorStage):
             dataset_metadata["vipe_annotation"] = {
                 "format": "npz-temporal-v1",
                 "metadata_uri": metadata_uri,
-                "producer": "vipe-dav3",
+                "producer_release": _PRODUCER_RELEASE,
             }
 
 
@@ -571,291 +631,104 @@ def decode_local_vipe_clip(  # noqa: PLR0913
     *,
     stream_index: int,
     rotation_degrees_clockwise: int,
+    grid: AnnotationGrid,
     min_frames: int,
     max_frames: int,
 ) -> DecodedViPEClip:
-    """Decode a native-rate span, falling back to sequential PyAV for weak indexes."""
-    try:
-        return _decode_with_camera_sensor(
-            source_path,
-            span,
-            stream_index=stream_index,
-            rotation_degrees_clockwise=rotation_degrees_clockwise,
-            min_frames=min_frames,
-            max_frames=max_frames,
-        )
-    except _IndexedDecodeUnavailableError as sensor_error:
-        try:
-            return _decode_with_pyav(
-                source_path,
-                span,
-                stream_index=stream_index,
-                rotation_degrees_clockwise=rotation_degrees_clockwise,
-                min_frames=min_frames,
-                max_frames=max_frames,
-            )
-        except Exception as fallback_error:
-            msg = (
-                f"both CameraSensor and sequential PyAV failed to decode {source_path}: "
-                f"CameraSensor={sensor_error}; PyAV={fallback_error}"
-            )
-            raise RuntimeError(msg) from fallback_error
-
-
-def _decode_with_camera_sensor(  # noqa: PLR0913
-    source_path: Path,
-    span: tuple[float, float] | None,
-    *,
-    stream_index: int,
-    rotation_degrees_clockwise: int,
-    min_frames: int,
-    max_frames: int,
-) -> DecodedViPEClip:
-    """Use indexed CameraSensor decode when the container supports it."""
-    try:
-        sensor = CameraSensor(source_path, stream_idx=stream_index)
-    except Exception as error:
-        msg = f"CameraSensor cannot index {source_path}"
-        raise _IndexedDecodeUnavailableError(msg) from error
-    selected_timestamps, exclusive_end_ns, source_span, fps = _camera_sensor_selection(
-        sensor,
+    """Decode ViPE input on the shared, low-resolution annotation grid."""
+    return decode_annotation_clip(
+        source_path,
         span,
+        stream_index=stream_index,
+        rotation_degrees_clockwise=rotation_degrees_clockwise,
+        grid=grid,
         min_frames=min_frames,
         max_frames=max_frames,
     )
-    frames, decoded_timestamps = _sample_camera_sensor(
-        sensor,
-        selected_timestamps=selected_timestamps,
-        exclusive_end_ns=exclusive_end_ns,
-        source_path=source_path,
-    )
-    frames = _rotate_frames(frames, rotation_degrees_clockwise)
-    timestamps = np.ascontiguousarray(decoded_timestamps - sensor.start_ns, dtype=np.int64)
-    return DecodedViPEClip(
-        frames=frames,
-        timestamps_ns=timestamps,
-        fps=fps,
-        source_span=source_span,
-        decoder_backend="camera_sensor",
-    )
 
 
-def _camera_sensor_selection(
-    sensor: CameraSensor,
-    span: tuple[float, float] | None,
+def _source_metadata_matches(
+    value: object,
     *,
-    min_frames: int,
-    max_frames: int,
-) -> tuple[npt.NDArray[np.int64], int, tuple[float, float], float]:
-    """Select an exact bounded native timeline before indexed decode."""
-    fps = float(sensor.video_metadata.avg_frame_rate)
-    frame_period_ns = _nominal_frame_period_ns(fps)
-    full_exclusive_end_ns = sensor.end_ns + frame_period_ns
-    if span is None:
-        requested_start_ns = sensor.start_ns
-        requested_stop_ns = full_exclusive_end_ns
-        source_span = (0.0, (full_exclusive_end_ns - sensor.start_ns) / _NANOSECONDS_PER_SECOND)
-    else:
-        requested_start_ns = sensor.start_ns + round(span[0] * _NANOSECONDS_PER_SECOND)
-        requested_stop_ns = sensor.start_ns + round(span[1] * _NANOSECONDS_PER_SECOND)
-        source_span = span
-    start_ns = max(sensor.start_ns, requested_start_ns)
-    exclusive_end_ns = min(full_exclusive_end_ns, requested_stop_ns)
-    if exclusive_end_ns <= start_ns:
-        msg = f"clip span {span} does not intersect the source video"
-        raise ValueError(msg)
-
-    canonical_timestamps = sensor.timestamps_ns
-    frame_start = int(np.searchsorted(canonical_timestamps, start_ns, side="left"))
-    frame_stop = int(np.searchsorted(canonical_timestamps, exclusive_end_ns, side="left"))
-    selected_timestamps = np.ascontiguousarray(canonical_timestamps[frame_start:frame_stop], dtype=np.int64)
-    frame_count = len(selected_timestamps)
-    if frame_count < min_frames:
-        msg = f"ViPE requires at least {min_frames} frames, got {frame_count} in span {span}"
-        raise ValueError(msg)
-    if frame_count > max_frames:
-        msg = (
-            "ViPE requires full-clip SLAM and this adapter does not claim streaming input support: "
-            f"span {span} contains {frame_count} frames, max_frames={max_frames}; split the span upstream"
-        )
-        raise ValueError(msg)
-    return selected_timestamps, exclusive_end_ns, source_span, fps
-
-
-def _sample_camera_sensor(
-    sensor: CameraSensor,
-    *,
-    selected_timestamps: npt.NDArray[np.int64],
-    exclusive_end_ns: int,
     source_path: Path,
-) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.int64]]:
-    """Decode an already validated exact native timeline."""
-    grid_start_ns = int(selected_timestamps[0])
-    duration_ns = exclusive_end_ns - grid_start_ns
-    grid = SamplingGrid(
-        start_ns=grid_start_ns,
-        exclusive_end_ns=exclusive_end_ns,
-        timestamps_ns=selected_timestamps,
-        stride_ns=duration_ns,
-        duration_ns=duration_ns,
-    )
-    try:
-        batches = sensor.sample(SamplingSpec(grid=grid))
-        try:
-            batch = next(batches)
-        except StopIteration as error:
-            msg = "CameraSensor did not return the requested ViPE clip"
-            raise RuntimeError(msg) from error
-        try:
-            next(batches)
-        except StopIteration:
-            pass
-        else:
-            msg = "CameraSensor returned more than one batch for a single ViPE clip"
-            raise RuntimeError(msg)
-    except Exception as error:
-        msg = f"CameraSensor cannot decode {source_path}"
-        raise _IndexedDecodeUnavailableError(msg) from error
-
-    decoded_timestamps = np.ascontiguousarray(batch.sensor_timestamps_ns, dtype=np.int64)
-    if not np.array_equal(decoded_timestamps, selected_timestamps):
-        msg = "CameraSensor decoded timestamps do not match the selected native frame timeline"
-        raise _IndexedDecodeUnavailableError(msg)
-    frames = np.ascontiguousarray(batch.frames, dtype=np.uint8)
-    return frames, decoded_timestamps
-
-
-def _decode_with_pyav(  # noqa: PLR0913
-    source_path: Path,
-    span: tuple[float, float] | None,
-    *,
+    span: list[float] | None,
     stream_index: int,
     rotation_degrees_clockwise: int,
-    min_frames: int,
-    max_frames: int,
-) -> DecodedViPEClip:
-    """Sequentially decode native frames without relying on a seekable header index."""
-    with av.open(str(source_path)) as container:
-        try:
-            video_stream = container.streams.video[stream_index]
-        except IndexError as error:
-            msg = f"video stream_index={stream_index} does not exist"
-            raise ValueError(msg) from error
-        if video_stream.time_base is None:
-            msg = f"video stream_index={stream_index} has no time base"
-            raise ValueError(msg)
-        average_rate = float(video_stream.average_rate) if video_stream.average_rate is not None else None
-        frames, timestamps, last_source_timestamp_ns = _collect_pyav_frames(
-            container,
-            video_stream,
-            span=span,
-            max_frames=max_frames,
-        )
-
-    frame_count = len(frames)
-    if frame_count < min_frames:
-        msg = f"ViPE requires at least {min_frames} frames, got {frame_count} in span {span}"
-        raise ValueError(msg)
-    timestamp_array = np.asarray(timestamps, dtype=np.int64)
-    fps = _resolve_pyav_fps(average_rate, timestamp_array)
-    if span is None:
-        assert last_source_timestamp_ns is not None
-        source_span = (0.0, (last_source_timestamp_ns + _nominal_frame_period_ns(fps)) / _NANOSECONDS_PER_SECOND)
-    else:
-        source_span = span
-    try:
-        frame_array = np.ascontiguousarray(np.stack(frames), dtype=np.uint8)
-    except ValueError as error:
-        msg = "PyAV decoded frames with inconsistent spatial shapes"
-        raise ValueError(msg) from error
-    frame_array = _rotate_frames(frame_array, rotation_degrees_clockwise)
-    return DecodedViPEClip(
-        frames=frame_array,
-        timestamps_ns=np.ascontiguousarray(timestamp_array),
-        fps=fps,
-        source_span=source_span,
-        decoder_backend="pyav_sequential",
+) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        value.get("path") == str(source_path)
+        and (span is None or value.get("span_seconds") == span)
+        and value.get("stream_index") == stream_index
+        and value.get("rotation_degrees_clockwise") == rotation_degrees_clockwise
     )
 
 
-def _collect_pyav_frames(
-    container: av.container.InputContainer,
-    video_stream: av.video.stream.VideoStream,
+def _output_contract_matches(
+    metadata: Mapping[object, object],
     *,
-    span: tuple[float, float] | None,
-    max_frames: int,
-) -> tuple[list[npt.NDArray[np.uint8]], list[int], int | None]:
-    """Collect only selected RGB frames while scanning a weakly indexed source."""
-    frames: list[npt.NDArray[np.uint8]] = []
-    timestamps: list[int] = []
-    origin_ns: int | None = None
-    last_source_timestamp_ns: int | None = None
-    span_bounds_ns = (
-        None
-        if span is None
-        else (
-            round(span[0] * _NANOSECONDS_PER_SECOND),
-            round(span[1] * _NANOSECONDS_PER_SECOND),
-        )
+    frame_count: object,
+    grid: AnnotationGrid,
+    min_valid_fraction: float,
+) -> bool:
+    if isinstance(frame_count, bool) or not isinstance(frame_count, int) or frame_count <= 0:
+        return False
+    alignment = metadata.get("alignment")
+    arrays = metadata.get("arrays")
+    recipe = metadata.get("recipe")
+    if not isinstance(alignment, Mapping) or not isinstance(arrays, Mapping) or not isinstance(recipe, Mapping):
+        return False
+    return (
+        alignment.get("timestamp_array") == "timestamps_ns"
+        and alignment.get("source_timestamp_array") == "source_timestamps_ns"
+        and alignment.get("sample_fps") == grid.sample_fps
+        and alignment.get("timestamp_unit") == "nanosecond"
+        and alignment.get("timestamp_origin") == "source_stream_start"
+        and arrays.get("depth")
+        == {
+            "axes": "THW",
+            "dtype": "float16",
+            "shape": [frame_count, grid.height, grid.width],
+        }
+        and arrays.get("valid")
+        == {
+            "axes": "THW",
+            "dtype": "bool",
+            "shape": [frame_count, grid.height, grid.width],
+        }
+        and arrays.get("K") == {"dtype": "float32", "shape": [frame_count, 3, 3]}
+        and arrays.get("camera_to_world")
+        == {
+            "dtype": "float32",
+            "shape": [frame_count, 4, 4],
+        }
+        and arrays.get("timestamps_ns")
+        == {
+            "axes": "T",
+            "dtype": "int64",
+            "shape": [frame_count],
+        }
+        and arrays.get("source_timestamps_ns")
+        == {
+            "axes": "T",
+            "dtype": "int64",
+            "shape": [frame_count],
+        }
+        and recipe.get("depth_representation") == "z_depth"
+        and recipe.get("depth_scale") == "metric"
+        and recipe.get("K_coordinate_space") == "annotation_grid"
+        and recipe.get("min_valid_fraction_per_frame") == min_valid_fraction
     )
-    assert video_stream.time_base is not None
-    for frame in container.decode(video_stream):
-        if frame.pts is None:
-            continue
-        source_timestamp_ns = round(Fraction(frame.pts) * Fraction(video_stream.time_base) * _NANOSECONDS_PER_SECOND)
-        if origin_ns is None:
-            origin_ns = source_timestamp_ns
-        relative_timestamp_ns = source_timestamp_ns - origin_ns
-        last_source_timestamp_ns = relative_timestamp_ns
-        if span_bounds_ns is not None and relative_timestamp_ns < span_bounds_ns[0]:
-            continue
-        if span_bounds_ns is not None and relative_timestamp_ns >= span_bounds_ns[1]:
-            break
-        if timestamps and relative_timestamp_ns <= timestamps[-1]:
-            msg = "PyAV returned non-increasing presentation timestamps"
-            raise ValueError(msg)
-        if len(frames) >= max_frames:
-            msg = (
-                "ViPE requires full-clip SLAM and this adapter does not claim streaming input support: "
-                f"more than max_frames={max_frames} native frames were selected; split the span upstream"
-            )
-            raise ValueError(msg)
-        frames.append(np.ascontiguousarray(frame.to_ndarray(format="rgb24"), dtype=np.uint8))
-        timestamps.append(relative_timestamp_ns)
-    return frames, timestamps, last_source_timestamp_ns
 
 
-def _rotate_frames(
-    frames: npt.NDArray[np.uint8],
-    rotation_degrees_clockwise: int,
-) -> npt.NDArray[np.uint8]:
-    if not rotation_degrees_clockwise:
-        return np.ascontiguousarray(frames)
-    return np.rot90(
-        frames,
-        k=-(rotation_degrees_clockwise // 90),
-        axes=(1, 2),
-    ).copy()
-
-
-def _resolve_pyav_fps(
-    average_rate: float | None,
-    timestamps: npt.NDArray[np.int64],
-) -> float:
-    if average_rate is not None and math.isfinite(average_rate) and average_rate > 0:
-        return average_rate
-    elapsed_ns = int(timestamps[-1]) - int(timestamps[0])
-    if elapsed_ns <= 0:
-        msg = "cannot derive source fps from PyAV timestamps"
-        raise ValueError(msg)
-    return (len(timestamps) - 1) * _NANOSECONDS_PER_SECOND / elapsed_ns
-
-
-def _nominal_frame_period_ns(fps: float) -> int:
-    if not math.isfinite(fps) or fps <= 0:
-        msg = "source fps must be finite and positive"
-        raise ValueError(msg)
-    return max(1, round(_NANOSECONDS_PER_SECOND / fps))
+def _source_span_from_metadata(value: object) -> tuple[float, float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return normalize_span(value.get("span_seconds"))
+    except ValueError:
+        return None
 
 
 def _positive_int(value: int, *, field_name: str) -> int:

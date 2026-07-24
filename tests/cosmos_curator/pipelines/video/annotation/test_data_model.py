@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from cosmos_curator.pipelines.video.annotation.data_model import (
+    full_source_clip_uuid,
     make_annotation_task,
     make_full_source_clip,
     resolve_source_clip_request,
@@ -114,6 +115,7 @@ def test_source_clip_request_and_full_source_identity_are_stable(tmp_path: Path)
     assert request.stream_index == 2
     assert request.rotation_degrees_clockwise == 0
     assert first.uuid == second.uuid
+    assert first.uuid == full_source_clip_uuid(request.source, request.stream_index)
     assert first.span == (0.0, 2.0)
 
 

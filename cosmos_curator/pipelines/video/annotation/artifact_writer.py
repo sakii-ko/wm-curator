@@ -16,7 +16,7 @@
 """Read and write temporal annotation chunks without a catalog.
 
 The caller owns the annotation namespace through ``output_path`` (for example,
-``annotations/normals/normalcrafter-v1``). Each chunk is published independently,
+``annotations/normals/normalcrafter-grid-v1``). Each chunk is published independently,
 and the per-clip metadata JSON is published last as the logical completion record.
 """
 
@@ -105,14 +105,20 @@ class TemporalAnnotationReader:
 
     def is_complete(self, clip_uuid: str | UUID) -> bool:
         """Return whether a valid final metadata record exists."""
+        return self.read_metadata_if_complete(clip_uuid) is not None
+
+    def read_metadata_if_complete(
+        self,
+        clip_uuid: str | UUID,
+    ) -> dict[str, Any] | None:
+        """Read one valid completion record, or return ``None`` if absent."""
         canonical_uuid = _canonical_clip_uuid(clip_uuid)
         if not storage_utils.path_exists(
             self.metadata_uri(canonical_uuid),
             client=self._client,
         ):
-            return False
-        self._read_document(canonical_uuid)
-        return True
+            return None
+        return self._read_document(canonical_uuid).raw
 
     def read_metadata(self, clip_uuid: str | UUID) -> dict[str, Any]:
         """Read and validate the final metadata document."""
