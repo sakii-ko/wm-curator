@@ -14,13 +14,14 @@
 # limitations under the License.
 """Test vllm_qwen.py."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from cosmos_curator.core.utils.model import pixi_utils
-from cosmos_curator.pipelines.video.utils.data_model import VllmCaptionRequest, VllmConfig
+from cosmos_curator.pipelines.video.utils.data_model import VllmAsyncConfig, VllmCaptionRequest, VllmConfig
 
 if pixi_utils.is_running_in_env("default"):
     from cosmos_curator.models.vllm_interface import _VLLM_PLUGINS
@@ -44,6 +45,19 @@ if pixi_utils.is_running_in_env("default"):
 def test_qwen_35b_variant_is_registered() -> None:
     """The model registry resolves the 35B variant to its thin plugin."""
     assert _VLLM_PLUGINS["qwen3_6_35b_a3b_fp8"] is VllmQwen3635BA3BFP8
+
+
+@pytest.mark.env("default")
+def test_explicit_model_path_takes_priority(tmp_path: Path) -> None:
+    """An exact local checkpoint path bypasses copied and default model locations."""
+    explicit_path = tmp_path / "flat-checkpoint"
+    config = VllmConfig(
+        model_variant="qwen",
+        model_path=explicit_path,
+        copy_weights_to=tmp_path / "copied-weights",
+    )
+
+    assert VllmQwen.model_path(config) == explicit_path
 
 
 @pytest.mark.env("default")
@@ -225,8 +239,13 @@ def test_qwen3_existing_variant_preserves_chat_template_default() -> None:
 
 @pytest.mark.env("default")
 def test_qwen_35b_sync_engine_uses_variant_profile() -> None:
-    """The sync engine consumes the validated 35B profile."""
-    config = VllmConfig(model_variant="qwen3_6_35b_a3b_fp8")
+    """The sync engine consumes the validated 35B profile and explicit prefetch settings."""
+    config = VllmConfig(
+        model_variant="qwen3_6_35b_a3b_fp8",
+        safetensors_load_strategy="prefetch",
+        safetensors_prefetch_num_threads=6,
+        safetensors_prefetch_block_size=8 * 1024 * 1024,
+    )
     with (
         patch.object(VllmQwen3635BA3BFP8, "model_path", return_value="/models/qwen-35b"),
         patch("cosmos_curator.models.vllm_qwen.LLM") as mock_llm,
@@ -239,6 +258,30 @@ def test_qwen_35b_sync_engine_uses_variant_profile() -> None:
     assert kwargs["max_num_seqs"] == 32
     assert kwargs["gpu_memory_utilization"] == 0.6
     assert kwargs["gdn_prefill_backend"] == "triton"
+    assert kwargs["safetensors_load_strategy"] == "prefetch"
+    assert kwargs["safetensors_prefetch_num_threads"] == 6
+    assert kwargs["safetensors_prefetch_block_size"] == 8 * 1024 * 1024
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_async_engine_uses_prefetch_settings() -> None:
+    """The async Qwen3.6 constructor forwards the same safetensors loader knobs."""
+    config = VllmAsyncConfig(
+        model_variant="qwen3_6_35b_a3b_fp8",
+        safetensors_load_strategy="prefetch",
+        safetensors_prefetch_num_threads=12,
+        safetensors_prefetch_block_size=4 * 1024 * 1024,
+    )
+    with (
+        patch.object(VllmQwen3635BA3BFP8, "model_path", return_value="/models/qwen-35b"),
+        patch("cosmos_curator.models.vllm_qwen.AsyncEngineArgs") as mock_engine_args,
+    ):
+        VllmQwen3635BA3BFP8.model_async(config)
+
+    kwargs = mock_engine_args.call_args.kwargs
+    assert kwargs["safetensors_load_strategy"] == "prefetch"
+    assert kwargs["safetensors_prefetch_num_threads"] == 12
+    assert kwargs["safetensors_prefetch_block_size"] == 4 * 1024 * 1024
 
 
 @pytest.mark.env("default")

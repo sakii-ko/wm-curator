@@ -231,6 +231,17 @@ def _qwen3_engine_kwargs(model_variant: str) -> dict[str, Any]:
     return kwargs
 
 
+def _safetensors_load_kwargs(config: VllmConfig | VllmAsyncConfig) -> dict[str, Any]:
+    """Return explicit safetensors loader settings without overriding vLLM's default strategy."""
+    if config.safetensors_load_strategy is None:
+        return {}
+    return {
+        "safetensors_load_strategy": config.safetensors_load_strategy,
+        "safetensors_prefetch_num_threads": config.safetensors_prefetch_num_threads,
+        "safetensors_prefetch_block_size": config.safetensors_prefetch_block_size,
+    }
+
+
 def _qwen_enable_thinking(config: VllmConfig) -> bool | None:
     """Resolve an explicit thinking override before the per-variant default."""
     if config.enable_thinking is not None:
@@ -276,6 +287,7 @@ class VllmQwen(VllmPlugin):
             trust_remote_code=TRUST_REMOTE_CODE,
             compilation_config={"cudagraph_mode": "piecewise"},
             performance_mode=config.performance_mode,
+            **_safetensors_load_kwargs(config),
         )
 
     @classmethod
@@ -322,6 +334,7 @@ class VllmQwen(VllmPlugin):
             compilation_config=CompilationConfig(cudagraph_mode="piecewise"),  # type: ignore[arg-type]
             enable_prefix_caching=True,
             use_tqdm_on_load=False,
+            **_safetensors_load_kwargs(config),
         )
 
     @classmethod
@@ -450,6 +463,7 @@ class VllmQwen3VL(VllmQwen):
         """
         limit_mm = LIMIT_MM_PER_PROMPT_IMAGE if config.use_image_input else LIMIT_MM_PER_PROMPT_VIDEO
         engine_kwargs = _qwen3_engine_kwargs(config.model_variant)
+        engine_kwargs.update(_safetensors_load_kwargs(config))
         return LLM(
             model=str(cls.model_path(config)),
             limit_mm_per_prompt=limit_mm,
@@ -469,6 +483,7 @@ class VllmQwen3VL(VllmQwen):
         Mirrors :meth:`model` - reads from module-scope constants.
         """
         extra_kwargs = _qwen3_engine_kwargs(config.model_variant)
+        extra_kwargs.update(_safetensors_load_kwargs(config))
         if config.gpu_memory_utilization is not None:
             extra_kwargs["gpu_memory_utilization"] = config.gpu_memory_utilization
         if config.max_num_seqs > 0:

@@ -36,6 +36,23 @@ _PROMPTS = {
         road signs, traffic signals, and any aggressive driving behavior of vehicles.
         Also pay attention to interesting landmarks and describe them in detail.
     """,
+    "world-model": """
+        Faithfully caption the provided video clip for video-generation training.
+        Output only one self-contained English paragraph. Describe the environment
+        and its spatial layout; terrain, architecture, vegetation, materials, and
+        surfaces; visible subjects and objects with stable distinguishing appearance;
+        their positions, relationships, physical states, actions, interactions, and
+        genuine changes; and relevant lighting, weather, and clearly legible in-world
+        text. Describe the world itself rather than cinematography: do not narrate
+        camera movement, framing, shot type, zoom, or viewpoint changes, and do not
+        mistake apparent image motion caused by a changing viewpoint for subject
+        motion. Use chronological order for genuine events; if little changes, give
+        an integrated, information-dense description instead. Stay strictly grounded
+        in the frames. Do not invent identities, counts, intentions, emotions, causes,
+        off-screen events, titles, engines, or unsupported transitions. Use generic
+        wording or omit uncertain details. Avoid headings, bullets, JSON, preambles,
+        aesthetic praise, promotional language, and addressing the viewer.
+    """,
     "image": """
         Describe the image in detail.
     """,

@@ -1157,6 +1157,7 @@ class VllmConfig:
 
     Args:
         model_variant: Name of the model variant to use.
+        model_path: Optional explicit local model checkpoint directory.
         prompt_variant: Type of prompt to use.
         prompt_text: Custom prompt text if provided.
         system_prompt: Optional system message for chat-template based models.
@@ -1174,6 +1175,9 @@ class VllmConfig:
             If set, model weights will be copied from the default cache location to this
             directory before the model is loaded. This is useful for copying weights to
             faster storage (e.g., local SSD) on compute nodes.
+        safetensors_load_strategy: Optional vLLM safetensors loading strategy.
+        safetensors_prefetch_num_threads: Number of threads used by vLLM's prefetch loader.
+        safetensors_prefetch_block_size: Read block size in bytes used by vLLM's prefetch loader.
         sampling_config: Configuration for sampling parameters.
         performance_mode: vLLM performance mode. "throughput" favors aggregate tokens/sec
             at high concurrency; "interactivity" favors low per-request latency; "balanced"
@@ -1188,6 +1192,7 @@ class VllmConfig:
     """
 
     model_variant: str
+    model_path: pathlib.Path | None = None
     use_image_input: bool = False
     prompt_variant: str = "default"
     prompt_text: str | None = None
@@ -1203,6 +1208,15 @@ class VllmConfig:
     stage2_prompt_text: str | None = None
     max_retries: int = 3
     copy_weights_to: pathlib.Path | None = None
+    safetensors_load_strategy: Literal["lazy", "eager", "prefetch"] | None = None
+    safetensors_prefetch_num_threads: int = attrs.field(
+        default=16,
+        validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
+    )
+    safetensors_prefetch_block_size: int = attrs.field(
+        default=16 * 1024 * 1024,
+        validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
+    )
     sampling_config: VllmSamplingConfig = attrs.Factory(VllmSamplingConfig)
     performance_mode: Literal["balanced", "interactivity", "throughput"] | None = "throughput"
     debug_save_frames: bool = False
@@ -1266,6 +1280,7 @@ class VllmAsyncConfig:
     """
 
     model_variant: str
+    model_path: pathlib.Path | None = None
     num_gpus: int = attrs.field(
         default=1,
         validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
@@ -1276,6 +1291,15 @@ class VllmAsyncConfig:
     )
     fp8: bool = False
     disable_mmcache: bool = False
+    safetensors_load_strategy: Literal["lazy", "eager", "prefetch"] | None = None
+    safetensors_prefetch_num_threads: int = attrs.field(
+        default=16,
+        validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
+    )
+    safetensors_prefetch_block_size: int = attrs.field(
+        default=16 * 1024 * 1024,
+        validator=[attrs.validators.instance_of(int), attrs.validators.ge(1)],
+    )
     enforce_eager: bool = False
     disable_log_stats: bool = True
     enable_log_requests: bool = False
@@ -1338,10 +1362,14 @@ class VllmAsyncConfig:
         """Translate to ``VllmConfig`` for plugin methods that require it."""
         return VllmConfig(
             model_variant=self.model_variant,
+            model_path=self.model_path,
             use_image_input=False,
             copy_weights_to=None,
             fp8=self.fp8,
             disable_mmcache=self.disable_mmcache,
+            safetensors_load_strategy=self.safetensors_load_strategy,
+            safetensors_prefetch_num_threads=self.safetensors_prefetch_num_threads,
+            safetensors_prefetch_block_size=self.safetensors_prefetch_block_size,
             preprocess_mode=self.preprocess_mode,
             max_retries=self.max_retries,
         )

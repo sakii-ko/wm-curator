@@ -16,6 +16,7 @@
 """CLI argument utilities for vLLM async captioning."""
 
 import argparse
+import pathlib
 from typing import Any
 
 import attrs
@@ -54,6 +55,30 @@ class _VllmArgSpec:
 
 
 _VLLM_ARG_SPECS: tuple[_VllmArgSpec, ...] = (
+    _VllmArgSpec(
+        field="model_path",
+        arg_type=pathlib.Path,
+        help="Explicit local model checkpoint directory. Unset = use the configured model cache.",
+    ),
+    _VllmArgSpec(
+        field="safetensors_load_strategy",
+        arg_type=str,
+        choices=("lazy", "eager", "prefetch"),
+        help=(
+            "vLLM safetensors loading strategy. 'prefetch' overlaps reads on shared storage; "
+            "unset uses the vLLM default."
+        ),
+    ),
+    _VllmArgSpec(
+        field="safetensors_prefetch_num_threads",
+        arg_type=int,
+        help="Number of reader threads for vLLM's safetensors prefetch loader. Default: 16.",
+    ),
+    _VllmArgSpec(
+        field="safetensors_prefetch_block_size",
+        arg_type=int,
+        help="Read block size in bytes for vLLM's safetensors prefetch loader. Default: 16777216.",
+    ),
     _VllmArgSpec(
         field="num_gpus",
         # vLLM's ``tensor_parallel_size`` is integer-only; mirror sync's

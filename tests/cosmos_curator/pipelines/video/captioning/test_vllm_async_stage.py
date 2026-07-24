@@ -19,6 +19,7 @@ import asyncio
 import gc
 import uuid as uuid_lib
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -81,6 +82,9 @@ class TestVllmAsyncConfigTypedDefaults:
         assert cfg.kv_cache_dtype == "auto"
         assert cfg.fp8 is False
         assert cfg.disable_mmcache is False
+        assert cfg.safetensors_load_strategy is None
+        assert cfg.safetensors_prefetch_num_threads == 16
+        assert cfg.safetensors_prefetch_block_size == 16 * 1024 * 1024
 
     def test_num_gpus_below_one_rejected(self) -> None:
         """``num_gpus`` must be ``>= 1``; integer ``0`` is rejected.
@@ -118,6 +122,15 @@ class TestVllmAsyncConfigTypedDefaults:
         cfg = VllmAsyncConfig(model_variant="qwen", num_gpus=2, data_parallel_size=4)
         assert cfg.total_gpus == 8
         assert isinstance(cfg.total_gpus, int)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["safetensors_prefetch_num_threads", "safetensors_prefetch_block_size"],
+    )
+    def test_non_positive_safetensors_prefetch_setting_rejected(self, field: str) -> None:
+        """Prefetch thread count and read block size must both be positive."""
+        with pytest.raises(ValueError, match=field):
+            VllmAsyncConfig(model_variant="qwen", **{field: 0})  # type: ignore[arg-type]
 
 
 class TestVllmAsyncConfigExtraEnvVarsValidation:
@@ -157,15 +170,28 @@ class TestVllmAsyncConfigToVllmConfig:
 
     def test_minimal_translation(self) -> None:
         """Adapter forwards model_variant + user knobs; pins async-only invariants."""
-        async_cfg = VllmAsyncConfig(model_variant="qwen", fp8=True, disable_mmcache=True)
+        model_path = Path("/models/qwen")
+        async_cfg = VllmAsyncConfig(
+            model_variant="qwen",
+            model_path=model_path,
+            fp8=True,
+            disable_mmcache=True,
+            safetensors_load_strategy="prefetch",
+            safetensors_prefetch_num_threads=8,
+            safetensors_prefetch_block_size=4 * 1024 * 1024,
+        )
         sync_cfg = async_cfg.to_vllm_config()
 
         assert isinstance(sync_cfg, VllmConfig)
         assert sync_cfg.model_variant == "qwen"
+        assert sync_cfg.model_path == model_path
         assert sync_cfg.use_image_input is False  # async is video-only
         assert sync_cfg.copy_weights_to is None  # async never uses sync's SSD-copy fast path
         assert sync_cfg.fp8 is True
         assert sync_cfg.disable_mmcache is True
+        assert sync_cfg.safetensors_load_strategy == "prefetch"
+        assert sync_cfg.safetensors_prefetch_num_threads == 8
+        assert sync_cfg.safetensors_prefetch_block_size == 4 * 1024 * 1024
         assert sync_cfg.video_max_pixels_per_frame is None
 
     def test_defaults_propagate(self) -> None:

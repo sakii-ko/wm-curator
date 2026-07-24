@@ -70,13 +70,17 @@ class VllmPlugin(ABC):
         """Return the path to the model.
 
         Args:
-            config: VllmConfig. If config.copy_weights_to is set and the path exists,
-                uses the custom path. Otherwise falls back to the default cache path.
+            config: VllmConfig. If config.model_path is set, uses that exact path.
+                Otherwise, if config.copy_weights_to is set and the copied path exists,
+                uses the copied path before falling back to the default cache path.
 
         Returns:
             Path to the model weights directory.
 
         """
+        if config.model_path is not None:
+            return config.model_path
+
         model_id = cls.model_id()
 
         # Try custom path if configured and exists

@@ -772,6 +772,7 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
 
         vllm_config = VllmConfig(
             model_variant=args.captioning_algorithm,
+            model_path=args.vllm_model_path,
             prompt_variant=args.captioning_prompt_variant,
             prompt_text=args.captioning_prompt_text,
             system_prompt=args.captioning_system_prompt_text,
@@ -780,6 +781,9 @@ def _assemble_stages(  # noqa: C901, PLR0912, PLR0915
             num_cpus_for_prepare=args.vllm_prepare_num_cpus_per_worker,
             max_retries=args.vllm_max_retries,
             copy_weights_to=pathlib.Path(args.copy_weights_to) if args.copy_weights_to else None,
+            safetensors_load_strategy=args.vllm_safetensors_load_strategy,
+            safetensors_prefetch_num_threads=args.vllm_safetensors_prefetch_num_threads,
+            safetensors_prefetch_block_size=args.vllm_safetensors_prefetch_block_size,
             sampling_config=sampling_config,
             performance_mode=args.vllm_performance_mode,
         )
@@ -2010,6 +2014,7 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
             "default",
             "av",
             "av-surveillance",
+            "world-model",
         ],
         help="Prompt variant for captioning algorithm.",
     )
@@ -2148,6 +2153,34 @@ def _setup_parser(parser: argparse.ArgumentParser) -> None:  # noqa: PLR0915
             "Deprecated; use --vllm-preprocess-mode model instead. "
             "This flag is accepted only to report a migration error."
         ),
+    )
+    parser.add_argument(
+        "--vllm-model-path",
+        type=pathlib.Path,
+        default=None,
+        help="Explicit local model checkpoint directory for synchronous vLLM captioning.",
+    )
+    parser.add_argument(
+        "--vllm-safetensors-load-strategy",
+        type=str,
+        default=None,
+        choices=["lazy", "eager", "prefetch"],
+        help=(
+            "vLLM safetensors loading strategy. 'prefetch' overlaps reads on shared storage; "
+            "unset uses the vLLM default."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-safetensors-prefetch-num-threads",
+        type=int,
+        default=16,
+        help="Number of reader threads for vLLM's safetensors prefetch loader.",
+    )
+    parser.add_argument(
+        "--vllm-safetensors-prefetch-block-size",
+        type=int,
+        default=16 * 1024 * 1024,
+        help="Read block size in bytes for vLLM's safetensors prefetch loader.",
     )
     parser.add_argument(
         "--vllm-preprocess-mode",

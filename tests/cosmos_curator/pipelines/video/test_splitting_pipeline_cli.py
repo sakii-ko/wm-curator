@@ -23,10 +23,11 @@ import pytest
 from cosmos_curator.core.interfaces.stage_interface import CuratorStage, CuratorStageSpec
 from cosmos_curator.pipelines.common.model_constraints import PreprocessMode
 from cosmos_curator.pipelines.video.captioning.captioning_builders import CaptioningConfig, VllmAsyncCaptionConfig
+from cosmos_curator.pipelines.video.captioning.vllm_async_config import build_vllm_async_config
 from cosmos_curator.pipelines.video.clipping.clip_extraction_stages import ClipChunkingStage, ClipTranscodingStage
 from cosmos_curator.pipelines.video.read_write.metadata_writer_stage import ClipWriterStage
 from cosmos_curator.pipelines.video.splitting_pipeline import _assemble_stages, _setup_parser
-from cosmos_curator.pipelines.video.utils.data_model import VllmConfig
+from cosmos_curator.pipelines.video.utils.data_model import VllmConfig, VllmSamplingConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _SPLIT_INVOKE_TEMPLATES = (
@@ -90,6 +91,13 @@ def test_qwen_chat_template_controls_default_to_unset() -> None:
     assert args.qwen_enable_thinking is None
 
 
+def test_world_model_caption_prompt_is_available() -> None:
+    """The built-in training-data prompt is selectable without inline CLI text."""
+    args = _caption_args(["--captioning-prompt-variant", "world-model"])
+
+    assert args.captioning_prompt_variant == "world-model"
+
+
 def test_qwen_chat_template_controls_reach_sync_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """System and thinking controls are carried to the sync Qwen plugin config."""
     captured = _capture_captioning_config(monkeypatch)
@@ -109,6 +117,42 @@ def test_qwen_chat_template_controls_reach_sync_config(monkeypatch: pytest.Monke
     assert isinstance(backend, VllmConfig)
     assert backend.system_prompt == "Write a factual caption."
     assert backend.enable_thinking is True
+
+
+def test_explicit_model_path_reaches_sync_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sync CLI forwards an exact local checkpoint directory."""
+    captured = _capture_captioning_config(monkeypatch)
+    model_path = Path.cwd() / "models" / "qwen"
+    args = _caption_args(["--vllm-model-path", model_path.as_posix()])
+
+    _assemble_stages(args)
+
+    backend = captured["config"].backend
+    assert isinstance(backend, VllmConfig)
+    assert backend.model_path == model_path
+
+
+def test_safetensors_prefetch_reaches_sync_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sync CLI forwards the measured shared-storage loader settings."""
+    captured = _capture_captioning_config(monkeypatch)
+    args = _caption_args(
+        [
+            "--vllm-safetensors-load-strategy",
+            "prefetch",
+            "--vllm-safetensors-prefetch-num-threads",
+            "12",
+            "--vllm-safetensors-prefetch-block-size",
+            "8388608",
+        ]
+    )
+
+    _assemble_stages(args)
+
+    backend = captured["config"].backend
+    assert isinstance(backend, VllmConfig)
+    assert backend.safetensors_load_strategy == "prefetch"
+    assert backend.safetensors_prefetch_num_threads == 12
+    assert backend.safetensors_prefetch_block_size == 8 * 1024 * 1024
 
 
 def test_qwen_chat_template_controls_reach_async_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,6 +176,68 @@ def test_qwen_chat_template_controls_reach_async_config(monkeypatch: pytest.Monk
     assert isinstance(backend, VllmAsyncCaptionConfig)
     assert backend.system_prompt == "Write a factual caption."
     assert backend.enable_thinking is False
+
+
+def test_explicit_model_path_reaches_async_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The declarative async CLI forwards a pathlib checkpoint directory."""
+    captured = _capture_captioning_config(monkeypatch)
+    model_path = Path.cwd() / "models" / "qwen-async"
+    args = _caption_args(
+        [
+            "--captioning-algorithm",
+            "vllm_async",
+            "--vllm-async-model-path",
+            model_path.as_posix(),
+        ]
+    )
+
+    _assemble_stages(args)
+
+    backend = captured["config"].backend
+    assert isinstance(backend, VllmAsyncCaptionConfig)
+    assert backend.serve_config is not None
+    assert backend.serve_config.model_path == model_path
+
+
+def test_safetensors_prefetch_reaches_async_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The declarative async CLI forwards the same loader settings."""
+    captured = _capture_captioning_config(monkeypatch)
+    args = _caption_args(
+        [
+            "--captioning-algorithm",
+            "vllm_async",
+            "--vllm-async-safetensors-load-strategy",
+            "prefetch",
+            "--vllm-async-safetensors-prefetch-num-threads",
+            "10",
+            "--vllm-async-safetensors-prefetch-block-size",
+            "4194304",
+        ]
+    )
+
+    _assemble_stages(args)
+
+    backend = captured["config"].backend
+    assert isinstance(backend, VllmAsyncCaptionConfig)
+    assert backend.serve_config is not None
+    assert backend.serve_config.safetensors_load_strategy == "prefetch"
+    assert backend.serve_config.safetensors_prefetch_num_threads == 10
+    assert backend.serve_config.safetensors_prefetch_block_size == 4 * 1024 * 1024
+
+
+def test_explicit_model_path_uses_event_caption_prefix() -> None:
+    """The same async field spec generates and builds the per-event prefixed flag."""
+    model_path = Path.cwd() / "models" / "event-qwen"
+    args = _parser().parse_args(["--event-caption-vllm-async-model-path", model_path.as_posix()])
+
+    config = build_vllm_async_config(
+        args,
+        sampling_config=VllmSamplingConfig(),
+        prefix="event-caption-",
+    )
+
+    assert config is not None
+    assert config.model_path == model_path
 
 
 def test_no_caption_quality_flags_disables_flags() -> None:
