@@ -300,6 +300,13 @@ The prefetch strategy is opt-in because it is a storage policy, not a model
 requirement. The defaults of 16 reader threads and 16 MiB blocks match the
 measured CEPH deployment; omit the strategy on local SSD.
 
+vLLM 0.21 performs a broad DeepGEMM kernel warmup on first startup. For
+short-lived workers, prefix the launch command with
+`VLLM_DEEP_GEMM_WARMUP=skip`; this moves compilation for actually used shapes
+to the first request instead of compiling every candidate shape up front. Keep
+vLLM's default for long-lived throughput workers when predictable first-request
+latency matters more than startup time.
+
 Each source-backed caption preparation task decodes all of its windows in one
 pass and scatters the frames to those windows. The current source-backed decoder
 accepts a shared local `Path`, not a remote URI. Captions are stored in

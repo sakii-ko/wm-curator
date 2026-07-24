@@ -514,6 +514,57 @@ def test_qwen3vl_decode_returns_empty_on_truncated_reasoning() -> None:
 
 
 @pytest.mark.env("default")
+def test_qwen_35b_decode_keeps_length_truncated_answer_when_thinking_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closing-thinking token in the prompt means generated text is already the answer."""
+    start_think_token_id = 7
+    end_think_token_id = 11
+    monkeypatch.setattr(VllmQwen3635BA3BFP8, "_start_think_token_id", start_think_token_id)
+    monkeypatch.setattr(VllmQwen3635BA3BFP8, "_end_think_token_id", end_think_token_id)
+    raw_output = MagicMock()
+    raw_output.prompt_token_ids = [1, 2, start_think_token_id, 3, end_think_token_id, 3]
+    raw_output.outputs[0].text = "The video shows a road crossing a snowy mountain valley."
+    raw_output.outputs[0].finish_reason = "length"
+
+    assert VllmQwen3635BA3BFP8.decode(raw_output) == "The video shows a road crossing a snowy mountain valley."
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_decode_does_not_confuse_user_closing_tag_with_disabled_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The template's later opening token wins over a closing token in user text."""
+    start_think_token_id = 7
+    end_think_token_id = 11
+    monkeypatch.setattr(VllmQwen3635BA3BFP8, "_start_think_token_id", start_think_token_id)
+    monkeypatch.setattr(VllmQwen3635BA3BFP8, "_end_think_token_id", end_think_token_id)
+    raw_output = MagicMock()
+    raw_output.prompt_token_ids = [1, end_think_token_id, 2, start_think_token_id, 3]
+    raw_output.outputs[0].text = "I should first reason about the scene."
+    raw_output.outputs[0].finish_reason = "length"
+
+    assert VllmQwen3635BA3BFP8.decode(raw_output) == ""
+
+
+@pytest.mark.env("default")
+def test_qwen_35b_decode_rejects_reopened_truncated_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed if a model reopens thinking despite the disabled-thinking prompt."""
+    start_think_token_id = 7
+    end_think_token_id = 11
+    monkeypatch.setattr(VllmQwen3635BA3BFP8, "_start_think_token_id", start_think_token_id)
+    monkeypatch.setattr(VllmQwen3635BA3BFP8, "_end_think_token_id", end_think_token_id)
+    raw_output = MagicMock()
+    raw_output.prompt_token_ids = [1, start_think_token_id, 3, end_think_token_id, 3]
+    raw_output.outputs[0].text = "<think>I should reconsider the scene."
+    raw_output.outputs[0].finish_reason = "length"
+
+    assert VllmQwen3635BA3BFP8.decode(raw_output) == ""
+
+
+@pytest.mark.env("default")
 def test_qwen3vl_decode_passes_through_on_clean_finish_without_tags() -> None:
     """Non-truncated output without ``</think>`` is passed through unchanged.
 

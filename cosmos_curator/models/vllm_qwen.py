@@ -17,7 +17,7 @@
 import re
 import secrets
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 import torch
 from transformers import AutoProcessor
@@ -450,6 +450,31 @@ class VllmQwen7B(VllmQwen):
 class VllmQwen3VL(VllmQwen):
     """Qwen3-VL vLLM model variant plugin base class."""
 
+    _start_think_token_id: ClassVar[int | None] = None
+    _end_think_token_id: ClassVar[int | None] = None
+
+    @classmethod
+    def processor(cls, config: VllmConfig) -> AutoProcessor:
+        """Load the processor and remember its atomic thinking tokens."""
+        processor = super().processor(config)
+        tokenizer = getattr(processor, "tokenizer", None)
+        encode_token = getattr(tokenizer, "encode", None)
+
+        def single_token_id(token: str) -> int | None:
+            token_ids = encode_token(token, add_special_tokens=False) if callable(encode_token) else None
+            if (
+                isinstance(token_ids, list)
+                and len(token_ids) == 1
+                and isinstance(token_ids[0], int)
+                and token_ids[0] >= 0
+            ):
+                return token_ids[0]
+            return None
+
+        cls._start_think_token_id = single_token_id("<think>")
+        cls._end_think_token_id = single_token_id("</think>")
+        return processor
+
     @classmethod
     def model(cls, config: VllmConfig) -> LLM:
         """Instantiate the vLLM model.
@@ -564,8 +589,8 @@ class VllmQwen3VL(VllmQwen):
             )
         return inputs
 
-    @staticmethod
-    def decode(vllm_output: RequestOutput) -> str:
+    @classmethod
+    def decode(cls, vllm_output: RequestOutput) -> str:
         """Decode vLLM output, stripping any leading Qwen3 reasoning block.
 
         Qwen3 reasoning models emit ``<think>...</think>`` before their answer by
@@ -573,12 +598,31 @@ class VllmQwen3VL(VllmQwen):
         answer payload only. If generation hit ``max_tokens`` before ``</think>``
         was emitted, the entire output is reasoning-only with no answer; return
         empty so the caption pipeline marks the window as failed rather than
-        persist reasoning text as caption (matches vLLM's qwen3_reasoning_parser
-        behavior).
+        persist reasoning text as caption. When thinking is disabled, however,
+        the closing token is already in the prompt and a length-truncated output
+        is a legitimate partial answer. Detect that prompt state before applying
+        the reasoning-only guard.
         """
         output = vllm_output.outputs[0]
         text = str(output.text)
-        if output.finish_reason == "length" and "</think>" not in text:
+        prompt_token_ids = vllm_output.prompt_token_ids or []
+        last_start = max(
+            (index for index, token_id in enumerate(prompt_token_ids) if token_id == cls._start_think_token_id),
+            default=-1,
+        )
+        last_end = max(
+            (index for index, token_id in enumerate(prompt_token_ids) if token_id == cls._end_think_token_id),
+            default=-1,
+        )
+        prompt_closed_thinking = (
+            cls._start_think_token_id is not None and cls._end_think_token_id is not None and last_end > last_start
+        )
+        generated_reopened_thinking = text.lstrip().startswith("<think>")
+        if (
+            output.finish_reason == "length"
+            and "</think>" not in text
+            and (generated_reopened_thinking or not prompt_closed_thinking)
+        ):
             return ""
         return _strip_qwen3_reasoning(text)
 
