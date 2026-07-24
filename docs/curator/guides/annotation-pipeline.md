@@ -132,9 +132,9 @@ annotation_root = Path("/shared/datasets/annotations")
 
 vipe_model = ViPEModel(
     ViPEModelConfig(
-        slam_model_path=Path("/shared/models/vipe/slam.pt"),
-        post_model_path=Path("/shared/models/vipe/post.pt"),
-        torch_home=Path("/shared/models/torch-cache"),
+        slam_model_path=Path("/shared/models/DA3NESTED-GIANT-LARGE-1.1"),
+        post_model_path=Path("/shared/models/DA3-GIANT-1.1"),
+        torch_home=Path("/shared/models/vipe/torch_home"),
     )
 )
 normal_model = NormalCrafterModel(
@@ -171,6 +171,26 @@ actors start. It can also be staged ahead of time:
 pixi run --as-is model-download --models normalcrafter
 ```
 
+For the existing shared-storage deployment, the already populated paths are:
+
+```python
+vipe_model = ViPEModel(
+    ViPEModelConfig(
+        slam_model_path=Path("/root/nas/bigdata1/huggingface/DA3NESTED-GIANT-LARGE-1.1"),
+        post_model_path=Path("/root/nas/bigdata1/huggingface/DA3-GIANT-1.1"),
+        torch_home=Path("/root/nas/bigdata1/cjw/checkpoints/ViPE/torch_home"),
+    )
+)
+normal_model = NormalCrafterModel(
+    checkpoint_path=Path("/root/nas/bigdata1/huggingface/NormalCrafter"),
+)
+```
+
+An 80 GiB H100 can run two measured ViPE workers by setting
+`ViPEStage(..., gpus_per_worker=0.5)` and
+`CuratorStageSpec(..., num_workers_per_node=2)`. Keep the default one GPU per
+worker on a 24 GiB 4090.
+
 The input videos must currently be local `Path` objects visible at the same
 path on every geometry worker. The annotation output may be local, S3, or
 Azure. Both stages buffer one complete clip before inference. ViPE accepts at
@@ -180,12 +200,19 @@ limit. An out-of-range clip fails rather than being truncated, so split long
 videos upstream. Override the bounds with `ViPEStage(..., max_frames=...)` and
 `NormalCrafterModel(..., max_frames=...)` when appropriate.
 
+These limits currently bound only frame count, not `height * width`. Native 4K
+clips can still require tens of GiB when buffered as a complete clip. Use short
+source spans for now; a shared decode-time annotation grid is intentionally
+left as a separate change because it must also record the exact source-to-grid
+raster transform.
+
 Each stage writes retry-safe NPZ chunks below `chunks/v1/<clip_uuid>/` and publishes
 `metas/v1/<clip_uuid>.json` last as the completion record. ViPE chunks contain
 `depth`, `valid`, `K`, `camera_to_world`, and `timestamps_ns`; NormalCrafter
 chunks contain `normal`, `valid`, and `timestamps_ns`. The two estimators use
 different frame schedules, so consumers should align them by
-`timestamps_ns`, not by array index.
+`timestamps_ns`, not by array index. Their raster sizes may also differ; do not
+combine pixels without an explicit spatial transform.
 
 These are tensor sidecars, not encoded depth or normal MP4 files. The geometry
 roots do not write another `summary.json` or chunk manifest. The retained
@@ -200,9 +227,25 @@ annotations/
   normalcrafter/{chunks/v1/<clip_uuid>/..., metas/v1/<clip_uuid>.json}
 ```
 
-On retry, existing chunk paths are atomically overwritten and the metadata
-completion record is republished after inference; interrupted inference is
-rerun rather than resumed from a partial chunk.
+On retry, a valid metadata completion record skips decode and inference.
+Residual chunks without metadata are not considered complete; that clip is
+rerun from the beginning and the same paths are atomically overwritten.
+
+Training code can stream completed tensors one chunk at a time:
+
+```python
+from cosmos_curator.pipelines.video.annotation.artifact_writer import TemporalAnnotationReader
+
+reader = TemporalAnnotationReader(annotation_root / "vipe-dav3")
+if reader.is_complete(clip_uuid):
+    for chunk in reader.iter_chunks(clip_uuid):
+        depth = chunk.arrays["depth"]
+        camera_to_world = chunk.arrays["camera_to_world"]
+```
+
+The reader validates the metadata schema plus chunk dtypes, shapes, and
+timestamps. It derives chunk paths from `frame_count` and `chunk_frames`; it
+does not create a manifest, checksum, or catalog.
 
 The stages decode independently on purpose. Passing decoded frame tensors
 between Ray stages would retain large buffers in the object store and would
@@ -218,6 +261,10 @@ by default. The model is opt-in because of its size:
 pixi run --as-is model-download --models qwen3_6_35b_a3b_fp8
 ```
 
+An existing flat checkpoint directory can be used directly with
+`--vllm-model-path`; it does not need to be copied or linked into the Cosmos
+model-cache layout.
+
 For local shared input, captioning can decode source spans without
 materializing transcoded clips:
 
@@ -232,9 +279,26 @@ cosmos-curator local launch \
     --splitting-algorithm transnetv2 \
     --transcode-encoder none \
     --captioning-algorithm qwen3_6_35b_a3b_fp8 \
+    --vllm-model-path /root/nas/bigdata1/huggingface/Qwen3.6-35B-A3B-FP8 \
+    --vllm-safetensors-load-strategy prefetch \
+    --captioning-prompt-variant world-model \
+    --captioning-sampling-fps 4 \
+    --captioning-window-size 96 \
+    --captioning-remainder-threshold 2 \
+    --captioning-max-output-tokens 768 \
+    --qwen-batch-size 4 \
+    --vllm-video-max-pixels-per-frame 262144 \
+    --vllm-sampling-temperature 0.1 \
+    --vllm-sampling-top-p 1.0 \
+    --vllm-sampling-repetition-penalty 1.0 \
+    --vllm-sampling-min-tokens 0 \
     --no-generate-embeddings \
     --no-upload-clips
 ```
+
+The prefetch strategy is opt-in because it is a storage policy, not a model
+requirement. The defaults of 16 reader threads and 16 MiB blocks match the
+measured CEPH deployment; omit the strategy on local SSD.
 
 Each source-backed caption preparation task decodes all of its windows in one
 pass and scatters the frames to those windows. The current source-backed decoder
